@@ -20,7 +20,7 @@ import {
 import { readTextIfExists, relPosix, walkFiles } from '../core/fsx.js';
 import { gotoStep, loadRuntimeState, sendEvent } from '../core/machine.js';
 import { addStep, readStepTemplate, removeStep, updateStep, type StepPlacement, type TransitionInput } from '../core/steps.js';
-import { NOT_INSTALLED_MESSAGE, checkSyncState, isInstalledForUser, syncProject } from '../core/sync.js';
+import { NOT_INSTALLED_MESSAGE, checkFlowSyncState, isInstalledForUser, syncProject, type SyncState } from '../core/sync.js';
 import { titleCase } from '../core/ids.js';
 import { validateFlow } from '../core/validate.js';
 import { resolveVars } from '../core/vars.js';
@@ -231,7 +231,7 @@ export interface ValidationResult {
  */
 export function describeFlow(paths: ProjectPaths, flow?: string, ctx: ToolContext = {}): FlowView {
   const cli = ctx.cli ?? cliFor(paths);
-  const model = loadFlowOrActive(paths, flow);
+  const model = loadToolFlow(paths, flow);
   const { values } = resolveVars(paths, model.def);
   let current: string | null = null;
   let broken: { problem: string; issues: ValidationIssue[] } | undefined;
@@ -286,7 +286,7 @@ export function listFlowsInfo(paths: ProjectPaths): FlowList {
 export function describeStatus(paths: ProjectPaths, flow?: string, ctx: ToolContext = {}): StatusView {
   const cli = ctx.cli ?? cliFor(paths);
   const prefix = ctx.commandPrefix ?? '/';
-  const model = loadFlowOrActive(paths, flow);
+  const model = loadToolFlow(paths, flow);
   const state: FlowRuntimeState = loadRuntimeState(paths, model);
   const step = getStep(model, state.current);
   return {
@@ -319,7 +319,7 @@ export function describeStatus(paths: ProjectPaths, flow?: string, ctx: ToolCont
 
 /** `get_step` */
 export function describeStep(paths: ProjectPaths, stepId: string, flow?: string): StepDetails {
-  const model = loadFlowOrActive(paths, flow);
+  const model = loadToolFlow(paths, flow);
   return stepDetails(paths, model, getStep(model, stepId));
 }
 
@@ -335,7 +335,7 @@ export function validateFlowInfo(paths: ProjectPaths, flow?: string): Validation
 
 /** SKILL.md.hbs text of a step of the active flow (the `dfl://steps/{id}` resource). */
 export function stepTemplateText(paths: ProjectPaths, stepId: string): string {
-  const model = loadActiveFlow(paths);
+  const model = loadToolFlow(paths);
   const step = getStep(model, stepId);
   if (step.final) {
     throw new DflError(`"${stepId}" is a final state and has no skill template.`, { code: 'FINAL_STEP' });
@@ -345,26 +345,27 @@ export function stepTemplateText(paths: ProjectPaths, stepId: string): string {
 
 /**
  * Whether this developer's installed skills are the ones of `flowName` and up to date
- * (checkSyncState: `.df/installed.json` flow + fingerprint). Never throws.
+ * (checkSyncState / checkFlowSyncState: `.df/installed.json` flow + fingerprint). For a flow that is
+ * not active but whose skills are the installed ones (the active flow changed, e.g. the team default
+ * after a `git pull`), it says so and suggests `dfl flow-update` or `dfl flow use <flow>`. Never throws.
  */
 export function skillsStatus(paths: ProjectPaths, flowName: string, cli: string = cliFor(paths)): SkillsStatus {
-  let state: ReturnType<typeof checkSyncState>;
+  let state: SyncState | undefined;
   try {
-    state = checkSyncState(paths);
+    // checkSyncState for the active flow; for another flow, whether its skills are the installed ones.
+    state = checkFlowSyncState(paths, flowName);
+    if (state === undefined && !isInstalledForUser(paths)) state = { installed: false, upToDate: false };
   } catch (error) {
     return { installed: isInstalledForUser(paths), upToDate: false, warning: `Cannot check the installed skills: ${errorMessage(error)}` };
   }
-  if (!state.installed) {
-    const reason = localizeCli(NOT_INSTALLED_MESSAGE, cli);
-    return { installed: false, upToDate: false, reason, warning: `${capitalize(reason)}.` };
-  }
-  let active: string | undefined;
-  try {
-    active = getActiveFlowName(paths);
-  } catch {
-    active = undefined;
-  }
-  if (active !== flowName) {
+  if (state === undefined) {
+    // Not the active flow, and the installed skills are another flow's.
+    let active: string | undefined;
+    try {
+      active = getActiveFlowName(paths);
+    } catch {
+      active = undefined;
+    }
     return {
       installed: true,
       upToDate: false,
@@ -374,6 +375,10 @@ export function skillsStatus(paths: ProjectPaths, flowName: string, cli: string 
         `as skills. Run \`${cli} flow use ${flowName}\` to switch to it.`,
     };
   }
+  if (!state.installed) {
+    const reason = localizeCli(NOT_INSTALLED_MESSAGE, cli);
+    return { installed: false, upToDate: false, reason, warning: `${capitalize(reason)}.` };
+  }
   if (state.upToDate) return { installed: true, upToDate: true };
   const reason = localizeCli(state.reason ?? 'the flow changed since they were installed', cli);
   return {
@@ -382,7 +387,9 @@ export function skillsStatus(paths: ProjectPaths, flowName: string, cli: string 
     reason,
     warning:
       `The installed skills are out of date: ${reason}. ` +
-      `Run \`${cli} flow-update\` (or call the sync tool) to re-install them.`,
+      (state.fix !== undefined
+        ? localizeCli(state.fix, cli)
+        : `Run \`${cli} flow-update\` (or call the sync tool) to re-install them.`),
   };
 }
 
@@ -396,7 +403,7 @@ export function fireEvent(
   args: { event?: string | undefined; from?: string | undefined; flow?: string | undefined },
   ctx: ToolContext = {},
 ): TransitionOutcome {
-  const model = loadFlowOrActive(paths, args.flow);
+  const model = loadToolFlow(paths, args.flow);
   const repaired = repairedState(paths, model);
   return transitionOutcome(model, sendEvent(paths, model, args.event ?? NEXT_EVENT, { from: args.from }), ctx, repaired);
 }
@@ -411,7 +418,7 @@ export function completeStep(
   args: { step: string; event?: string | undefined; flow?: string | undefined },
   ctx: ToolContext = {},
 ): TransitionOutcome {
-  const model = loadFlowOrActive(paths, args.flow);
+  const model = loadToolFlow(paths, args.flow);
   try {
     getStep(model, args.step);
     const repaired = repairedState(paths, model);
@@ -433,7 +440,7 @@ export function completeStep(
 
 /** `goto_step` */
 export function jumpToStep(paths: ProjectPaths, args: { step: string; flow?: string | undefined }, ctx: ToolContext = {}): TransitionOutcome {
-  const model = loadFlowOrActive(paths, args.flow);
+  const model = loadToolFlow(paths, args.flow);
   const repaired = repairedState(paths, model);
   return transitionOutcome(model, gotoStep(paths, model, args.step), ctx, repaired);
 }
@@ -472,7 +479,7 @@ export interface UpdateStepArgs {
 
 /** `add_step` – writes flow.json and the step directory, then re-installs the skills. */
 export async function addStepTool(paths: ProjectPaths, args: AddStepArgs, ctx: ToolContext = {}): Promise<StepMutationResult> {
-  const flowName = loadFlowOrActive(paths, args.flow).name;
+  const flowName = loadToolFlow(paths, args.flow).name;
   const result = addStep(paths, flowName, {
     id: args.id,
     title: args.title,
@@ -489,7 +496,7 @@ export async function addStepTool(paths: ProjectPaths, args: AddStepArgs, ctx: T
 
 /** `update_step` */
 export async function updateStepTool(paths: ProjectPaths, args: UpdateStepArgs, ctx: ToolContext = {}): Promise<StepMutationResult> {
-  const flowName = loadFlowOrActive(paths, args.flow).name;
+  const flowName = loadToolFlow(paths, args.flow).name;
   const result = updateStep(paths, flowName, args.step, {
     title: args.title,
     description: args.description,
@@ -507,7 +514,7 @@ export async function deleteStepTool(
   args: { step: string; force?: boolean | undefined; flow?: string | undefined },
   ctx: ToolContext = {},
 ): Promise<DeleteStepResult> {
-  const flowName = loadFlowOrActive(paths, args.flow).name;
+  const flowName = loadToolFlow(paths, args.flow).name;
   const result = removeStep(paths, flowName, args.step, { force: args.force });
   const warnings: string[] = [];
   if (result.currentMoved) {
@@ -546,6 +553,7 @@ export async function deleteStepTool(
  */
 export async function syncTool(paths: ProjectPaths, ctx: ToolContext = {}): Promise<SyncReport> {
   const cli = ctx.cli ?? cliFor(paths);
+  loadToolFlow(paths); // an unloadable flow.json gets the right hint (syncProject would report it too)
   const report = await syncProject(paths);
   return { ...report, warnings: report.warnings.map((warning) => localizeCli(warning, cli)) };
 }
@@ -554,15 +562,55 @@ export async function syncTool(paths: ProjectPaths, ctx: ToolContext = {}): Prom
 // Errors
 // ---------------------------------------------------------------------------
 
-/** What MCP agents should do for an invalid flow (the CLI hint names `dfl flow validate`). */
+/**
+ * What MCP agents should do for a flow that loads but is not valid (a transition to a missing step,
+ * a validation error): get_flow still shows it and update_step can repair it. The CLI hint names
+ * `dfl flow validate`.
+ */
 export const INVALID_FLOW_MCP_HINT =
   'Call validate_flow to list the problems, then fix them with update_step (get_flow still shows the flow).';
+
+/**
+ * What MCP agents should do when flow.json itself cannot be loaded (schema error, `name` that differs
+ * from the directory, an unusable step id): no tool can open the flow, so the file is edited directly.
+ */
+export function invalidFlowFileMcpHint(flow: string | undefined): string {
+  const file = flow ? `.df/${flow}/flow.json` : 'the flow.json file';
+  return (
+    `get_flow and update_step cannot open this flow until ${file} loads: edit ${file} directly as the error says, ` +
+    'then call validate_flow to check it.'
+  );
+}
+
+/** INVALID_FLOW errors raised while loading flow.json itself (see loadToolFlow) → the flow they concern. */
+const flowFileErrors = new WeakMap<object, string | undefined>();
+
+/**
+ * loadFlowOrActive for tools: an INVALID_FLOW error from reading flow.json itself is remembered, so
+ * its hint does not promise that get_flow or update_step can repair the flow (they cannot load it either).
+ */
+function loadToolFlow(paths: ProjectPaths, flow?: string): FlowModel {
+  try {
+    return loadFlowOrActive(paths, flow);
+  } catch (error) {
+    if (isDflError(error) && error.code === 'INVALID_FLOW') {
+      let name = flow;
+      try {
+        name ??= getActiveFlowName(paths);
+      } catch {
+        // keep undefined
+      }
+      flowFileErrors.set(error, name);
+    }
+    throw error;
+  }
+}
 
 /** MCP-side alternatives appended to core hints that only name CLI commands. */
 function mcpHintFor(error: DflError): string | undefined {
   switch (error.code) {
     case 'INVALID_FLOW':
-      return INVALID_FLOW_MCP_HINT;
+      return flowFileErrors.has(error) ? invalidFlowFileMcpHint(flowFileErrors.get(error)) : INVALID_FLOW_MCP_HINT;
     case 'FLOW_DONE':
       return 'Over MCP: call goto_step to jump to a step.';
     case 'EVENT_NOT_ALLOWED':

@@ -26,8 +26,9 @@ import {
   writeText,
   writeTextInside,
 } from '../src/core/fsx.js';
+import { acquireProjectLock, projectLockFile } from '../src/core/lock.js';
 import { removeLegacyGitignoreBlock, removeManagedBlock, updateManagedBlock, upsertManagedBlock } from '../src/core/gitignore.js';
-import { isValidFlowName, isValidId, titleCase, toId } from '../src/core/ids.js';
+import { assertValidStepId, isValidFlowName, isValidId, isValidStepId, titleCase, toId } from '../src/core/ids.js';
 import { findProjectRoot, packageRoot, projectPaths, resolveProjectRoot } from '../src/core/paths.js';
 import type { FlowMachineConfig } from '../src/core/types.js';
 import { validateFlow } from '../src/core/validate.js';
@@ -63,6 +64,24 @@ describe('ids', () => {
     expect(isValidId('a--b')).toBe(false);
     expect(titleCase('plan-feature')).toBe('Plan Feature');
     expect(toId('Plan Feature!')).toBe('plan-feature');
+  });
+
+  it('rejects step ids made of digits only (JavaScript lists such keys first, breaking the flow order)', () => {
+    for (const id of ['1', '15', '007', '0']) {
+      expect(isValidStepId(id)).toBe(false);
+      expect(isValidId(id)).toBe(true); // still a valid flow name / path segment
+      const error = (() => {
+        try {
+          assertValidStepId(id);
+        } catch (e) {
+          return e as DflError;
+        }
+        return undefined;
+      })();
+      expect(error).toMatchObject({ code: 'INVALID_NAME', message: expect.stringContaining('cannot be only digits'), hint: `Add a letter, e.g. "step-${id}".` });
+    }
+    for (const id of ['step-1', '1a', '1-2', 'v2']) expect(isValidStepId(id)).toBe(true);
+    expect(isValidStepId('Bad')).toBe(false);
   });
 });
 
@@ -268,6 +287,13 @@ describe('flow model', () => {
     const paths = projectPaths(makeTempDir());
     expect(() => createFlow(paths, 'config')).toThrow(/reserved/);
     expect(() => createFlow(paths, 'Bad Name')).toThrow(/Invalid flow name/);
+  });
+
+  it('refuses digit-only step ids for a blank flow, writing nothing', () => {
+    const paths = makeTempProject();
+    expect(codeOf(() => createFlow(paths, 'nums', { steps: ['intro', '3', '2', '1'] }))).toBe('INVALID_NAME');
+    expect(fs.existsSync(paths.flowDir('nums'))).toBe(false);
+    expect(fs.readdirSync(paths.dfDir).filter((name) => name.startsWith('.dfl-'))).toEqual([]);
   });
 
   it('picks a final state id that no step uses and validates a blank flow before writing it', () => {
@@ -556,5 +582,27 @@ describe('active flow names (G8)', () => {
     fs.writeFileSync(path.join(paths.dfDir, 'Bad Name', 'flow.json'), '{}');
     // Exactly one valid flow: it is active by default.
     expect(getActiveFlowName(paths)).toBe('sample');
+  });
+});
+
+describe('project lock heartbeat', () => {
+  it('refreshes a held lock, so a long mutation is not taken over as abandoned', async () => {
+    const paths = makeTempProject();
+    const file = projectLockFile(paths);
+    const release = await acquireProjectLock(paths, { staleMs: 200 });
+    const old = new Date(Date.now() - 10_000);
+    fs.utimesSync(file, old, old);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(Date.now() - fs.statSync(file).mtimeMs).toBeLessThan(200);
+    await expect(acquireProjectLock(paths, { staleMs: 200, timeoutMs: 100 })).rejects.toMatchObject({ code: 'LOCKED' });
+    release();
+    expect(fs.existsSync(file)).toBe(false);
+
+    // Without a heartbeat (the holder died or hangs) the lock is taken over once it is older than staleMs.
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, host: 'elsewhere', token: 'x', at: old.toISOString() }));
+    fs.utimesSync(file, old, old);
+    const again = await acquireProjectLock(paths, { staleMs: 200, timeoutMs: 100 });
+    again();
+    expect(fs.existsSync(file)).toBe(false);
   });
 });

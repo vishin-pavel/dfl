@@ -108,7 +108,7 @@ function jsonTarget(
     remove: (root, name, options) => {
       const abs = absPath(root, file);
       const changed = removeJsonEntry(abs, keyPath, name, options);
-      if (changed && !exists(abs)) cleanupDirs(root, file);
+      if (changed && !exists(abs) && options?.removeEmptyDirs !== false) cleanupDirs(root, file);
       return changed;
     },
     has: (root, name) => hasJsonEntry(absPath(root, file), keyPath, name),
@@ -130,7 +130,7 @@ function tomlTarget(file: string): McpTarget {
     remove: (root, name, options) => {
       const abs = absPath(root, file);
       const changed = removeTomlServer(abs, name, { deleteEmptyFile: options?.deleteEmptyFile });
-      if (changed && !exists(abs)) cleanupDirs(root, file);
+      if (changed && !exists(abs) && options?.removeEmptyDirs !== false) cleanupDirs(root, file);
       return changed;
     },
     has: (root, name) => hasTomlServer(absPath(root, file), name),

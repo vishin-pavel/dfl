@@ -339,8 +339,7 @@ export function stageFlowCopy(paths: ProjectPaths, srcDir: string, name: string,
   const def = parseFlowDefinition(readJson(file), file);
   const next = renamedDefinition(def, name, source);
   buildFlowModel(next, paths.flowDir(name)); // rejects unsafe step ids before anything is copied
-  ensureDir(paths.dfDir);
-  const stage = fs.mkdtempSync(path.join(paths.dfDir, '.dfl-stage-'));
+  const stage = makeStagingDir(paths);
   try {
     copyDir(src, stage, (rel) => {
       const parts = rel.split('/');
@@ -488,8 +487,7 @@ export function createFlow(paths: ProjectPaths, name: string, options: CreateFlo
   const errors = validateDefinition(def, name).filter((issue) => issue.level === 'error');
   if (errors.length > 0) throw invalidFlowError(name, errors);
 
-  ensureDir(paths.dfDir);
-  const staged: StagedFlow = { name, dir: fs.mkdtempSync(path.join(paths.dfDir, '.dfl-stage-')), def };
+  const staged: StagedFlow = { name, dir: makeStagingDir(paths), def };
   try {
     writeJson(path.join(staged.dir, 'flow.json'), def);
     for (const id of stepIds) {
@@ -526,6 +524,24 @@ export function deleteFlow(paths: ProjectPaths, name: string): void {
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+/**
+ * Creates an empty staging dir `.df/.dfl-stage-<random>` (never a valid flow name). It is renamed
+ * into place as the flow dir, so it is made with `mkdir` and gets the permissions the umask gives
+ * (mkdtemp would always create it with mode 0700, hiding the flow from other users and CI jobs).
+ */
+function makeStagingDir(paths: ProjectPaths): string {
+  ensureDir(paths.dfDir);
+  for (;;) {
+    const dir = path.join(paths.dfDir, `.dfl-stage-${randomBytes(6).toString('hex')}`);
+    try {
+      fs.mkdirSync(dir);
+      return dir;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
+}
 
 /** True when `dir` holds only directories and rendered `steps/**\/*.md` files (git-ignored dfl output). */
 function onlyRenderedOutput(dir: string): boolean {

@@ -47,9 +47,10 @@ Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with 
 3. **Interview the user.** Ask a few questions at a time and propose defaults they can accept:
    - **Purpose**: what the step achieves and when an agent should use it. Use the text the user
      typed after the command as the starting point.
-   - **Id**: kebab-case (lowercase letters, digits, single hyphens), at most 64 characters,
-     unique in the flow and different from the built-in skills `add-flow-step`,
-     `edit-flow-step` and `delete-flow-step`. It becomes the skill name and slash command.
+   - **Id**: kebab-case (lowercase letters, digits, single hyphens; at least one letter, so
+     `step-3`, not `3`), at most 64 characters, unique in the flow and different from the
+     built-in skills `add-flow-step`, `edit-flow-step` and `delete-flow-step`. It becomes the
+     skill name and slash command.
    - **Title**: one to three words, shown in lists and the flow viewer.
    - **Description**: one sentence of at most 200 characters that starts with a verb and says
      when to use the step. Agents use it to decide when to invoke the skill automatically.

@@ -22,7 +22,7 @@ import {
   writeFlowDefinition,
 } from './flow.js';
 import { exists, readTextIfExists, removePath, writeText } from './fsx.js';
-import { assertValidStepId, isValidId, titleCase } from './ids.js';
+import { assertStepIdIsPathSafe, assertValidStepId, isValidId, titleCase } from './ids.js';
 import { moveCurrentInRuntime, renameStateInRuntime } from './machine.js';
 import { checkTemplateSource, diffDefinitionErrors, invalidFlowError, templateCheckEnv } from './validate.js';
 import type {
@@ -497,7 +497,7 @@ export function setTransition(
 
 /** Reads `.df/<flow>/steps/<id>/SKILL.md.hbs` ('' when missing). */
 export function readStepTemplate(paths: ProjectPaths, flowName: string, stepId: string): string {
-  assertValidStepId(stepId);
+  assertStepIdIsPathSafe(stepId); // an existing all-digit id stays readable (validateFlow reports it)
   return readTextIfExists(path.join(paths.stepDir(flowName, stepId), SKILL_TEMPLATE_FILE)) ?? '';
 }
 

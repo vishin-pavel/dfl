@@ -103,6 +103,7 @@ describe('addStep', () => {
     const before = fs.readFileSync(paths.flowFile('sample'), 'utf8');
     expectDflError(() => addStep(paths, 'sample', { id: 'build' }), 'STEP_EXISTS');
     expectDflError(() => addStep(paths, 'sample', { id: 'Bad Id' }), 'INVALID_NAME');
+    expect(expectDflError(() => addStep(paths, 'sample', { id: '15', after: 'plan' }), 'INVALID_NAME').message).toContain('cannot be only digits');
     expectDflError(() => addStep(paths, 'sample', { id: 'x', after: 'plan', before: 'build' }), 'INVALID_OPTIONS');
     expectDflError(() => addStep(paths, 'sample', { id: 'x', after: 'missing' }), 'STEP_NOT_FOUND');
     expectDflError(() => addStep(paths, 'sample', { id: 'x', before: 'missing' }), 'STEP_NOT_FOUND');
@@ -168,6 +169,7 @@ describe('updateStep', () => {
     expectDflError(() => updateStep(paths, 'sample', 'missing', { title: 'x' }), 'STEP_NOT_FOUND');
     expectDflError(() => updateStep(paths, 'sample', 'build', { rename: 'review' }), 'STEP_EXISTS');
     expectDflError(() => updateStep(paths, 'sample', 'build', { rename: 'Bad' }), 'INVALID_NAME');
+    expectDflError(() => updateStep(paths, 'sample', 'build', { rename: '2' }), 'INVALID_NAME');
     expectDflError(() => updateStep(paths, 'sample', 'build', { on: { NEXT: 'nowhere' } }), 'STEP_NOT_FOUND');
     expectDflError(() => updateStep(paths, 'sample', 'done', { template: 'x' }), 'FINAL_STEP');
     expectDflError(() => updateStep(paths, 'sample', 'done', { on: { NEXT: 'plan' } }), 'INVALID_FLOW');
@@ -643,5 +645,35 @@ describe('integration fixes (G8)', () => {
     }
     expect(fs.existsSync(paths.stepDir('sample', 'qa'))).toBe(false);
     expect(fs.readFileSync(paths.flowFile('sample'), 'utf8')).toBe(before);
+  });
+});
+
+describe('flows that already have digit-only step ids', () => {
+  function numericFlow(): ProjectPaths {
+    const def = sampleFlowDefinition();
+    const states = def.machine.states;
+    def.machine.states = {
+      plan: { ...states['plan']!, on: { NEXT: '1' } },
+      '1': { meta: { title: 'One' }, on: { NEXT: 'build' } },
+      build: states['build']!,
+      review: states['review']!,
+      done: states['done']!,
+    };
+    return setup(def);
+  }
+
+  it('can be repaired by renaming the step (the error goes away), and its template stays readable', () => {
+    const paths = numericFlow();
+    expect(readStepTemplate(paths, 'sample', '1')).toContain('# {{step.title}}');
+    const renamed = updateStep(paths, 'sample', '1', { rename: 'step-1' });
+    expect(renamed.remainingErrors).toEqual([]);
+    expect(renamed.steps.map((s) => s.id)).toEqual(['plan', 'step-1', 'build', 'review', 'done']);
+    expect(fs.existsSync(templateFile(paths, 'step-1'))).toBe(true);
+  });
+
+  it('other edits keep working and report the id as a remaining error', () => {
+    const paths = numericFlow();
+    const edited = updateStep(paths, 'sample', 'build', { title: 'Build it' });
+    expect(edited.remainingErrors.map((issue) => issue.message)).toEqual([expect.stringContaining('Invalid step id "1"')]);
   });
 });

@@ -360,6 +360,13 @@ export interface Manifest {
   /** Project-relative posix paths of the `.md` files dfl rendered under `.df/<flow>/steps/`. */
   rendered?: string[] | undefined;
   /**
+   * Project-relative posix dirs dfl created on the way to a skills dir or MCP config file (e.g. `.claude`,
+   * `.claude/skills`, `.kiro/settings`); only these are removed again once empty. Missing: none.
+   */
+  createdDirs?: string[] | undefined;
+  /** Agent skills dirs (e.g. `.claude/skills`) the last sync skipped because of a symbolic link: no skills there. */
+  skippedDirs?: string[] | undefined;
+  /**
    * Set by `dfl uninstall` when it keeps the manifest only to retry MCP entries it could not remove:
    * dfl counts as not installed for this developer (no auto-sync) until the next `dfl install`.
    */

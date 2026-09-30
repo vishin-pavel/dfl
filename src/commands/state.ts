@@ -3,10 +3,10 @@
  */
 import type { CommandUnknownOpts } from '@commander-js/extra-typings';
 import { dflLauncher } from '../agents/mcp-config.js';
-import { getActiveFlowName, getSelectedAgents } from '../core/config.js';
+import { getSelectedAgents } from '../core/config.js';
 import { loadFlowOrActive } from '../core/flow.js';
 import { availableEvents, gotoStep, loadRuntimeState, resetFlow, sendEvent } from '../core/machine.js';
-import { checkSyncState, type SyncState } from '../core/sync.js';
+import { checkFlowSyncState, type SyncState } from '../core/sync.js';
 import type { FlowModel, FlowRuntimeState, ProjectPaths, TransitionResult } from '../core/types.js';
 import { c } from '../ui/colors.js';
 import { progressChain, skillCommand, skillInvocations, stepPosition, stepStatuses } from '../ui/format.js';
@@ -25,8 +25,9 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
       const paths = projectFor(ctx);
       const model = loadFlowOrActive(paths, opts.flow);
       const state = loadRuntimeState(paths, model);
-      // Installed skills only matter for the active flow (they are always the active flow's).
-      const sync = model.name === getActiveFlowName(paths) ? checkSyncState(paths) : undefined;
+      // The active flow's installed skills; for another flow only when its skills are the installed ones
+      // (the active flow changed since, e.g. the team default after a pull), undefined otherwise.
+      const sync = checkFlowSyncState(paths, model.name);
       if (opts.json) printJson(statusJson(paths, model, state, sync));
       else printStatus(paths, model, state, sync);
     });
@@ -109,10 +110,15 @@ function withRepaired<T extends object>(value: T, repaired: string | undefined):
 function syncNotice(paths: ProjectPaths, sync: SyncState | undefined): { level: 'warning' | 'note'; text: string } | undefined {
   if (!sync || sync.upToDate) return undefined;
   if (!sync.installed) return { level: 'note', text: notInstalledMessage(paths) };
-  return {
-    level: 'warning',
-    text: `Installed skills are out of date: ${sync.reason ?? 'the flow changed'}. Run \`${dflLauncher(paths)} flow-update\`.`,
-  };
+  const fix = syncFix(paths, sync) ?? `Run \`${dflLauncher(paths)} flow-update\`.`;
+  return { level: 'warning', text: `Installed skills are out of date: ${sync.reason ?? 'the flow changed'}. ${fix}` };
+}
+
+/** SyncState.fix with the project's dfl launcher (e.g. `npx --no-install dfl install`). */
+function syncFix(paths: ProjectPaths, sync: SyncState): string | undefined {
+  if (sync.fix === undefined) return undefined;
+  const cli = dflLauncher(paths);
+  return cli === 'dfl' ? sync.fix : sync.fix.replaceAll('`dfl ', `\`${cli} `);
 }
 
 function statusJson(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState, sync: SyncState | undefined): unknown {
@@ -147,7 +153,9 @@ function statusJson(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeSta
             installed: sync.installed,
             upToDate: sync.upToDate,
             ...(sync.reason !== undefined ? { reason: sync.reason } : {}),
-            ...(sync.upToDate ? {} : { hint: sync.installed ? `${dflLauncher(paths)} flow-update` : `${dflLauncher(paths)} install` }),
+            ...(sync.upToDate
+              ? {}
+              : { hint: syncFix(paths, sync) ?? (sync.installed ? `${dflLauncher(paths)} flow-update` : `${dflLauncher(paths)} install`) }),
           },
         }
       : {}),

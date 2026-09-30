@@ -35,11 +35,13 @@ import {
   spinner,
 } from '../ui/prompts.js';
 import {
+  askMissingVars,
   confirmDestructive,
   locked,
   mcpChangeLine,
   projectFor,
   promptVarInteractive,
+  storeVarAnswers,
   syncWithDiff,
   warnRepairedState,
   type CliContext,
@@ -102,14 +104,13 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
     .option('-y, --yes', 'never prompt for missing variables')
     .action(async (opts) => {
       const paths = projectFor(ctx);
+      // Missing required variables are asked for before the lock is taken (a dry run asks nothing).
+      const answers = await askMissingVars(paths, { interactive: isInteractive(opts), sync: opts.dryRun !== true, always: true });
       // Without --mcp/--no-mcp the saved preference (`dfl install --no-mcp`) applies.
-      const run = await locked(paths, () =>
-        syncWithDiff(paths, {
-          mcp: opts.mcp,
-          dryRun: opts.dryRun,
-          promptVar: isInteractive(opts) ? promptVarInteractive : undefined,
-        }),
-      );
+      const run = await locked(paths, () => {
+        storeVarAnswers(paths, answers);
+        return syncWithDiff(paths, { mcp: opts.mcp, dryRun: opts.dryRun });
+      });
       printLines(compactSyncLines(run, opts.dryRun === true));
       for (const message of run.report.warnings) warning(message);
       warnRepairedState(paths, run.report.flow);
@@ -226,14 +227,22 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
 
   if (saveTeam) setSelectedAgents(paths, agents, 'project');
 
+  const manifest = readManifest(paths);
+  // Agents whose skills dir is a symbolic link got no skills (sync warns; `dfl status` keeps reporting it).
+  const skippedDirs = new Set(manifest.skippedDirs ?? []);
   const lines = installSummary(model, run, {
     created: toCreate,
     saveTeam,
     teamFlow,
     mcp,
-    mcpKept: mcp ? [] : readManifest(paths).mcp.map((entry) => entry.file),
+    mcpKept: mcp ? [] : manifest.mcp.map((entry) => entry.file),
+    skippedDirs,
   });
-  const next = nextLine(paths, model, agents);
+  const ready = agents.filter((id) => !skippedDirs.has(getAgent(id).skillsDir));
+  const next =
+    agents.length > 0 && ready.length === 0
+      ? c.yellow(`${sym.warn} No skills were installed for ${agentNames(agents)}: see the warning about the symbolic link.`)
+      : nextLine(paths, model, ready.length > 0 ? ready : agents);
   const repaired = loadRuntimeState(paths, model).repaired;
   const warnings = [...run.report.warnings, ...(repaired ? [repaired] : [])];
   if (interactive) {
@@ -312,7 +321,7 @@ async function chooseActiveFlow(paths: ProjectPaths, toCreate: string[], interac
 function installSummary(
   model: FlowModel,
   run: SyncRun,
-  info: { created: string[]; saveTeam: boolean; teamFlow: boolean; mcp: boolean; mcpKept: string[] },
+  info: { created: string[]; saveTeam: boolean; teamFlow: boolean; mcp: boolean; mcpKept: string[]; skippedDirs: ReadonlySet<string> },
 ): string[] {
   const { report } = run;
   const width = terminalWidth() - 6;
@@ -335,6 +344,10 @@ function installSummary(
       .map((skill) => c.cyan(adapter.invocation(skill.name)));
     const builtins = skills.filter((skill) => skill.kind === 'builtin').map((skill) => adapter.invocation(skill.name));
     lines.push('', `${c.bold(adapter.name)}  ${c.dim(`${adapter.skillsDir}/`)}`);
+    if (info.skippedDirs.has(adapter.skillsDir)) {
+      lines.push(`  ${c.yellow(sym.warn)} ${c.yellow(`Not installed: ${adapter.skillsDir} is a symbolic link (replace it with a real directory).`)}`);
+      continue;
+    }
     lines.push(...wrapItems(steps, '  ', width, '  '));
     if (builtins.length > 0) lines.push(...wrapItems([c.dim('built-in:'), ...builtins.map((b) => c.dim(b))], ' ', width, '  '));
   }

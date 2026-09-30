@@ -5,8 +5,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getActiveFlowName, loadLocalConfig, setActiveFlow } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
-import { createFlow, listFlows, readFlowDefinition, writeFlowDefinition } from '../src/core/flow.js';
+import { createFlow, listFlows, loadFlow, readFlowDefinition, writeFlowDefinition } from '../src/core/flow.js';
 import { findFlowDirs, importFlows, parseFlowSource, pullFlow } from '../src/core/import.js';
+import { STEP_REMOVED_EVENT, loadRuntimeState } from '../src/core/machine.js';
+import { addStep } from '../src/core/steps.js';
 import { flowTemplatesDir } from '../src/core/paths.js';
 import type { FlowDefinition, ProjectPaths } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
@@ -445,5 +447,125 @@ describe('pullFlow', () => {
     writeFlowDefinition(paths, { ...def, source: { type: 'local', ref: '.', path: '../outside' } });
     expect(await rejectionCode(pullFlow(paths, 'tpl'))).toBe('INVALID_SOURCE');
     expect(fs.existsSync(paths.flowFile('tpl'))).toBe(true);
+  });
+});
+
+describe('replacing a flow keeps hand-written files and the position', () => {
+  const statePath = (paths: ProjectPaths): string => paths.stateFile;
+  const setCurrent = (paths: ProjectPaths, flow: string, current: string): void =>
+    fs.writeFileSync(statePath(paths), JSON.stringify({ version: 1, flows: { [flow]: { current, history: [], updatedAt: '2026-01-01T00:00:00.000Z' } } }));
+  const readState = (paths: ProjectPaths): any => JSON.parse(fs.readFileSync(statePath(paths), 'utf8'));
+
+  it('pullFlow carries hand-written .md files under steps/ over and lists them (dry run too)', async () => {
+    const paths = makeTempProject();
+    createFlow(paths, 'mine', { from: 'feature' });
+    setActiveFlow(paths, 'mine');
+    addStep(paths, 'mine', { id: 'qa', after: 'verify-feature' });
+    const plan = paths.stepDir('mine', 'plan-feature');
+    const spec = paths.stepDir('mine', 'spec-feature');
+    write(path.join(plan, 'notes.md'), '# my notes\n');
+    write(path.join(plan, 'refs', 'checklist.md'), '# ref\n');
+    write(path.join(paths.stepDir('mine', 'qa'), 'notes.md'), '# qa notes\n');
+    // dfl output: next to a template (old or new), or listed in the manifest's `rendered`.
+    write(path.join(plan, 'SKILL.md'), 'rendered');
+    write(path.join(paths.stepDir('mine', 'qa'), 'SKILL.md'), 'rendered');
+    write(path.join(spec, 'old.md'), 'rendered from a template deleted since');
+    fs.writeFileSync(paths.manifestFile, JSON.stringify({ version: 1, skills: [], mcp: [], rendered: ['.df/mine/steps/spec-feature/old.md'] }));
+    fs.appendFileSync(path.join(spec, 'SKILL.md.hbs'), '\nLocal edit.\n');
+    const kept = ['steps/plan-feature/notes.md', 'steps/plan-feature/refs/checklist.md', 'steps/qa/notes.md'];
+
+    const dry = await pullFlow(paths, 'mine', { dryRun: true });
+    expect(dry.kept).toEqual(kept);
+    expect(dry.removed).toEqual(['steps/qa/SKILL.md.hbs']);
+    expect(dry.changed).toEqual(['flow.json', 'steps/spec-feature/SKILL.md.hbs']);
+
+    const result = await pullFlow(paths, 'mine');
+    expect(result.kept).toEqual(kept);
+    expect(fs.readFileSync(path.join(plan, 'notes.md'), 'utf8')).toBe('# my notes\n');
+    expect(fs.readFileSync(path.join(plan, 'refs', 'checklist.md'), 'utf8')).toBe('# ref\n');
+    expect(fs.readFileSync(path.join(paths.stepDir('mine', 'qa'), 'notes.md'), 'utf8')).toBe('# qa notes\n');
+    expect(fs.existsSync(path.join(plan, 'SKILL.md'))).toBe(false);
+    expect(fs.existsSync(path.join(spec, 'old.md'))).toBe(false);
+    expect(fs.readdirSync(paths.stepDir('mine', 'qa'))).toEqual(['notes.md']);
+    expect(leftovers(paths)).toEqual([]);
+
+    // Up to date: nothing is replaced, so nothing needs keeping (and rendered output stays).
+    write(path.join(plan, 'SKILL.md'), 'rendered');
+    const again = await pullFlow(paths, 'mine');
+    expect([again.added, again.removed, again.changed, again.kept]).toEqual([[], [], [], []]);
+    expect(fs.existsSync(path.join(plan, 'SKILL.md'))).toBe(true);
+  });
+
+  it('flow dirs written by create, import and pull get the default permissions (not 0700)', async () => {
+    const reference = makeTempDir();
+    fs.mkdirSync(path.join(reference, 'dir'));
+    const expected = fs.statSync(path.join(reference, 'dir')).mode & 0o777;
+    const src = makeSource();
+    const paths = makeTempProject();
+    createFlow(paths, 'from-template', { from: 'quick' });
+    createFlow(paths, 'blank', { steps: ['a', 'b'] });
+    await importFlows(paths, src, { flows: ['feature'] });
+    await importFlows(paths, src, { flows: ['feature'], force: true });
+    fs.appendFileSync(path.join(paths.stepDir('from-template', 'plan-change'), 'SKILL.md.hbs'), 'edit');
+    await pullFlow(paths, 'from-template');
+    for (const name of ['from-template', 'blank', 'feature']) {
+      expect({ name, mode: fs.statSync(paths.flowDir(name)).mode & 0o777 }).toEqual({ name, mode: expected });
+    }
+  });
+
+  it('pullFlow moves a current step the new version lacks to a surviving step (history STEP_REMOVED)', async () => {
+    const cases: Array<{ add: Array<{ id: string; after: string }>; current: string; to: string }> = [
+      // qa leads to review-feature, which survives: continue there.
+      { add: [{ id: 'qa', after: 'verify-feature' }], current: 'qa', to: 'review-feature' },
+      // qa leads to the final state: back to the nearest earlier step.
+      { add: [{ id: 'qa', after: 'ship-feature' }], current: 'qa', to: 'ship-feature' },
+      // qa-1 → qa-2 (also gone) → review-feature.
+      { add: [{ id: 'qa-1', after: 'verify-feature' }, { id: 'qa-2', after: 'qa-1' }], current: 'qa-1', to: 'review-feature' },
+    ];
+    for (const { add, current, to } of cases) {
+      const paths = makeTempProject();
+      createFlow(paths, 'mine', { from: 'feature' });
+      for (const step of add) addStep(paths, 'mine', step);
+      setCurrent(paths, 'mine', current);
+
+      const dry = await pullFlow(paths, 'mine', { dryRun: true });
+      expect(dry.currentMoved).toEqual({ from: current, to });
+      expect(readState(paths).flows.mine.current).toBe(current);
+
+      const result = await pullFlow(paths, 'mine');
+      expect(result.currentMoved).toEqual({ from: current, to });
+      const entry = readState(paths).flows.mine;
+      expect(entry.current).toBe(to);
+      expect(entry.history.at(-1)).toMatchObject({ from: current, to, event: STEP_REMOVED_EVENT });
+      expect(loadRuntimeState(paths, loadFlow(paths, 'mine')).repaired).toBeUndefined();
+    }
+
+    // A current step that survives stays; a stale id that was already gone is replaced by the initial step.
+    const paths = makeTempProject();
+    createFlow(paths, 'mine', { from: 'feature' });
+    addStep(paths, 'mine', { id: 'qa', after: 'verify-feature' });
+    setCurrent(paths, 'mine', 'plan-feature');
+    expect((await pullFlow(paths, 'mine')).currentMoved).toBeUndefined();
+    expect(readState(paths).flows.mine.current).toBe('plan-feature');
+    addStep(paths, 'mine', { id: 'qa', after: 'verify-feature' });
+    setCurrent(paths, 'mine', 'deleted-long-ago');
+    expect((await pullFlow(paths, 'mine')).currentMoved).toEqual({ from: 'deleted-long-ago', to: 'spec-feature' });
+    expect(readState(paths).flows.mine.current).toBe('spec-feature');
+  });
+
+  it('importFlows --force keeps hand-written files and moves a removed current step too', async () => {
+    const src = makeSource();
+    const paths = makeTempProject();
+    await importFlows(paths, src, { flows: ['feature'] });
+    addStep(paths, 'feature', { id: 'extra', after: 'build' });
+    write(path.join(paths.stepDir('feature', 'plan'), 'notes.md'), '# notes\n');
+    setCurrent(paths, 'feature', 'extra');
+
+    const [model] = await importFlows(paths, src, { flows: ['feature'], force: true });
+    expect(model?.kept).toEqual(['steps/plan/notes.md']);
+    expect(model?.currentMoved).toEqual({ from: 'extra', to: 'review' });
+    expect(fs.readFileSync(path.join(paths.stepDir('feature', 'plan'), 'notes.md'), 'utf8')).toBe('# notes\n');
+    expect(readState(paths).flows.feature.current).toBe('review');
+    expect(leftovers(paths)).toEqual([]);
   });
 });

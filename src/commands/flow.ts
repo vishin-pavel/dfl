@@ -7,7 +7,8 @@ import { DflError, errorMessage, isDflError } from '../core/errors.js';
 import { createFlow, deleteFlow, flowExists, listFlowTemplates, listFlows, loadFlow, loadFlowOrActive, skillSteps } from '../core/flow.js';
 import { relPosix } from '../core/fsx.js';
 import { assertValidFlowName } from '../core/ids.js';
-import { importFlows, pullFlow, type PullResult, type RecordedFlowSource } from '../core/import.js';
+import { packageVersion } from '../core/paths.js';
+import { importFlows, pullFlow, type FlowReplacement, type PullResult, type RecordedFlowSource } from '../core/import.js';
 import { loadRuntimeState } from '../core/machine.js';
 import { isInstalledForUser, readManifest, uninstallProject, writeManifest } from '../core/sync.js';
 import type { FlowModel, ProjectPaths, ValidationIssue } from '../core/types.js';
@@ -21,10 +22,11 @@ import { table } from '../ui/table.js';
 import {
   confirmDestructive,
   locked,
+  lockedSwitchActiveFlow,
+  lockedSyncAfterChange,
   parseInteger,
   printAfterChange,
   projectFor,
-  switchActiveFlow,
   syncAfterChange,
   type AfterChange,
   type CliContext,
@@ -94,12 +96,11 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       const paths = projectFor(ctx);
       requireFlow(paths, name);
       // Validated before anything is written; a failed sync restores the previous active flow.
-      const result = await locked(paths, () =>
-        switchActiveFlow(paths, name, opts.project ? 'project' : 'local', {
-          sync: opts.sync,
-          interactive: isInteractive(),
-        }),
-      );
+      // Missing variables are asked for before the lock is taken.
+      const result = await lockedSwitchActiveFlow(paths, name, opts.project ? 'project' : 'local', {
+        sync: opts.sync,
+        interactive: isInteractive(),
+      });
       success(`Active flow: ${c.bold(name)} ${c.dim(opts.project ? '(team default, .df/config.json)' : '(personal, .df/local.json)')}`);
       printAfterChange(paths, result);
     });
@@ -130,9 +131,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
         `Created flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')}${opts.from ? `, from template "${opts.from}"` : ''})`)} in ${relPosix(paths.root, model.dir)}/`,
       );
       if (opts.use) {
-        const result = await locked(paths, () =>
-          switchActiveFlow(paths, model.name, 'local', { sync: opts.sync, interactive: isInteractive() }),
-        );
+        const result = await lockedSwitchActiveFlow(paths, model.name, 'local', { sync: opts.sync, interactive: isInteractive() });
         success(`Active flow: ${c.bold(model.name)}`);
         printAfterChange(paths, result);
       } else {
@@ -154,13 +153,14 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       const models = await locked(paths, () => importFlows(paths, source, { name: opts.name, flows: opts.flow, force: opts.force }));
       for (const model of models) {
         success(`Imported flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')})`)}`);
+        printLines([...keptLines(model), ...currentMoveLines(model, false)]);
       }
       const active = getActiveFlowName(paths);
       if (opts.use && models[0]) {
         const first = models[0].name;
         let result: AfterChange;
         try {
-          result = await locked(paths, () => switchActiveFlow(paths, first, 'local', { sync: opts.sync, interactive: isInteractive() }));
+          result = await lockedSwitchActiveFlow(paths, first, 'local', { sync: opts.sync, interactive: isInteractive() });
         } catch (error) {
           if (!isDflError(error) || error.code !== 'INVALID_FLOW') throw error;
           // The flow stays imported but inactive: the active flow and the installed skills are unchanged.
@@ -173,7 +173,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
         if (models.length > 1) print(c.dim(`Switch with \`dfl flow use <name>\` (${models.map((m) => m.name).join(', ')}).`));
         printAfterChange(paths, result);
       } else if (active && models.some((model) => model.name === active)) {
-        await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: active, interactive: isInteractive() }));
+        await lockedSyncAfterChange(paths, { sync: opts.sync, flow: active, interactive: isInteractive() });
       }
     });
 
@@ -219,7 +219,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
           return;
         }
         print(`Changes to flow ${c.bold(flowName)} from ${describeSource(preview.source)}:`);
-        printLines(changeLines(preview));
+        printLines([...changeLines(preview), ...currentMoveLines(preview, true)]);
         if (opts.dryRun) return;
         const ok = await confirmDestructive(
           `Replace the files of flow "${flowName}" with ${describeSource(preview.source)} (local edits in .df/${flowName}/ are lost)?`,
@@ -237,7 +237,8 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       }
       success(`Pulled flow ${c.bold(flowName)} from ${describeSource(result.source)} ${c.dim(`(${plural(changeCount(result), 'file')} changed)`)}`);
       if (opts.yes) printLines(changeLines(result));
-      await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() }));
+      printLines(currentMoveLines(result, false));
+      await lockedSyncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
     });
 
   flow
@@ -348,7 +349,7 @@ async function deleteAndResync(
   const next = getActiveFlowName(paths);
   if (next) {
     print(c.dim(`Active flow is now "${next}".`));
-    await syncAfterChange(paths, { sync: true, interactive: isInteractive() });
+    await syncAfterChange(paths, { sync: true });
     return;
   }
   // No flow is active any more: remove the deleted flow's installed skills, but stay installed (a
@@ -363,6 +364,9 @@ async function deleteAndResync(
     skills: [],
     mcp: previous.mcp,
     rendered: (previous.rendered ?? []).filter((rel) => !rel.startsWith(deletedPrefix)),
+    createdDirs: previous.createdDirs,
+    // No flow and no skills: `dfl status` reports "no flow's skills are installed yet", not an old dfl.
+    dflVersion: packageVersion(),
   });
   print(`${c.cyan(sym.sync)} Removed ${plural(report.removed.length, 'installed skill dir')} of "${name}"`);
   for (const message of report.warnings) warning(message);
@@ -411,12 +415,31 @@ function changeCount(result: PullResult): number {
   return result.added.length + result.removed.length + result.changed.length;
 }
 
-/** Changed files of a pull, flow-relative. */
+/** Changed files of a pull, flow-relative, and the hand-written files it keeps. */
 function changeLines(result: PullResult): string[] {
   return [
     ...result.added.map((rel) => `  ${c.green(sym.added)} ${rel}`),
     ...result.changed.map((rel) => `  ${c.yellow('~')} ${rel}`),
     ...result.removed.map((rel) => `  ${c.red(sym.removed)} ${rel}`),
+    ...keptLines(result),
+  ];
+}
+
+/** `= steps/plan/notes.md (hand-written, kept)` for each hand-written file a replacement keeps. */
+function keptLines(replacement: FlowReplacement): string[] {
+  return replacement.kept.map((rel) => `  = ${rel} ${c.dim('(hand-written, kept)')}`);
+}
+
+/** Where the developer's position went (or would go) because the current step is not in the new version. */
+function currentMoveLines(replacement: FlowReplacement, preview: boolean): string[] {
+  if (!replacement.currentMoved) return [];
+  const { from, to } = replacement.currentMoved;
+  return [
+    c.dim(
+      preview
+        ? `  "${from}" (your current step) is not in the new version; you would continue at "${to}".`
+        : `  "${from}" was your current step and is not in the new version; the flow continues at "${to}".`,
+    ),
   ];
 }
 

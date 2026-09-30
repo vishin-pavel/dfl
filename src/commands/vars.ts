@@ -12,7 +12,7 @@ import { c } from '../ui/colors.js';
 import { print, printJson, printLines, success, sym, terminalWidth, truncate } from '../ui/output.js';
 import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { locked, projectFor, syncAfterChange, type CliContext } from './shared.js';
+import { locked, lockedSyncAfterChange, projectFor, type CliContext } from './shared.js';
 
 type VarSource = 'env' | 'local' | 'project' | 'default' | 'none';
 
@@ -80,7 +80,7 @@ export function registerVarsCommands(program: CommandUnknownOpts, ctx: CliContex
         throw new DflError('Use either --personal or --project, not both.', { code: 'INVALID_OPTIONS' });
       }
       const paths = projectFor(ctx);
-      await locked(paths, async () => {
+      await locked(paths, () => {
         const def = activeDefinition(paths);
         const scope: VarScope = opts.personal ? 'personal' : opts.project ? 'project' : varScope(def, name);
         const declared = def?.vars?.[name];
@@ -89,8 +89,9 @@ export function registerVarsCommands(program: CommandUnknownOpts, ctx: CliContex
         if (def && !declared) print(c.dim(`  Note: flow "${def.name}" does not declare "${name}"; templates can still use {{vars.${name}}}.`));
         const env = process.env[envVarName(name)];
         if (env) print(c.dim(`  Note: ${envVarName(name)} is set in the environment and overrides this value.`));
-        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
       });
+      // Other missing variables are asked for outside the lock; the sync runs under it.
+      await lockedSyncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
     });
 
   vars
@@ -100,16 +101,18 @@ export function registerVarsCommands(program: CommandUnknownOpts, ctx: CliContex
     .option('--no-sync', 'do not re-install skills')
     .action(async (name, opts) => {
       const paths = projectFor(ctx);
-      await locked(paths, async () => {
+      const changed = await locked(paths, () => {
         if (!unsetVar(paths, name)) {
           print(c.dim(`"${name}" has no stored value; nothing changed.`));
-          return;
+          return false;
         }
         const def = activeDefinition(paths);
         const fallback = def?.vars?.[name]?.default;
         success(`Unset ${c.bold(name)}${fallback !== undefined ? c.dim(` (default: ${formatValue(fallback)})`) : ''}`);
-        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+        return true;
       });
+      // The variable just unset is not asked for again (a required one is reported by the sync).
+      if (changed) await lockedSyncAfterChange(paths, { sync: opts.sync, interactive: isInteractive(), except: [name] });
     });
 }
 

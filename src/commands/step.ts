@@ -13,7 +13,7 @@ import { skillInvocations } from '../ui/format.js';
 import { plural, print, printJson, printLines, success, sym, terminalWidth, warning } from '../ui/output.js';
 import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { confirmDestructive, locked, projectFor, readTemplateFile, syncAfterChange, type CliContext } from './shared.js';
+import { confirmDestructive, locked, lockedSyncAfterChange, projectFor, readTemplateFile, type CliContext } from './shared.js';
 
 export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContext): void {
   const step = program.command('step').description('Manage the steps of a flow');
@@ -83,7 +83,7 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
     .action(async (id, opts) => {
       const paths = projectFor(ctx);
       const template = opts.templateFile !== undefined ? readTemplateFile(opts.templateFile) : undefined;
-      await locked(paths, async () => {
+      const flowName = await locked(paths, () => {
         const flowName = loadFlowOrActive(paths, opts.flow).name;
         const model = addStep(paths, flowName, {
           id,
@@ -108,8 +108,10 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         );
         print(c.dim(`  Template: .df/${flowName}/steps/${id}/SKILL.md.hbs`));
         warnRemainingErrors(flowName, model.remainingErrors);
-        await syncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
+        return flowName;
       });
+      // Missing variables are asked for outside the lock; the sync runs under it.
+      await lockedSyncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
     });
 
   step
@@ -151,7 +153,7 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         `Updated step ${label} in flow "${flowName}"${changed.length > 0 ? c.dim(` (${changed.join(', ')})`) : ''}`,
       );
       warnRemainingErrors(flowName, result.remainingErrors);
-      await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() }));
+      await lockedSyncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
     });
 
   step
@@ -186,7 +188,7 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         print(c.dim('Nothing changed.'));
         return;
       }
-      await locked(paths, async () => {
+      await locked(paths, () => {
         const result = removeStep(paths, model.name, id, { force: opts.force });
         success(`Removed step ${c.bold(id)} from flow "${model.name}"`);
         const lines: string[] = [];
@@ -201,8 +203,8 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         if (result.currentMoved) lines.push(c.dim(`  "${id}" was your current step; the flow continues at "${result.currentMoved.to}".`));
         printLines(lines);
         warnRemainingErrors(model.name, result.remainingErrors);
-        await syncAfterChange(paths, { sync: opts.sync, flow: model.name, interactive: isInteractive() });
       });
+      await lockedSyncAfterChange(paths, { sync: opts.sync, flow: model.name, interactive: isInteractive() });
     });
 
   step
@@ -242,7 +244,7 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         else if (event !== 'NEXT') print(c.dim(`  Tip: add --description "<when to fire ${event}>" so the agent knows when to use it.`));
       }
       warnRemainingErrors(flowName, model.remainingErrors);
-      await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() }));
+      await lockedSyncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
     });
 }
 

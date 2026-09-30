@@ -1,6 +1,9 @@
 import { DflError } from './errors.js';
 
-/** Agent Skills name rules: lowercase letters, digits and single hyphens; max 64 chars. */
+/**
+ * Agent Skills name rules: lowercase letters, digits and single hyphens; max 64 chars. Step ids must
+ * not be only digits ({@link isValidStepId}).
+ */
 export const ID_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 export const MAX_ID_LENGTH = 64;
 
@@ -36,7 +39,44 @@ export function assertValidFlowName(name: string): void {
   }
 }
 
+/**
+ * All digits. JavaScript lists such object keys first, in numeric order, whatever order they were
+ * declared in, so `machine.states` could not keep the flow order (§2) for them: not a step id.
+ */
+const DIGITS_ONLY_RE = /^[0-9]+$/;
+
+/** True for an id made of digits only (`1`, `15`, `007`), which is not a valid step id. */
+export function isDigitsOnlyId(id: string): boolean {
+  return typeof id === 'string' && DIGITS_ONLY_RE.test(id);
+}
+
+/** A valid step id: a valid id (see {@link isValidId}) that is not only digits. */
+export function isValidStepId(id: string): boolean {
+  return isValidId(id) && !isDigitsOnlyId(id);
+}
+
+/** `Invalid step id "1": …` explanation and fix for an id made of digits only. */
+export function digitsOnlyStepIdMessage(id: string): { message: string; hint: string } {
+  return {
+    message: `Invalid step id "${id}": a step id cannot be only digits (JSON objects list such keys first, so the step would lose its place in the flow order).`,
+    hint: `Add a letter, e.g. "step-${id}".`,
+  };
+}
+
+/** Throws INVALID_NAME unless `id` is a valid step id (lowercase letters, digits and single hyphens, not only digits). */
 export function assertValidStepId(id: string): void {
+  assertStepIdIsPathSafe(id);
+  if (isDigitsOnlyId(id)) {
+    const { message, hint } = digitsOnlyStepIdMessage(id);
+    throw new DflError(message, { hint, code: 'INVALID_NAME' });
+  }
+}
+
+/**
+ * Throws INVALID_NAME unless `id` has the id shape, so it is safe as a `steps/<id>` directory name.
+ * For reading existing steps: an all-digit id is accepted here (validateFlow reports it).
+ */
+export function assertStepIdIsPathSafe(id: string): void {
   if (!isValidId(id)) {
     throw new DflError(`Invalid step id "${id}".`, {
       hint: 'Use lowercase letters, digits and single hyphens (e.g. "plan-feature"), max 64 characters.',

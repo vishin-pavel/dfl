@@ -9,8 +9,11 @@
  * `.df/.lock`, created with O_CREAT|O_EXCL.
  *
  * - The file holds `{ pid, host, token, at }`. Only the owner (matching `token`) removes it.
- * - A lock whose process is gone (same host, `kill(pid, 0)` → ESRCH), or that is older than
- *   `staleMs`, is taken over.
+ * - While held, the owner refreshes the file's mtime every `staleMs / 4` (a heartbeat), so a long
+ *   mutation (e.g. a `git clone` for `flow pull`) is never mistaken for an abandoned lock.
+ * - A lock whose process is gone (same host, `kill(pid, 0)` → ESRCH), or whose mtime is older than
+ *   `staleMs` (no heartbeat: the process died, hangs or is suspended), is taken over.
+ * - Never keep a lock across an interactive prompt: other processes give up after `timeoutMs`.
  * - A `.lock` that is not a regular file (a symlink or directory) is never followed or deleted:
  *   the mutation fails with a DflError asking to remove it.
  * - When the lock file cannot be created for another reason (read-only `.df/`, …) the mutation runs
@@ -31,7 +34,10 @@ export const PROJECT_LOCK_FILE = '.lock';
 export interface ProjectLockOptions {
   /** How long to wait for another process's lock before failing with `LOCKED`. Default 15 s. */
   timeoutMs?: number | undefined;
-  /** A lock older than this is considered abandoned and taken over. Default 60 s. */
+  /**
+   * A lock not refreshed for this long is considered abandoned and taken over. Default 60 s. The
+   * holder refreshes its lock every quarter of its own `staleMs`.
+   */
   staleMs?: number | undefined;
 }
 
@@ -76,7 +82,7 @@ export async function acquireProjectLock(paths: ProjectPaths, options: ProjectLo
 
   for (;;) {
     const created = tryCreate(file, content);
-    if (created === 'created') return releaser(file, token);
+    if (created === 'created') return releaser(file, token, heartbeat(file, token, staleMs));
     if (created === 'unavailable') return () => undefined;
 
     const held = inspect(file);
@@ -184,11 +190,47 @@ function removeIfUnchanged(file: string, raw: string): void {
   }
 }
 
-function releaser(file: string, token: string): () => void {
+/** True while `file` is a regular file holding our `token`. */
+function ownsLock(file: string, token: string): boolean {
+  try {
+    const stat = fs.lstatSync(file);
+    return stat.isFile() && parseInfo(fs.readFileSync(file, 'utf8'))?.token === token;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refreshes the lock file's mtime every quarter of `staleMs` while we hold it (the timer does not
+ * keep the process alive). Stops by itself once the lock is gone or belongs to someone else.
+ */
+function heartbeat(file: string, token: string, staleMs: number): NodeJS.Timeout {
+  const timer = setInterval(
+    () => {
+      if (!ownsLock(file, token)) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const now = new Date();
+        fs.utimesSync(file, now, now);
+      } catch {
+        // Removed meanwhile: the next tick stops the timer.
+      }
+    },
+    // setInterval takes at most 2^31-1 ms (larger values fire every millisecond).
+    Math.min(Math.max(10, Math.floor(staleMs / 4)), 2 ** 31 - 1),
+  );
+  timer.unref();
+  return timer;
+}
+
+function releaser(file: string, token: string, timer: NodeJS.Timeout): () => void {
   let released = false;
   return () => {
     if (released) return;
     released = true;
+    clearInterval(timer);
     try {
       const stat = fs.lstatSync(file);
       if (!stat.isFile()) return;

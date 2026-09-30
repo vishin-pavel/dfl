@@ -48,6 +48,21 @@ describe('validateDefinition', () => {
     ]);
   });
 
+  it('reports step ids made of digits only (their declaration order is lost)', () => {
+    const def = withStates((states, d) => {
+      d.machine.initial = 'intro';
+      states['intro'] = { on: { NEXT: '3' } };
+      states['3'] = { on: { NEXT: '1' } };
+      states['1'] = { on: { NEXT: 'plan' } };
+    });
+    expect(Object.keys(def.machine.states).slice(0, 2)).toEqual(['1', '3']); // what JavaScript does with them
+    const issues = validateDefinition(def, 'sample').filter((issue) => issue.level === 'error');
+    expect(issues.map((issue) => [issue.step, issue.message])).toEqual([
+      ['1', expect.stringMatching(/^Invalid step id "1": a step id cannot be only digits .* Rename it, e\.g\. to "step-1"\.$/)],
+      ['3', expect.stringContaining('Invalid step id "3": a step id cannot be only digits')],
+    ]);
+  });
+
   it('rejects unsupported xstate features', () => {
     const def = withStates((states) => {
       states['plan'] = { ...states['plan'], states: { a: {} }, initial: 'a' };

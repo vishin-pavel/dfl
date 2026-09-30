@@ -36,7 +36,10 @@ export const HISTORY_LIMIT = 200;
 export const GOTO_EVENT = 'GOTO';
 /** Event recorded in history by `resetFlow`. */
 export const RESET_EVENT = 'RESET';
-/** Event recorded in history when the current step was removed and the position moved (`moveCurrentInRuntime`). */
+/**
+ * Event recorded in history when the current step was removed (`dfl step remove`, or a `flow pull` /
+ * `flow import --force` whose new version no longer has it) and the position moved (`moveCurrentInRuntime`).
+ */
 export const STEP_REMOVED_EVENT = 'STEP_REMOVED';
 
 /** Builds an xstate machine from `def.machine` (plain JSON config, no setup()). Throws DflError on xstate errors. */
@@ -193,6 +196,15 @@ export function moveCurrentInRuntime(paths: ProjectPaths, flow: string, from: st
   };
   writeJson(paths.stateFile, file);
   return true;
+}
+
+/**
+ * The current step stored for `flow` in `.df/state.json`, as written (it may no longer exist in the
+ * flow). Undefined when nothing is stored for the flow or the file cannot be read.
+ */
+export function storedCurrentStep(paths: ProjectPaths, flow: string): string | undefined {
+  const { file, problem } = readStateFile(paths);
+  return problem ? undefined : file.flows[flow]?.current;
 }
 
 // ---------------------------------------------------------------------------

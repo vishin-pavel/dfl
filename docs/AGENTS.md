@@ -43,7 +43,8 @@ MCP settings.
   created the file and the servers container. On removal (`dfl uninstall` only), a container
   that dfl created and that is now empty (`"mcpServers": {}`) is dropped, and a file that dfl
   created is deleted when nothing else is left (apart from `$schema`) and it has no comments. A
-  file or container that existed before dfl stays, byte for byte apart from the entry.
+  file or container that existed before dfl stays, byte for byte apart from the entry (a file that
+  was blank is left as `{}`, or empty for TOML). Config dirs are removed only when dfl created them.
 - **TOML** (Codex): dfl owns the `[mcp_servers.dfl]` table (preceded by a
   `# managed by dfl` line) and its `[mcp_servers.dfl.env]` subtable. They are replaced
   in place by text, from the header to the next table header, so the rest of the file

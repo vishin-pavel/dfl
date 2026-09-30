@@ -1143,3 +1143,72 @@ describe('integration fixes', () => {
     expect(again['repaired']).toBeUndefined();
   });
 });
+
+describe('recheck fixes', () => {
+  it('gives flow.json load errors their own hint: get_flow and update_step cannot repair them (engine-mcp-4)', async () => {
+    const paths = sampleProject();
+    setActiveFlow(paths, 'sample', 'project');
+    fs.cpSync(paths.flowDir('sample'), paths.flowDir('sample2'), { recursive: true }); // flow.json name "sample" ≠ dir
+    const { call } = await connect({ root: paths.root });
+    for (const [tool, args] of [
+      ['get_flow', { flow: 'sample2' }],
+      ['get_status', { flow: 'sample2' }],
+      ['update_step', { flow: 'sample2', step: 'plan', title: 'x' }],
+      ['complete_step', { flow: 'sample2', step: 'plan' }],
+    ] as const) {
+      const result = await call(tool, args);
+      expect(result.isError, tool).toBe(true);
+      expect(result.structuredContent, tool).toMatchObject({ code: 'INVALID_FLOW' });
+      const hint = String(result.structuredContent!['hint']);
+      expect(hint, tool).toMatch(/Set "name": "sample2" in \.df\/sample2\/flow\.json/);
+      expect(hint, tool).toMatch(/edit \.df\/sample2\/flow\.json directly/);
+      expect(hint, tool).not.toMatch(/get_flow still shows/);
+    }
+
+    // A schema error in the active flow: sync gets the file hint too.
+    fs.writeFileSync(paths.flowFile('sample'), JSON.stringify({ name: 'sample', machine: { initial: 'plan' } }));
+    const sync = await call('sync');
+    expect(sync.structuredContent).toMatchObject({ code: 'INVALID_FLOW', hint: expect.stringMatching(/edit \.df\/sample\/flow\.json directly/) });
+  });
+
+  it('get_status of a skill of the previous flow says its skills are the installed ones (cli-content-tui-1)', async () => {
+    const paths = await installedProject();
+    writeSampleFlow(paths, sampleFlowDefinition('other'));
+    setActiveFlow(paths, 'other', 'project'); // the team default changed with a git pull
+    const { ok } = await connect({ root: paths.root });
+    const skills = (await ok('get_status', { flow: 'sample' }))['skills'];
+    expect(skills).toMatchObject({
+      installed: true,
+      upToDate: false,
+      reason: 'the installed skills are for flow "sample" but the active flow is "other"',
+    });
+    expect(skills['warning']).toMatch(/`dfl flow-update` to install the skills of "other", or `dfl flow use sample`/);
+    expect(skills['warning']).not.toMatch(/not installed/);
+    // A flow whose skills are not installed keeps the "not the active flow" answer.
+    writeSampleFlow(paths, sampleFlowDefinition('third'));
+    expect((await ok('get_status', { flow: 'third' }))['skills']['warning']).toMatch(/not the active flow.*`dfl flow use third`/);
+  });
+
+  it('a sync without selected agents does not make the skills count as installed (engine-mcp-3)', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    const { ok } = await connect({ root: paths.root });
+    const report = await ok('sync');
+    expect(report['agents']).toEqual([]);
+    expect(fs.existsSync(paths.manifestFile)).toBe(true);
+    expect((await ok('get_status'))['skills']).toMatchObject({ installed: false, upToDate: false, warning: NOT_INSTALLED });
+    const added = await ok('add_step', { id: 'extra', after: 'build' });
+    expect(added['sync']).toBeNull();
+  });
+
+  it('get_status tells how to recover from an unreadable manifest (safety-4)', async () => {
+    const paths = await installedProject();
+    fs.writeFileSync(paths.manifestFile, '{"skills": [');
+    const { ok, call } = await connect({ root: paths.root });
+    const skills = (await ok('get_status'))['skills'];
+    expect(skills).toMatchObject({ installed: true, upToDate: false });
+    expect(skills['warning']).toMatch(/Delete \.df\/installed\.json and run `dfl install` again\.$/);
+    const sync = await call('sync');
+    expect(sync.structuredContent).toMatchObject({ code: 'INVALID_MANIFEST', hint: expect.stringMatching(/Delete the file and run `dfl install`/) });
+  });
+});

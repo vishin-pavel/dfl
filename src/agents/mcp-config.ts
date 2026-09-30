@@ -244,10 +244,12 @@ export function readJsonEntry(file: string, keyPath: string[], name: string): un
   return node === undefined ? undefined : plain(getNodeValue(node));
 }
 
-/** True when the file exists (non-blank) and parses. */
+/**
+ * True when the config file exists, also when it is blank or holds only whitespace (MCP targets'
+ * `inspect`): such a file was there before dfl, so uninstall must never delete it.
+ */
 export function jsonFileExists(file: string): boolean {
-  const raw = readTextIfExists(file);
-  return raw !== undefined && raw.trim() !== '';
+  return readTextIfExists(file) !== undefined;
 }
 
 /** True when `<keyPath>` exists in the file (false for missing or unparsable files). */

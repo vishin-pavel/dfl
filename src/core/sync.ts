@@ -36,7 +36,7 @@ import {
   loadProjectConfig,
   setSelectedAgents,
 } from './config.js';
-import { DflError, errorMessage } from './errors.js';
+import { DflError, errorMessage, isDflError } from './errors.js';
 import { buildFlowModel, flowExists, listFlows, loadActiveFlow } from './flow.js';
 import { copyDir, exists, isFile, readJsonIfExists, removeEmptyDirsUpTo, removePath, walkFiles, writeJson } from './fsx.js';
 import { SKILL_DIR_GITIGNORE_CONTENT, SKILL_DIR_GITIGNORE_FILE, removeLegacyGitignoreBlock, writeDfGitignore } from './gitignore.js';
@@ -64,7 +64,7 @@ import type {
   SyncReport,
 } from './types.js';
 import { assertFlowValid } from './validate.js';
-import { resolveVars, setVar, templateEnv, varScope } from './vars.js';
+import { resolveVars, setVar, varScope } from './vars.js';
 
 export interface SyncOptions {
   /** Agents to install for; default: getSelectedAgents(). Persisted to local.json when given. */
@@ -193,13 +193,22 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
     );
   };
 
+  // Dirs dfl created (earlier or in this run): only these are removed again once empty.
+  const createdDirs = new Set((previous.createdDirs ?? []).filter((dir) => isRealDir(absPath(root, dir))));
+  const recordCreated = (relDir: string): void => {
+    if (!dryRun) for (const dir of missingDirs(root, relDir)) createdDirs.add(dir);
+  };
+
   // 5. Skills into every distinct skills dir.
   const installed: SkillManifestEntry[] = [];
   const reportSkills: SyncReport['skills'] = [];
   /** Dirs not written this run for a reason already reported (never treated as stale). */
   const skipped = new Set<string>();
+  /** Skills dirs skipped as a whole because of a symlink: their agents get no skills (manifest `skippedDirs`). */
+  const skippedSkillsDirs: string[] = [];
   for (const group of groupBySkillsDir(adapters)) {
     const groupLink = firstSymlinkBetween(root, absPath(root, group.dir));
+    if (groupLink) skippedSkillsDirs.push(group.dir);
     for (const skill of skills) {
       const dir = `${group.dir}/${skill.name}`;
       if (groupLink) {
@@ -226,7 +235,10 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
         skipped.add(dir);
         continue;
       }
-      if (!dryRun) warnings.push(...writeSkill(root, absDir, files, before?.files ?? []));
+      if (!dryRun) {
+        recordCreated(group.dir);
+        warnings.push(...writeSkill(root, absDir, files, before?.files ?? []));
+      }
       installed.push({ agents: [...group.agents], name: skill.name, dir, files: files.map((file) => file.path) });
       reportSkills.push({ name: skill.name, dir, agents: [...group.agents], kind: skill.kind });
     }
@@ -238,7 +250,7 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
   const linkTargets = skillsDirLinkTargets(root);
   for (const entry of previous.skills) {
     if (produced.has(entry.dir) || skipped.has(entry.dir)) continue;
-    const result = removeSkillDir(root, entry, dryRun, linkTargets);
+    const result = removeSkillDir(root, entry, dryRun, linkTargets, createdDirs);
     if (result.link) warnLink(result.link);
     if (result.removed) removed.push(entry.dir);
     if (result.warning) warnings.push(result.warning);
@@ -271,6 +283,7 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
         if (dryRun) {
           status = group.target.plan(root, spec);
         } else {
+          recordCreated(path.posix.dirname(group.file));
           const had = group.target.has(root, spec.name);
           status = group.target.upsert(root, spec) ? (had ? 'updated' : 'added') : 'unchanged';
         }
@@ -327,6 +340,8 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
       skills: installed,
       mcp: mcpEntries,
       rendered: mergeRendered(paths, previous.rendered ?? [], model.name, render.rendered),
+      createdDirs: [...createdDirs],
+      skippedDirs: skippedSkillsDirs,
       dflVersion: packageVersion(),
       fingerprint: computeSyncFingerprint(paths),
     });
@@ -396,8 +411,9 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
   };
 
   const linkTargets = skillsDirLinkTargets(root);
+  const createdDirs = new Set(manifest.createdDirs ?? []);
   for (const entry of manifest.skills) {
-    const result = removeSkillDir(root, entry, false, linkTargets);
+    const result = removeSkillDir(root, entry, false, linkTargets, createdDirs);
     if (result.link) warnLink(result.link);
     if (result.removed) removed.push(entry.dir);
     if (result.warning) warnings.push(result.warning);
@@ -439,7 +455,11 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
         file: entry.file,
         deleteEmptyFile: entry.createdFile === true,
         dropEmptyContainer: entry.createdContainer === true,
+        // Only the dirs dfl created go with a deleted file (a pre-existing `.kiro/` stays).
+        removeEmptyDirs: false,
       });
+      const abs = absPath(root, entry.file);
+      if (changed && lstatOrUndefined(abs) === undefined) removeEmptyParents(path.dirname(abs), root, linkTargets, createdDirs);
       mcp.push({ file: entry.file, changed });
     } catch (error) {
       warnings.push(
@@ -463,6 +483,7 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
       skills: [],
       mcp: failed,
       rendered: options.purge ? [] : [...rendered],
+      createdDirs: [...createdDirs],
       uninstalled: true,
     });
   }
@@ -494,13 +515,17 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
 
 /**
  * True once this developer ran `dfl install` (`.df/installed.json` exists and is not the leftover of
- * an incomplete `dfl uninstall`): mutations may auto-sync.
+ * an incomplete `dfl uninstall`): mutations may auto-sync. A manifest that lists neither agents nor
+ * skills does not count: `dfl flow-update` (or the MCP `sync` tool) writes one in a fresh clone where
+ * this developer selected no agents yet, and no skill is installed anywhere then.
  */
 export function isInstalledForUser(paths: ProjectPaths): boolean {
   if (!exists(paths.manifestFile)) return false;
   try {
     const data = readJsonIfExists<unknown>(paths.manifestFile);
-    return !(isRecord(data) && data['uninstalled'] === true);
+    if (!isRecord(data)) return true; // malformed: sync reports the problem
+    if (data['uninstalled'] === true) return false;
+    return manifestAgents(data['agents']).length > 0 || arrayOf(data['skills']).length > 0;
   } catch {
     // An unreadable manifest still means dfl was installed; sync reports the problem.
     return true;
@@ -512,18 +537,30 @@ export function isInstalledForUser(paths: ProjectPaths): boolean {
 // ---------------------------------------------------------------------------
 
 export interface SyncState {
-  /** `.df/installed.json` exists. */
+  /** This developer installed dfl (isInstalledForUser). */
   installed: boolean;
   /** The installed skills match the current flow files, variables and settings. */
   upToDate: boolean;
   /** Why the skills are not installed / not up to date (callers add the `dfl flow-update` hint). */
   reason?: string | undefined;
+  /**
+   * Set when `dfl flow-update` alone is not the fix: what to do instead (a sentence; CLI commands
+   * are spelled `` `dfl …` ``). Callers show it in place of their flow-update hint.
+   */
+  fix?: string | undefined;
 }
+
+/** Hint for an install manifest that cannot be read or is malformed. */
+const INVALID_MANIFEST_HINT = 'Delete the file and run `dfl install` again (dfl then forgets which skill dirs it installed).';
 
 /**
  * sha256 over everything the installed skills are rendered from: dfl version, active flow name, every
- * file under `.df/<flow>/` except rendered `.md` outputs (path + content), resolved vars, template env,
- * selected agents, the MCP preference, the dfl CLI launcher and the project root.
+ * file under `.df/<flow>/` except rendered `.md` outputs (path + content), the stored vars (defaults,
+ * config.json, local.json), selected agents, the MCP preference, the dfl CLI launcher and the project root.
+ *
+ * Process-environment overrides (`DFL_VAR_*`, `DFL_ENV_*`) are left out on purpose: they belong to one
+ * shell, so an MCP server or a terminal started without them must not report the skills as stale (and
+ * send the user into a `dfl flow-update` that drops the values they set).
  */
 export function computeSyncFingerprint(paths: ProjectPaths): string {
   const model = loadActiveFlow(paths);
@@ -536,12 +573,11 @@ export function computeSyncFingerprint(paths: ProjectPaths): string {
   field('dfl', packageVersion());
   field('flow', model.name);
   for (const rel of walkFiles(model.dir)) {
-    if ((rel.startsWith('steps/') && rel.endsWith('.md')) || IGNORED_FINGERPRINT_FILES.has(path.posix.basename(rel))) continue;
+    if ((rel.startsWith('steps/') && rel.endsWith('.md')) || DISPOSABLE_FILES.has(path.posix.basename(rel))) continue;
     field('path', rel);
     field('content', fs.readFileSync(path.join(model.dir, ...rel.split('/'))));
   }
-  field('vars', stableJson(resolveVars(paths, model.def).values));
-  field('env', stableJson(templateEnv()));
+  field('vars', stableJson(resolveVars(paths, model.def, {}).values));
   field('agents', sortAgents(getSelectedAgents(paths)).join(','));
   field('mcp', String(getMcpEnabled(paths)));
   field('cli', dflLauncher(paths));
@@ -559,7 +595,20 @@ export function checkSyncState(paths: ProjectPaths): SyncState {
   try {
     manifest = readManifest(paths);
   } catch (error) {
-    return { installed: true, upToDate: false, reason: `the install manifest cannot be read (${errorMessage(error)})` };
+    const message = errorMessage(error).replace(/\.$/, '');
+    return {
+      installed: true,
+      upToDate: false,
+      reason:
+        isDflError(error) && error.code === 'INVALID_MANIFEST'
+          ? message.charAt(0).toLowerCase() + message.slice(1)
+          : `the install manifest cannot be read (${message})`,
+      fix: `Delete ${toRel(paths.root, paths.manifestFile)} and run \`dfl install\` again.`,
+    };
+  }
+  // `dfl flow delete` of the last active flow keeps a manifest without flow and skills.
+  if (manifest.flow === undefined && manifest.skills.length === 0) {
+    return { installed: true, upToDate: false, reason: "no flow's skills are installed yet" };
   }
   const version = packageVersion();
   if (manifest.dflVersion !== undefined && manifest.dflVersion !== version) {
@@ -595,10 +644,60 @@ export function checkSyncState(paths: ProjectPaths): SyncState {
       reason: `the flow "${active}" (templates, flow.json), variables or install settings changed since the skills were installed`,
     };
   }
+  const skipped = manifest.skippedDirs ?? [];
+  if (skipped.length > 0) {
+    const agents = manifest.agents.filter((id) => skipped.includes(getAgent(id).skillsDir)).map((id) => getAgent(id).name);
+    return {
+      installed: true,
+      upToDate: false,
+      reason:
+        `no skills are installed in ${skipped.join(', ')}${agents.length > 0 ? ` (${agents.join(', ')})` : ''}: ` +
+        `${skipped.length === 1 ? 'it is a symbolic link' : 'they are symbolic links'}, and dfl never writes through symlinks`,
+      fix: `Replace ${skipped.length === 1 ? 'it' : 'them'} with a real directory, then run \`dfl flow-update\`.`,
+    };
+  }
   return { installed: true, upToDate: true };
 }
 
-const IGNORED_FINGERPRINT_FILES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db']);
+/**
+ * checkSyncState from the point of view of `flowName` (e.g. `dfl status --flow <name>`, or a skill of
+ * that flow calling MCP `get_status`): the active flow gets checkSyncState; a flow that is not active
+ * but whose skills are the installed ones (the active flow changed, e.g. the team default after a
+ * `git pull`) is reported as such; undefined for any other flow (its skills are not installed, nothing
+ * to report). Never throws.
+ */
+export function checkFlowSyncState(paths: ProjectPaths, flowName: string): SyncState | undefined {
+  let active: string | undefined;
+  try {
+    active = getActiveFlowName(paths);
+  } catch {
+    active = undefined;
+  }
+  if (active === flowName) return checkSyncState(paths);
+  if (!isInstalledForUser(paths)) return undefined;
+  let installedFlow: string | undefined;
+  try {
+    installedFlow = readManifest(paths).flow;
+  } catch {
+    return undefined;
+  }
+  if (installedFlow !== flowName) return undefined;
+  return {
+    installed: true,
+    upToDate: false,
+    reason:
+      active === undefined
+        ? `the installed skills are for flow "${flowName}" but no flow is active`
+        : `the installed skills are for flow "${flowName}" but the active flow is "${active}"`,
+    fix:
+      active === undefined
+        ? `Run \`dfl flow use ${flowName}\` to keep working on "${flowName}".`
+        : `Run \`dfl flow-update\` to install the skills of "${active}", or \`dfl flow use ${flowName}\` to keep working on "${flowName}".`,
+  };
+}
+
+/** OS junk file names: not hashed into the fingerprint, and disposable when a skill dir is removed. */
+const DISPOSABLE_FILES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db']);
 
 /** JSON with object keys sorted at every level (stable across key insertion order). */
 function stableJson(value: unknown): string {
@@ -634,13 +733,21 @@ export function readManifest(paths: ProjectPaths): Manifest {
  * Structurally malformed manifests throw DflError `INVALID_MANIFEST`.
  */
 export function loadManifest(paths: ProjectPaths): { manifest: Manifest; warnings: string[] } {
-  const data = readJsonIfExists<unknown>(paths.manifestFile);
-  if (data === undefined) return { manifest: emptyManifest(), warnings: [] };
-  const invalid = (detail: string): DflError =>
+  const invalid = (detail: string, cause?: unknown): DflError =>
     new DflError(`Invalid install manifest ${paths.manifestFile}: ${detail}`, {
-      hint: 'Delete the file and run `dfl install` again (dfl then forgets which skill dirs it installed).',
+      hint: INVALID_MANIFEST_HINT,
       code: 'INVALID_MANIFEST',
+      ...(cause !== undefined ? { cause } : {}),
     });
+  let data: unknown;
+  try {
+    data = readJsonIfExists<unknown>(paths.manifestFile);
+  } catch (error) {
+    // Unparsable JSON or an unreadable file: every command that needs the manifest says how to recover.
+    const syntax = isDflError(error) && error.code === 'INVALID_JSON' && error.cause instanceof Error ? error.cause.message : undefined;
+    throw invalid(syntax !== undefined ? `cannot parse JSON (${syntax}).` : errorMessage(error), error);
+  }
+  if (data === undefined) return { manifest: emptyManifest(), warnings: [] };
   if (!isRecord(data)) throw invalid('expected a JSON object.');
   if (data['version'] !== undefined && data['version'] !== 1) throw invalid(`unsupported version ${String(data['version'])}.`);
   const warnings: string[] = [];
@@ -691,6 +798,20 @@ export function loadManifest(paths: ProjectPaths): { manifest: Manifest; warning
       else warnings.push(`Ignored suspicious rendered path "${String(rel)}" in the install manifest.`);
     }
   }
+  const dirList = (key: 'createdDirs' | 'skippedDirs', allowed: ReadonlySet<string>): string[] | undefined => {
+    if (!Array.isArray(data[key])) return undefined;
+    const out: string[] = [];
+    for (const dir of data[key]) {
+      if (typeof dir === 'string' && allowed.has(dir)) {
+        if (!out.includes(dir)) out.push(dir);
+      } else {
+        warnings.push(`Ignored suspicious directory "${String(dir)}" in the install manifest.`);
+      }
+    }
+    return out;
+  };
+  const createdDirs = dirList('createdDirs', AGENT_CONFIG_DIRS);
+  const skippedDirs = dirList('skippedDirs', SKILLS_DIRS);
   const manifest: Manifest = {
     version: 1,
     flow: typeof data['flow'] === 'string' ? data['flow'] : undefined,
@@ -699,13 +820,23 @@ export function loadManifest(paths: ProjectPaths): { manifest: Manifest; warning
     mcp,
   };
   if (rendered !== undefined) manifest.rendered = rendered;
+  if (createdDirs !== undefined) manifest.createdDirs = createdDirs;
+  if (skippedDirs !== undefined && skippedDirs.length > 0) manifest.skippedDirs = skippedDirs;
   if (typeof data['fingerprint'] === 'string') manifest.fingerprint = data['fingerprint'];
   if (typeof data['dflVersion'] === 'string') manifest.dflVersion = data['dflVersion'];
   if (data['uninstalled'] === true) manifest.uninstalled = true;
   return { manifest, warnings };
 }
 
+/**
+ * Writes `.df/installed.json`. `createdDirs` keeps only the dirs that still exist (a dir dfl removed,
+ * or someone else did, is no longer dfl's once it is created again by someone else).
+ */
 export function writeManifest(paths: ProjectPaths, manifest: Manifest): void {
+  const createdDirs =
+    manifest.createdDirs === undefined
+      ? undefined
+      : [...new Set(manifest.createdDirs)].filter((dir) => isRealDir(absPath(paths.root, dir))).sort(compare);
   writeJson(paths.manifestFile, {
     version: 1,
     ...(manifest.flow !== undefined ? { flow: manifest.flow } : {}),
@@ -713,6 +844,8 @@ export function writeManifest(paths: ProjectPaths, manifest: Manifest): void {
     skills: manifest.skills,
     mcp: manifest.mcp,
     ...(manifest.rendered !== undefined ? { rendered: manifest.rendered } : {}),
+    ...(createdDirs !== undefined ? { createdDirs } : {}),
+    ...(manifest.skippedDirs !== undefined && manifest.skippedDirs.length > 0 ? { skippedDirs: manifest.skippedDirs } : {}),
     ...(manifest.dflVersion !== undefined ? { dflVersion: manifest.dflVersion } : {}),
     ...(manifest.fingerprint !== undefined ? { fingerprint: manifest.fingerprint } : {}),
     ...(manifest.uninstalled === true ? { uninstalled: true } : {}),
@@ -771,6 +904,35 @@ function isAllowedSkillDir(dir: string): boolean {
   const slash = dir.lastIndexOf('/');
   if (slash <= 0) return false;
   return AGENTS.some((adapter) => adapter.skillsDir === dir.slice(0, slash)) && isValidId(dir.slice(slash + 1));
+}
+
+/** Every agent skills dir (`.claude/skills`, `.agents/skills`, …). */
+const SKILLS_DIRS: ReadonlySet<string> = new Set(AGENTS.map((adapter) => adapter.skillsDir));
+
+/**
+ * Dirs dfl may create on the way to a skills dir or an MCP config file (`.claude`, `.claude/skills`,
+ * `.kiro`, `.kiro/settings`, …): the only values accepted in the manifest's `createdDirs`.
+ */
+const AGENT_CONFIG_DIRS: ReadonlySet<string> = new Set(
+  AGENTS.flatMap((adapter) => [adapter.skillsDir, ...(adapter.mcp ? [path.posix.dirname(adapter.mcp.file)] : [])]).flatMap(
+    (dir) => ancestorsOf(dir),
+  ),
+);
+
+/** `a/b/c` → `a`, `a/b`, `a/b/c` (nothing for `.`). */
+function ancestorsOf(relDir: string): string[] {
+  const parts = relDir.split('/').filter((part) => part !== '' && part !== '.');
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'));
+}
+
+/** The dirs of `ancestorsOf(relDir)` that do not exist yet (dfl is about to create them). */
+function missingDirs(root: string, relDir: string): string[] {
+  return ancestorsOf(relDir).filter((rel) => lstatOrUndefined(absPath(root, rel)) === undefined);
+}
+
+/** A real directory (not a symlink to one). */
+function isRealDir(p: string): boolean {
+  return lstatOrUndefined(p)?.isDirectory() === true;
 }
 
 /** Relative file path inside a skill dir that is safe to write or delete: no absolute paths, `.` or `..` segments. */
@@ -857,7 +1019,13 @@ function skillDirOwner(absDir: string): 'free' | 'dfl' | 'user' | 'foreign' {
   const skillStat = lstatOrUndefined(skillFile);
   if (skillStat) return skillStat.isFile() && hasDflMetadata(fs.readFileSync(skillFile, 'utf8')) ? 'dfl' : 'user';
   if (hasSkillMarker(absDir)) return 'dfl';
-  return fs.readdirSync(absDir).length === 0 ? 'free' : 'foreign';
+  // OS junk (.DS_Store, Thumbs.db) does not make a dir someone else's.
+  return fs.readdirSync(absDir).every((name) => isDisposableFile(path.join(absDir, name))) ? 'free' : 'foreign';
+}
+
+/** OS junk files (.DS_Store, Thumbs.db) that never count as user content and are deleted with an emptied skill dir. */
+function isDisposableFile(abs: string): boolean {
+  return DISPOSABLE_FILES.has(path.basename(abs)) && lstatOrUndefined(abs)?.isFile() === true;
 }
 
 /** True when the dir holds dfl's `.gitignore` marker (a regular file starting with dfl's comment). */
@@ -976,6 +1144,7 @@ function removeSkillDir(
   entry: SkillManifestEntry,
   dryRun: boolean,
   keep: ReadonlySet<string>,
+  createdDirs: ReadonlySet<string>,
 ): { removed: boolean; warning?: string; link?: string } {
   const abs = absPath(root, entry.dir);
   const link = firstSymlinkBetween(root, abs);
@@ -999,7 +1168,10 @@ function removeSkillDir(
   });
   const deletableSet = new Set(deletable);
   const leftovers = listTree(abs)
-    .filter((item) => item.kind !== 'dir' && !deletableSet.has(item.rel))
+    .filter(
+      (item) =>
+        item.kind !== 'dir' && !deletableSet.has(item.rel) && !(item.kind === 'file' && DISPOSABLE_FILES.has(path.posix.basename(item.rel))),
+    )
     .map((item) => item.rel);
   if (!dryRun) {
     for (const rel of deletable) {
@@ -1008,9 +1180,9 @@ function removeSkillDir(
       removeEmptyDirsUpTo(path.dirname(file), abs);
     }
     if (leftovers.length === 0) {
-      // Only (empty) directories are left.
+      // Only (empty) directories and OS junk (.DS_Store) are left.
       fs.rmSync(abs, { recursive: true, force: true });
-      removeEmptyParents(path.dirname(abs), root, keep);
+      removeEmptyParents(path.dirname(abs), root, keep, createdDirs);
     }
   }
   if (leftovers.length > 0) {
@@ -1043,14 +1215,22 @@ function skillsDirLinkTargets(root: string): Set<string> {
   return targets;
 }
 
-/** Removes `dir` and its empty ancestors below `root`, stopping at non-directories and at `keep` (real paths). */
-function removeEmptyParents(dir: string, root: string, keep: ReadonlySet<string>): void {
+/**
+ * Removes `dir` and its empty ancestors below `root`, stopping at non-directories, at `keep` (real
+ * paths) and at every dir dfl did not create (`createdDirs`, project-relative: e.g. a `.kiro/` that
+ * existed before `dfl install` stays, also when empty).
+ */
+function removeEmptyParents(dir: string, root: string, keep: ReadonlySet<string>, createdDirs: ReadonlySet<string>): void {
   let current = path.resolve(dir);
   const stop = path.resolve(root);
   while (current.startsWith(stop + path.sep)) {
+    if (!createdDirs.has(toRel(stop, current))) return;
     if (keep.has(realpathOrSelf(current)) || !lstatOrUndefined(current)?.isDirectory()) return;
     try {
-      if (fs.readdirSync(current).length > 0) return;
+      // OS junk (.DS_Store) does not keep a dir dfl created.
+      const entries = fs.readdirSync(current);
+      if (!entries.every((name) => DISPOSABLE_FILES.has(name) && lstatOrUndefined(path.join(current, name))?.isFile() === true)) return;
+      for (const name of entries) fs.unlinkSync(path.join(current, name));
       fs.rmdirSync(current);
     } catch {
       return;

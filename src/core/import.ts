@@ -13,19 +13,23 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { DflError } from './errors.js';
 import {
+  NEXT_EVENT,
   type StagedFlow,
   commitStagedFlow,
   discardStagedFlow,
   flowExists,
   getFlowTemplate,
   loadFlow,
+  orderStates,
   parseFlowDefinition,
   readFlowDefinition,
   stageFlowCopy,
 } from './flow.js';
-import { exists, isDir, listDirs, readJson, toPosix, walkFiles } from './fsx.js';
+import { copyFile, exists, isDir, isFile, listDirs, readJson, relPosix, toPosix, walkFiles } from './fsx.js';
 import { assertValidFlowName } from './ids.js';
-import type { FlowModel, FlowSource, ProjectPaths } from './types.js';
+import { moveCurrentInRuntime, storedCurrentStep } from './machine.js';
+import { readRenderedOutputs } from './render.js';
+import type { FlowDefinition, FlowModel, FlowSource, ProjectPaths } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -126,14 +130,36 @@ export interface ImportOptions {
 /** `source` as recorded in flow.json (`commit`: the imported git commit). */
 export type RecordedFlowSource = FlowSource & { commit?: string | undefined };
 
+/** The developer's position moved because the current step is not in the new version of the flow. */
+export interface CurrentStepMove {
+  from: string;
+  to: string;
+}
+
+/** What replacing an existing flow's files kept of the old flow dir (see {@link importFlows}, {@link pullFlow}). */
+export interface FlowReplacement {
+  /**
+   * Hand-written `.md` files under `steps/` (flow-relative posix paths) carried over into the new
+   * files: dfl did not render them, and they are git-ignored, so deleting them would lose them.
+   */
+  kept: string[];
+  /** Set when the current step was not in the new version and the position moved (`STEP_REMOVED` history entry). */
+  currentMoved?: CurrentStepMove | undefined;
+}
+
+/** An imported flow; `kept`/`currentMoved` are only non-empty when `force` replaced an existing flow. */
+export type ImportedFlow = FlowModel & FlowReplacement;
+
 /**
  * Imports flow(s) into `.df/` (records `source` in flow.json). Returns the imported models.
  * `source.path` is the imported flow's directory relative to the repository / source root; for a
  * local source `source.ref` is that root relative to the project root (posix). Every target name
  * is validated and every flow is staged before any existing flow is replaced; `force` then swaps
- * each flow directory atomically, keeping active-flow settings and runtime state (keyed by name).
+ * each flow directory atomically, keeping active-flow settings, runtime state (keyed by name) and
+ * hand-written `.md` files under steps/; a current step the new version lacks moves like in
+ * {@link pullFlow}.
  */
-export async function importFlows(paths: ProjectPaths, input: string, options: ImportOptions = {}): Promise<FlowModel[]> {
+export async function importFlows(paths: ProjectPaths, input: string, options: ImportOptions = {}): Promise<ImportedFlow[]> {
   if (options.name !== undefined) assertValidFlowName(options.name);
   const source = parseFlowSource(input);
   if (source.kind === 'local') return importFromDir(paths, source.url, source, input, options, undefined);
@@ -147,15 +173,19 @@ export interface PullOptions {
   dryRun?: boolean | undefined;
 }
 
-export interface PullResult {
+export interface PullResult extends FlowReplacement {
   /** The flow after the pull (with `dryRun`: as it is now). */
   model: FlowModel;
   /** The source recorded in flow.json after the pull. */
   source: RecordedFlowSource;
-  /** Flow-relative posix paths (rendered `.md` output excluded). */
+  /** Flow-relative posix paths (rendered `.md` output and the `kept` files excluded). */
   added: string[];
   removed: string[];
   changed: string[];
+  /**
+   * With `dryRun`, `kept` and `currentMoved` say what the pull would keep and where the position
+   * would move. Both are empty when nothing changes (the flow's files are then left alone).
+   */
   dryRun: boolean;
 }
 
@@ -163,8 +193,11 @@ export interface PullResult {
  * Re-imports `.df/<name>` from the source recorded in its flow.json: a prebuilt template (from the
  * running dfl package), a git repository (`ref` URL at `rev`, or `options.rev`) or a local
  * directory. The flow's files are replaced atomically (local edits to its templates are lost);
- * runtime state and active-flow settings are kept. Throws NO_SOURCE for flows created in the
- * project (`source.type: 'created'`) or without a recorded source.
+ * runtime state, active-flow settings and hand-written `.md` files under steps/ (`kept`) are kept.
+ * When the developer's current step is not in the new version, the position moves to a surviving
+ * step (`currentMoved`, see {@link planCurrentStepMove}). Nothing is written when no file changes.
+ * Throws NO_SOURCE for flows created in the project (`source.type: 'created'`) or without a
+ * recorded source.
  */
 export async function pullFlow(paths: ProjectPaths, name: string, options: PullOptions = {}): Promise<PullResult> {
   const def = readFlowDefinition(paths, name);
@@ -353,7 +386,7 @@ function importFromDir(
   input: string,
   options: ImportOptions,
   commit: string | undefined,
-): FlowModel[] {
+): ImportedFlow[] {
   const searchDir = source.subpath ? path.join(baseDir, ...source.subpath.split('/')) : baseDir;
   if (!isDir(searchDir)) {
     throw new DflError(`Path "${source.subpath ?? ''}" does not exist in ${source.url}.`, { code: 'SOURCE_NOT_FOUND' });
@@ -449,7 +482,10 @@ function importFromDir(
             };
       staged.push(stageFlowCopy(paths, p.dir, p.target, flowSource));
     }
-    return staged.map((s) => commitStagedFlow(paths, s, options.force ?? false));
+    const force = options.force ?? false;
+    // Hand-written files are carried into every staged flow before the first existing flow is replaced.
+    const prepared = staged.map((s) => prepareReplacement(paths, s, force));
+    return prepared.map((replacement) => commitReplacement(paths, replacement, force));
   } finally {
     for (const s of staged) discardStagedFlow(s);
   }
@@ -465,11 +501,110 @@ function pullFromDir(paths: ProjectPaths, name: string, srcDir: string, source: 
     const removed = [...before.keys()].filter((rel) => !after.has(rel));
     const changed = [...after.keys()].filter((rel) => before.has(rel) && !before.get(rel)!.equals(after.get(rel)!));
     const dryRun = options.dryRun ?? false;
-    const model = dryRun ? loadFlow(paths, name) : commitStagedFlow(paths, staged, true);
-    return { model, source, added, removed, changed, dryRun };
+    if (added.length + removed.length + changed.length === 0) {
+      // Up to date: leave the flow dir (and its rendered output) alone.
+      return { model: loadFlow(paths, name), source, added, removed, changed, kept: [], dryRun };
+    }
+    if (dryRun) {
+      const kept = handWrittenFiles(paths, name, staged.dir);
+      const currentMoved = planCurrentStepMove(paths, name, staged.def);
+      return { model: loadFlow(paths, name), source, added, removed, changed, kept, currentMoved, dryRun };
+    }
+    const { kept, currentMoved, ...model } = commitReplacement(paths, prepareReplacement(paths, staged, true), true);
+    return { model, source, added, removed, changed, kept, currentMoved, dryRun };
   } finally {
     discardStagedFlow(staged);
   }
+}
+
+/** A staged flow ready to replace `.df/<name>`, with what it keeps of the old flow dir. */
+interface PreparedReplacement extends FlowReplacement {
+  staged: StagedFlow;
+}
+
+/**
+ * Before a staged flow replaces an existing `.df/<name>` (`replace`): copies the old dir's
+ * hand-written `.md` files under steps/ into the staged dir and plans where the developer's current
+ * step goes when the new version does not have it. Nothing outside the staged dir is written.
+ */
+function prepareReplacement(paths: ProjectPaths, staged: StagedFlow, replace: boolean): PreparedReplacement {
+  const dir = paths.flowDir(staged.name);
+  if (!replace || !isDir(dir)) return { staged, kept: [] };
+  const kept = handWrittenFiles(paths, staged.name, staged.dir);
+  for (const rel of kept) copyFile(path.join(dir, ...rel.split('/')), path.join(staged.dir, ...rel.split('/')));
+  return { staged, kept, currentMoved: planCurrentStepMove(paths, staged.name, staged.def) };
+}
+
+/** Moves a prepared flow into place, then moves the developer's position as planned. */
+function commitReplacement(paths: ProjectPaths, prepared: PreparedReplacement, replace: boolean): ImportedFlow {
+  const { staged, kept, currentMoved: planned } = prepared;
+  const model = commitStagedFlow(paths, staged, replace);
+  const currentMoved = planned && moveCurrentInRuntime(paths, staged.name, planned.from, planned.to) ? planned : undefined;
+  return Object.assign(model, { kept, currentMoved });
+}
+
+/**
+ * The `.md` files under `steps/` of `.df/<name>` that dfl did not render (flow-relative, sorted):
+ * neither listed in the install manifest's `rendered` nor next to a `<file>.hbs` template in the old
+ * flow dir or in `incomingDir` (the next sync renders those again). Imports never copy `.md` files
+ * under steps/, and `.df/.gitignore` ignores them, so a replacement must carry these over or they
+ * are lost for good.
+ */
+function handWrittenFiles(paths: ProjectPaths, name: string, incomingDir: string): string[] {
+  const dir = paths.flowDir(name);
+  const rendered = readRenderedOutputs(paths);
+  const hasTemplate = (base: string, rel: string): boolean => isFile(path.join(base, ...`${rel}.hbs`.split('/')));
+  return walkFiles(dir).filter((rel) => {
+    if (!rel.startsWith('steps/') || !rel.endsWith('.md')) return false;
+    if (rendered.has(relPosix(paths.root, path.join(dir, ...rel.split('/'))))) return false;
+    return !hasTemplate(dir, rel) && !hasTemplate(incomingDir, rel);
+  });
+}
+
+/**
+ * Where the developer's position in flow `name` goes when its definition is replaced by `next`:
+ * undefined while the stored current step still exists in `next` (or nothing is stored). Otherwise,
+ * like `removeStep`: the first step on the old step's `NEXT` path that survives as a (non-final) step,
+ * else the nearest earlier surviving step in the old flow order, else the new initial step.
+ */
+function planCurrentStepMove(paths: ProjectPaths, name: string, next: FlowDefinition): CurrentStepMove | undefined {
+  const current = storedCurrentStep(paths, name);
+  const states = next.machine.states;
+  if (current === undefined || Object.hasOwn(states, current)) return undefined;
+  const survives = (id: string | undefined): id is string => id !== undefined && Object.hasOwn(states, id) && states[id]!.type !== 'final';
+  let old: FlowDefinition | undefined;
+  try {
+    old = readFlowDefinition(paths, name);
+  } catch {
+    old = undefined; // an unreadable old flow: only the new initial step is left
+  }
+  let to: string | undefined;
+  if (old && Object.hasOwn(old.machine.states, current)) {
+    const oldStates = old.machine.states;
+    const seen = new Set<string>();
+    let id: string | undefined = current;
+    while (id !== undefined && !seen.has(id) && !survives(id) && Object.hasOwn(oldStates, id)) {
+      seen.add(id);
+      id = transitionTarget(oldStates[id]!.on?.[NEXT_EVENT]);
+    }
+    if (survives(id)) to = id;
+    else {
+      const order = orderStates(old.machine);
+      to = order.slice(0, order.indexOf(current)).reverse().find(survives);
+    }
+  }
+  to ??= Object.hasOwn(states, next.machine.initial) ? next.machine.initial : undefined;
+  return to === undefined ? undefined : { from: current, to };
+}
+
+/** Target state of a transition value (string or `{ target }`). */
+function transitionTarget(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const target = (value as { target?: unknown }).target;
+    return typeof target === 'string' ? target : undefined;
+  }
+  return undefined;
 }
 
 /** The files of a flow dir that an import copies (rendered `.md` under steps/ excluded) → content. */

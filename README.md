@@ -246,8 +246,9 @@ flow from the template (or git repository, or directory) it came from, see
 }
 ```
 
-- Flow names and step ids (state keys) are kebab-case, at most 64 characters. `name` must equal
-  the flow's directory name. The skill name and slash command is `skillPrefix + id`.
+- Flow names and step ids (state keys) are kebab-case, at most 64 characters; a step id needs at
+  least one letter (`step-1`, not `1`). `name` must equal the flow's directory name. The skill
+  name and slash command is `skillPrefix + id`.
 - The state `description` becomes the skill's `description` (what the agent reads to decide
   when to use it): one sentence that starts with a verb and says when to use the step.
 - Transitions are `"EVENT": "target"` or `{ "target": "…", "description": "…" }`. The description
@@ -521,10 +522,11 @@ dfl flow pull --dry-run       # only show what would change
 dfl flow pull --rev v2        # git sources: another branch, tag or commit
 ```
 
-`flow pull` replaces the flow's files with the source's (local edits are lost; your position in the
-flow is kept) and re-installs the skills when the flow is active. Flows created with
-`dfl flow create --steps` have no source to pull from. `dfl flow import --force` also replaces an
-existing flow.
+`flow pull` replaces the flow's files with the source's (local edits are lost, but hand-written
+`.md` files under `steps/` are kept; your position in the flow is kept, or moves to the next
+surviving step when the new version drops your current step) and re-installs the skills when the
+flow is active. Flows created with `dfl flow create --steps` have no source to pull from.
+`dfl flow import --force` also replaces an existing flow (hand-written `.md` files are kept too).
 
 ## Windows
 

@@ -10,6 +10,7 @@ import {
   hasTomlServer,
   isCommandOnPath,
   isDflLauncher,
+  jsonFileExists,
   localInstallPrefix,
   planJsonUpsert,
   planTomlUpsert,
@@ -22,6 +23,7 @@ import {
   upsertJsonEntry,
   upsertTomlServer,
 } from '../src/agents/mcp-config.js';
+import { AGENTS } from '../src/agents/registry.js';
 import { saveProjectConfig } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
 import type { McpServerSpec } from '../src/core/types.js';
@@ -428,5 +430,35 @@ describe('localInstallPrefix / isCommandOnPath (F81)', () => {
     fs.writeFileSync(path.join(bin, 'dfl'), '#!/bin/sh\n', { mode: 0o755 });
     expect(isCommandOnPath('dfl', { PATH: bin })).toBe(true);
     expect(isCommandOnPath('dfl', { PATH: '' })).toBe(false);
+  });
+});
+
+describe('pre-existing blank config files (F22)', () => {
+  it('count as existing, so the MCP targets never record them as created by dfl', () => {
+    expect(jsonFileExists(tempFile('missing.json'))).toBe(false);
+    expect(jsonFileExists(tempFile('empty.json', ''))).toBe(true);
+    expect(jsonFileExists(tempFile('blank.json', '\n \t\n'))).toBe(true);
+
+    for (const adapter of AGENTS) {
+      if (!adapter.mcp) continue;
+      const root = makeTempDir();
+      const file = path.join(root, ...adapter.mcp.inspect(root).file.split('/'));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '\n');
+      expect(adapter.mcp.inspect(root).exists, adapter.id).toBe(true);
+    }
+  });
+
+  it('a blank file keeps existing after the entry dfl added is removed without deleteEmptyFile', () => {
+    const json = tempFile('.mcp.json', '\n');
+    upsertJsonEntry(json, ['mcpServers'], 'dfl', entry);
+    expect(removeJsonEntry(json, ['mcpServers'], 'dfl', { deleteEmptyFile: false, dropEmptyContainer: true })).toBe(true);
+    expect(parseJsonc(fs.readFileSync(json, 'utf8'))).toEqual({});
+
+    const toml = tempFile('.codex/config.toml', '\n');
+    upsertTomlServer(toml, spec);
+    expect(removeTomlServer(toml, 'dfl', { deleteEmptyFile: false })).toBe(true);
+    expect(fs.existsSync(toml)).toBe(true);
+    expect(fs.readFileSync(toml, 'utf8')).not.toContain('dfl');
   });
 });

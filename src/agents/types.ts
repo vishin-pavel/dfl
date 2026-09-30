@@ -10,13 +10,15 @@ export interface McpRemoveOptions {
   dropEmptyContainer?: boolean | undefined;
   /** OpenCode: only touch this file (`opencode.json` or `opencode.jsonc`). Default: every file the target may use. */
   file?: string | undefined;
+  /** Remove the config dirs a deleted file leaves empty (e.g. `.kiro/settings/`). Default true; the caller may do it itself. */
+  removeEmptyDirs?: boolean | undefined;
 }
 
 /** What the project MCP config currently holds (to record what dfl created). */
 export interface McpTargetState {
   /** Project-relative posix file the target writes for this project (OpenCode: `.json` or `.jsonc`). */
   file: string;
-  /** The file exists and is not blank. */
+  /** The file exists (also when it is blank: a pre-existing file is never deleted by uninstall). */
   exists: boolean;
   /** The servers container (e.g. `mcpServers`) exists; always true for TOML (no container to drop). */
   container: boolean;

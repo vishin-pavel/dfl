@@ -24,8 +24,9 @@ import { withProjectLock } from '../core/lock.js';
 import { loadRuntimeState } from '../core/machine.js';
 import { findProjectRoot, projectPaths, resolveProjectRoot } from '../core/paths.js';
 import { isInstalledForUser, readManifest, syncProject, type SyncOptions } from '../core/sync.js';
-import type { FlowVarDef, ProjectPaths, SyncReport } from '../core/types.js';
-import { assertFlowValid } from '../core/validate.js';
+import type { FlowDefinition, FlowVarDef, ProjectPaths, SyncReport, VarScope } from '../core/types.js';
+import { assertFlowValid, validateFlow } from '../core/validate.js';
+import { resolveVars, setVar, varScope } from '../core/vars.js';
 import { c } from '../ui/colors.js';
 import { syncSummaryLine } from '../ui/format.js';
 import { print, sym, warning } from '../ui/output.js';
@@ -83,7 +84,8 @@ function nestedRepoRoot(cwd: string, projectRoot: string): string | undefined {
 /**
  * Runs a read-modify-write of project files under the cross-process project lock (`.df/.lock`), so
  * a CLI command and an MCP server (or two CLI runs) never overwrite each other's changes. Keep
- * confirmations outside: the lock is taken over after a minute. Never nest.
+ * confirmations and variable prompts outside (askMissingVars): other dfl processes give up after
+ * waiting 15 s for the lock. Never nest.
  */
 export function locked<T>(paths: ProjectPaths, fn: () => T | Promise<T>): Promise<T> {
   return withProjectLock(paths, fn);
@@ -106,6 +108,63 @@ export async function syncWithDiff(paths: ProjectPaths, options: SyncOptions = {
 /** `Skills not installed for you yet; run `dfl install`` (with the project's dfl launcher). */
 export function notInstalledMessage(paths: ProjectPaths): string {
   return `Skills not installed for you yet; run \`${dflLauncher(paths)} install\`.`;
+}
+
+/** A value typed at a required-variable prompt (askMissingVars), stored with storeVarAnswers. */
+export interface VarAnswer {
+  name: string;
+  value: unknown;
+  scope: VarScope;
+}
+
+export interface AskVarsOptions {
+  /** Prompts only in interactive runs. */
+  interactive: boolean;
+  /** False (`--no-sync`): no sync runs, so nothing is asked. */
+  sync?: boolean | undefined;
+  /** The flow the closing sync installs (default: the active flow). */
+  flow?: string | undefined;
+  /** `flow` is about to become the active flow (`flow use`, `--use`): ask even though it is not active yet. */
+  activating?: boolean | undefined;
+  /** Ask even when this developer has not installed dfl (`flow-update` always syncs). */
+  always?: boolean | undefined;
+  /** Variables not to ask for (e.g. the one `vars unset` just removed). */
+  except?: readonly string[] | undefined;
+}
+
+/**
+ * Asks for the required variables of `flow` that have no value, BEFORE the project lock is taken:
+ * a prompt can stay open for minutes, and other dfl processes (CLI or MCP) must not wait for it.
+ * Asks nothing when not interactive, when the closing sync would not run (`--no-sync`, not the
+ * active flow, not installed for this developer) or when the flow has validation errors (the sync
+ * refuses it before asking anything). Store the answers inside the lock with storeVarAnswers; the
+ * sync itself then runs without prompting.
+ */
+export async function askMissingVars(paths: ProjectPaths, options: AskVarsOptions): Promise<VarAnswer[]> {
+  if (!options.interactive || options.sync === false) return [];
+  let def: FlowDefinition;
+  try {
+    const active = getActiveFlowName(paths);
+    const name = options.flow ?? active;
+    if (name === undefined || (name !== active && !options.activating)) return [];
+    if (!options.always && !isInstalledForUser(paths)) return [];
+    if (validateFlow(paths, name).some((issue) => issue.level === 'error')) return [];
+    def = loadFlow(paths, name).def;
+  } catch {
+    return []; // the command reports the problem itself
+  }
+  const answers: VarAnswer[] = [];
+  for (const { name, def: varDef } of resolveVars(paths, def).missing) {
+    if (options.except?.includes(name)) continue;
+    const value = await promptVarInteractive(name, varDef);
+    if (value !== undefined && value !== null && value !== '') answers.push({ name, value, scope: varScope(def, name) });
+  }
+  return answers;
+}
+
+/** Stores the answers of askMissingVars (call it inside the project lock). */
+export function storeVarAnswers(paths: ProjectPaths, answers: readonly VarAnswer[]): void {
+  for (const answer of answers) setVar(paths, answer.name, answer.value, answer.scope);
 }
 
 /** Interactive prompt for a missing required variable (clack text). */
@@ -133,8 +192,6 @@ export interface AfterChangeOptions {
   sync: boolean;
   /** The flow that was changed; sync only runs when it is the active flow. */
   flow?: string | undefined;
-  /** Prompt for missing required vars (interactive runs). */
-  interactive?: boolean | undefined;
 }
 
 /** What `syncIfInstalled` did. */
@@ -147,14 +204,15 @@ export type AfterChange =
 /**
  * Re-syncs after a mutation when sync is wanted, the changed flow is the active one and this developer
  * installed the skills (`.df/installed.json` exists: `dfl uninstall` sticks until `dfl install`).
- * Prints nothing; see printAfterChange.
+ * Never prompts (it runs inside the project lock): missing required vars become warnings, so ask
+ * for them first with askMissingVars. Prints nothing; see printAfterChange.
  */
 export async function syncIfInstalled(paths: ProjectPaths, options: AfterChangeOptions): Promise<AfterChange> {
   if (!options.sync) return { kind: 'skipped' };
   const active = getActiveFlowName(paths);
   if (!active || (options.flow !== undefined && options.flow !== active)) return { kind: 'skipped' };
   if (!isInstalledForUser(paths)) return { kind: 'not-installed' };
-  const run = await syncWithDiff(paths, options.interactive ? { promptVar: promptVarInteractive } : {});
+  const run = await syncWithDiff(paths);
   return { kind: 'synced', run };
 }
 
@@ -179,7 +237,8 @@ export function mcpChangeLine(entry: SyncReport['mcp'][number]): string {
 }
 
 /**
- * syncIfInstalled + printAfterChange. Returns the run, or undefined when no sync ran.
+ * syncIfInstalled + printAfterChange (call it inside the project lock). Returns the run, or undefined
+ * when no sync ran.
  */
 export async function syncAfterChange(paths: ProjectPaths, options: AfterChangeOptions): Promise<SyncRun | undefined> {
   const result = await syncIfInstalled(paths, options);
@@ -188,23 +247,56 @@ export async function syncAfterChange(paths: ProjectPaths, options: AfterChangeO
 }
 
 /**
+ * The closing sync of a mutation that already ran (and released the lock): asks for missing required
+ * variables of the changed flow first, outside the lock (askMissingVars), then stores the answers and
+ * syncs under the lock (syncAfterChange).
+ */
+export async function lockedSyncAfterChange(
+  paths: ProjectPaths,
+  options: AfterChangeOptions & { interactive: boolean; except?: readonly string[] | undefined },
+): Promise<SyncRun | undefined> {
+  const answers = await askMissingVars(paths, { interactive: options.interactive, sync: options.sync, flow: options.flow, except: options.except });
+  return locked(paths, () => {
+    storeVarAnswers(paths, answers);
+    return syncAfterChange(paths, { sync: options.sync, flow: options.flow });
+  });
+}
+
+/**
+ * `dfl flow use` and `--use`: asks for the missing required variables of `name` outside the lock
+ * (askMissingVars), then, under the lock, stores the answers and runs switchActiveFlow.
+ */
+export async function lockedSwitchActiveFlow(
+  paths: ProjectPaths,
+  name: string,
+  scope: 'local' | 'project',
+  options: { sync: boolean; interactive: boolean },
+): Promise<AfterChange> {
+  const answers = await askMissingVars(paths, { interactive: options.interactive, sync: options.sync, flow: name, activating: true });
+  return locked(paths, () => {
+    storeVarAnswers(paths, answers);
+    return switchActiveFlow(paths, name, scope, { sync: options.sync });
+  });
+}
+
+/**
  * Makes `name` the active flow (`scope`) and re-syncs (see syncIfInstalled), all or nothing:
  * the flow is validated before anything is written (DflError INVALID_FLOW), and when the sync fails
- * (render or IO error, a cancelled variable prompt) the previous active-flow settings of both
- * config.json and local.json are restored before the error propagates.
+ * (render or IO error) the previous active-flow settings of both config.json and local.json are
+ * restored before the error propagates. Never prompts (run it inside the lock; see lockedSwitchActiveFlow).
  */
 export async function switchActiveFlow(
   paths: ProjectPaths,
   name: string,
   scope: 'local' | 'project',
-  options: { sync: boolean; interactive: boolean },
+  options: { sync: boolean },
 ): Promise<AfterChange> {
   assertFlowValid(paths, name);
   const snapshot = [snapshotConfig(paths.configFile, projectConfigSchema), snapshotConfig(paths.localFile, localConfigSchema)];
   const previous = { project: loadProjectConfig(paths).activeFlow, local: loadLocalConfig(paths).activeFlow };
   setActiveFlow(paths, name, scope);
   try {
-    return await syncIfInstalled(paths, { sync: options.sync, interactive: options.interactive });
+    return await syncIfInstalled(paths, { sync: options.sync });
   } catch (error) {
     try {
       for (const item of snapshot) item.restore();
@@ -226,8 +318,8 @@ interface ConfigSnapshot {
 
 /**
  * Raw content of a config file. `restore` rewrites it (or deletes a file that did not exist) only
- * when nothing but `activeFlow` changed in the meantime, so settings saved during the failed sync
- * (a variable entered at a prompt) survive; the caller then puts `activeFlow` back field by field.
+ * when nothing but `activeFlow` changed in the meantime, so other settings saved meanwhile survive;
+ * the caller then puts `activeFlow` back field by field.
  */
 function snapshotConfig(file: string, schema: z.ZodType): ConfigSnapshot {
   const raw = readTextIfExists(file);

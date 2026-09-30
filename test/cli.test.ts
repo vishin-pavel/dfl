@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { switchActiveFlow } from '../src/commands/shared.js';
+import { lockedSwitchActiveFlow, switchActiveFlow } from '../src/commands/shared.js';
 import { createFlow } from '../src/core/flow.js';
 import { packageVersion, projectPaths } from '../src/core/paths.js';
 import { runCli } from '../src/run.js';
@@ -785,18 +785,33 @@ describe('switching the active flow is all or nothing', () => {
     expect(readJsonFile(root, '.df/installed.json').flow).toBe('feature');
   });
 
-  it('restores the previous active flow when the sync fails (cancelled variable prompt)', async () => {
+  it('restores the previous active flow when the sync fails', async () => {
+    const root = await installedProject();
+    const paths = projectPaths(root);
+    writeSampleFlow(paths);
+    // Valid for validateFlow, but its frontmatter cannot be parsed when the sync renders it.
+    fs.writeFileSync(path.join(paths.stepDir('sample', 'plan'), 'SKILL.md.hbs'), '---\ndescription: [unclosed\n---\n# Plan\n');
+    const before = { config: read(root, '.df/config.json'), local: read(root, '.df/local.json') };
+    for (const scope of ['local', 'project'] as const) {
+      await expect(switchActiveFlow(paths, 'sample', scope, { sync: true })).rejects.toMatchObject({ message: expect.stringMatching(/frontmatter/) });
+      expect(read(root, '.df/config.json')).toBe(before.config);
+      expect(read(root, '.df/local.json')).toBe(before.local);
+    }
+    expect(readJsonFile(root, '.df/installed.json').flow).toBe('feature');
+  });
+
+  it('a cancelled variable prompt changes nothing (it is asked before anything is written)', async () => {
     const root = await installedProject();
     const paths = projectPaths(root);
     writeSampleFlow(paths); // requires "reviewer", which has no value
     const before = { config: read(root, '.df/config.json'), local: read(root, '.df/local.json') };
     promptControl.text = () => Promise.reject(new CancelledError());
-    await expect(switchActiveFlow(paths, 'sample', 'local', { sync: true, interactive: true })).rejects.toBeInstanceOf(CancelledError);
-    expect(read(root, '.df/config.json')).toBe(before.config);
-    expect(read(root, '.df/local.json')).toBe(before.local);
-    await expect(switchActiveFlow(paths, 'sample', 'project', { sync: true, interactive: true })).rejects.toBeInstanceOf(CancelledError);
-    expect(read(root, '.df/config.json')).toBe(before.config);
-    expect(read(root, '.df/local.json')).toBe(before.local);
+    for (const scope of ['local', 'project'] as const) {
+      await expect(lockedSwitchActiveFlow(paths, 'sample', scope, { sync: true, interactive: true })).rejects.toBeInstanceOf(CancelledError);
+      expect(read(root, '.df/config.json')).toBe(before.config);
+      expect(read(root, '.df/local.json')).toBe(before.local);
+      expect(has(root, '.df/.lock')).toBe(false);
+    }
     expect(readJsonFile(root, '.df/installed.json').flow).toBe('feature');
   });
 });
@@ -1075,6 +1090,44 @@ describe('dfl flow pull', () => {
     expect(none.stderr).toContain('has no source to pull from');
     expect((await dfl(root, 'flow', 'pull', 'nope')).stderr).toContain('Flow "nope" not found');
   });
+
+  it('keeps hand-written .md files under steps/ and lists them before asking', async () => {
+    const root = await installedProject();
+    const plan = path.join(root, '.df/feature/steps/plan-feature');
+    fs.writeFileSync(path.join(plan, 'notes.md'), '# my notes\n');
+    fs.mkdirSync(path.join(plan, 'refs'));
+    fs.writeFileSync(path.join(plan, 'refs', 'checklist.md'), '# ref\n');
+    fs.appendFileSync(path.join(root, '.df/feature/steps/spec-feature/SKILL.md.hbs'), 'x\n');
+
+    const dry = await ok(root, 'flow', 'pull', '--dry-run');
+    expect(dry.stdout).toContain('~ steps/spec-feature/SKILL.md.hbs');
+    expect(dry.stdout).toContain('= steps/plan-feature/notes.md (hand-written, kept)');
+    expect(dry.stdout).toContain('= steps/plan-feature/refs/checklist.md (hand-written, kept)');
+    expect(dry.stdout).not.toContain('SKILL.md (hand-written');
+
+    const pulled = await ok(root, 'flow', 'pull', '--yes');
+    expect(pulled.stdout).toContain('(1 file changed)');
+    expect(pulled.stdout).toContain('= steps/plan-feature/notes.md (hand-written, kept)');
+    expect(read(root, '.df/feature/steps/plan-feature/notes.md')).toBe('# my notes\n');
+    expect(read(root, '.df/feature/steps/plan-feature/refs/checklist.md')).toBe('# ref\n');
+    expect(read(root, '.df/feature/steps/plan-feature/SKILL.md')).toContain('name: plan-feature'); // re-rendered by the sync
+  });
+
+  it('moves the position when the pull removes the current step', async () => {
+    const root = await installedProject();
+    await ok(root, 'step', 'add', 'qa', '--after', 'verify-feature');
+    await ok(root, 'goto', 'qa');
+    const dry = await ok(root, 'flow', 'pull', '--dry-run');
+    expect(dry.stdout).toMatch(/ steps\/qa\/SKILL\.md\.hbs\n/);
+    expect(dry.stdout).toContain('"qa" (your current step) is not in the new version; you would continue at "review-feature".');
+
+    const pulled = await ok(root, 'flow', 'pull', 'feature', '--yes');
+    expect(pulled.stdout).toContain('"qa" was your current step and is not in the new version; the flow continues at "review-feature".');
+    expect(pulled.stderr).not.toContain('falling back to the initial step');
+    const status = await json(root, 'status');
+    expect(status.current).toBe('review-feature');
+    expect(readJsonFile(root, '.df/state.json').flows.feature.current).toBe('review-feature');
+  });
 });
 
 describe('Node.js version guard', () => {
@@ -1163,5 +1216,103 @@ describe('integration fixes (G8)', () => {
     expect(result.code).toBe(0);
     expect(readJsonFile(paths.root, '.df/state.json').flows.sample.current).toBe('build');
     expect(has(paths.root, '.df/.lock')).toBe(false);
+  });
+});
+
+describe('interactive variable prompts never hold the project lock', () => {
+  /** Runs `fn` as if in a terminal (isInteractive() is true: TTY stdin/stdout, no CI). */
+  async function inTerminal<T>(fn: () => Promise<T>): Promise<T> {
+    vi.stubEnv('CI', '');
+    const saved = [process.stdin, process.stdout].map((stream) => [stream, Object.getOwnPropertyDescriptor(stream, 'isTTY')] as const);
+    for (const [stream] of saved) Object.defineProperty(stream, 'isTTY', { value: true, configurable: true });
+    try {
+      return await fn();
+    } finally {
+      for (const [stream, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(stream, 'isTTY', descriptor);
+        else delete (stream as { isTTY?: boolean }).isTTY;
+      }
+    }
+  }
+
+  it('flow use, vars set/unset, step add and flow-update ask before taking the lock', async () => {
+    const root = await installedProject();
+    const paths = projectPaths(root);
+    writeSampleFlow(paths); // requires the personal var "reviewer", which has no value
+    const { acquireProjectLock } = await import('../src/core/lock.js');
+    const asked: string[] = [];
+    const answer = (value: string) => async (): Promise<string> => {
+      // Another dfl process (e.g. the MCP server) can take the lock while the prompt is open.
+      const release = await acquireProjectLock(paths, { timeoutMs: 100 });
+      release();
+      asked.push(value);
+      return value;
+    };
+    const unsetReviewer = (): void => {
+      const local = readJsonFile(root, '.df/local.json');
+      delete local.vars.reviewer;
+      fs.writeFileSync(path.join(root, '.df/local.json'), JSON.stringify(local));
+    };
+
+    promptControl.text = answer('alice');
+    const use = await inTerminal(() => ok(root, 'flow', 'use', 'sample'));
+    expect(use.stdout).toContain('Active flow: sample');
+    expect(asked).toEqual(['alice']);
+    expect(readJsonFile(root, '.df/local.json').vars.reviewer).toBe('alice');
+    expect(readJsonFile(root, '.df/installed.json').flow).toBe('sample');
+
+    unsetReviewer();
+    promptControl.text = answer('bob');
+    await inTerminal(() => ok(root, 'vars', 'set', 'mainBranch', 'dev2'));
+    expect(asked).toEqual(['alice', 'bob']);
+    expect(readJsonFile(root, '.df/local.json').vars.reviewer).toBe('bob');
+    expect(readJsonFile(root, '.df/config.json').vars.mainBranch).toBe('dev2');
+
+    // Setting the missing variable itself asks nothing; unsetting it does not ask for it again.
+    unsetReviewer();
+    await inTerminal(() => ok(root, 'vars', 'set', 'reviewer', 'carol'));
+    const unset = await inTerminal(() => ok(root, 'vars', 'unset', 'reviewer'));
+    expect(unset.stderr).toContain('Required variable "reviewer" has no value');
+    expect(asked).toEqual(['alice', 'bob']);
+
+    promptControl.text = answer('dave');
+    const add = await inTerminal(() => ok(root, 'step', 'add', 'extra'));
+    expect(add.stdout).toContain('Added step extra');
+    expect(asked).toEqual(['alice', 'bob', 'dave']);
+    expect(readJsonFile(root, '.df/local.json').vars.reviewer).toBe('dave');
+    expect(has(root, '.claude/skills/extra/SKILL.md')).toBe(true);
+
+    unsetReviewer();
+    promptControl.text = answer('erin');
+    await inTerminal(() => ok(root, 'flow-update'));
+    expect(asked).toEqual(['alice', 'bob', 'dave', 'erin']);
+    expect(readJsonFile(root, '.df/local.json').vars.reviewer).toBe('erin');
+    expect(has(root, '.df/.lock')).toBe(false);
+  });
+});
+
+describe('step ids made of digits only', () => {
+  it('are refused with a hint, and flow validate reports existing ones', async () => {
+    const root = await installedProject();
+    const created = await dfl(root, 'flow', 'create', 'nums', '--steps', 'intro,3,2,1');
+    expect(created.code).toBe(1);
+    expect(created.stderr).toContain('Invalid step id "3": a step id cannot be only digits');
+    expect(created.stderr).toContain('"step-3"');
+    expect(has(root, '.df/nums')).toBe(false);
+
+    const added = await dfl(root, 'step', 'add', '15', '--after', 'plan-feature');
+    expect(added.code).toBe(1);
+    expect(added.stderr).toContain('"step-15"');
+
+    const paths = projectPaths(root);
+    const def = sampleFlowDefinition('legacy');
+    def.machine.states = { '1': { on: { NEXT: 'plan' } }, ...def.machine.states };
+    def.machine.initial = '1';
+    writeSampleFlow(paths, def);
+    const validated = await dfl(root, 'flow', 'validate', 'legacy');
+    expect(validated.code).toBe(1);
+    expect(validated.stdout).toContain('Invalid step id "1": a step id cannot be only digits');
+    await ok(root, 'step', 'edit', '1', '--rename', 'intro', '--flow', 'legacy');
+    expect((await dfl(root, 'flow', 'validate', 'legacy')).stdout).not.toContain('Invalid step id');
   });
 });

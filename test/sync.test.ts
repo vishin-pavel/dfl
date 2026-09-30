@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { getMcpEnabled, loadLocalConfig, loadProjectConfig, saveProjectConfig, setActiveFlow, setMcpEnabled } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
@@ -12,6 +12,7 @@ import { DF_GITIGNORE_CONTENT, SKILL_DIR_GITIGNORE_CONTENT } from '../src/core/g
 import { packageVersion } from '../src/core/paths.js';
 import {
   NOT_INSTALLED_MESSAGE,
+  checkFlowSyncState,
   checkSyncState,
   computeSyncFingerprint,
   isInstalledForUser,
@@ -1222,5 +1223,354 @@ describe('staleness (C0, D7, D8)', () => {
     const local = JSON.parse(read(paths, '.df/local.json')) as Record<string, unknown>;
     write(paths, '.df/local.json', JSON.stringify({ vars: local['vars'], agents: ['claude', 'cursor'], version: 1 }));
     expect(computeSyncFingerprint(paths)).toBe(fingerprint);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recheck fixes: symlinked root .gitignore (F16), pre-existing MCP configs and agent dirs (F22),
+// OS junk in skill dirs (safety-1), symlinked skills dirs (safety-2), env-independent fingerprint
+// (safety-3), unreadable manifests (safety-4), agent-less manifests (engine-mcp-3), flow switches
+// (cli-content-tui-1) and skill-less manifests (cli-content-tui-2).
+// ---------------------------------------------------------------------------
+
+const LEGACY_BLOCK = 'node_modules/\n# >>> dfl (managed) >>>\n.claude/skills/plan/\n# <<< dfl (managed) <<<\n';
+
+describe.skipIf(!symlinks)('symlinked root .gitignore (F16)', () => {
+  it('never replaces or writes through the link and asks to remove the legacy block by hand', async () => {
+    const paths = sampleProject();
+    const shared = path.join(makeTempDir(), 'gitignore');
+    fs.writeFileSync(shared, LEGACY_BLOCK);
+    fs.symlinkSync(shared, abs(paths, '.gitignore'));
+
+    const report = await syncProject(paths, { agents: ['claude'] });
+    expect(fs.lstatSync(abs(paths, '.gitignore')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(shared, 'utf8')).toBe(LEGACY_BLOCK);
+    expect(report.warnings).toContainEqual(expect.stringMatching(/^\.gitignore is a symbolic link.*remove the "# >>> dfl \(managed\) >>>".*by hand/));
+
+    const uninstall = uninstallProject(paths);
+    expect(uninstall.warnings.join('\n')).toMatch(/\.gitignore is a symbolic link/);
+    expect(fs.lstatSync(abs(paths, '.gitignore')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(shared, 'utf8')).toBe(LEGACY_BLOCK);
+  });
+
+  it('says nothing about a symlinked .gitignore without a dfl block', async () => {
+    const paths = sampleProject();
+    const shared = path.join(makeTempDir(), 'gitignore');
+    fs.writeFileSync(shared, 'node_modules/'); // no final newline: nothing to "fix" either
+    fs.symlinkSync(shared, abs(paths, '.gitignore'));
+    const report = await syncProject(paths, { agents: ['claude'] });
+    expect(report.warnings.join('\n')).not.toMatch(/gitignore/);
+    expect(fs.lstatSync(abs(paths, '.gitignore')).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(shared, 'utf8')).toBe('node_modules/');
+  });
+});
+
+describe('root .gitignore without a dfl block', () => {
+  it('stays byte for byte, also without a final newline or with trailing blank lines', async () => {
+    const paths = sampleProject();
+    for (const content of ['node_modules/', 'dist/\r\n\r\n\r\n']) {
+      write(paths, '.gitignore', content);
+      await syncProject(paths, { agents: ['claude'] });
+      uninstallProject(paths);
+      expect(read(paths, '.gitignore')).toBe(content);
+    }
+  });
+});
+
+describe('pre-existing MCP configs and agent dirs (F22)', () => {
+  it.each([
+    ['claude' as const, '.mcp.json'],
+    ['codex' as const, '.codex/config.toml'],
+    ['kiro' as const, '.kiro/settings/mcp.json'],
+  ])('never deletes a whitespace-only %s config (%s) that existed before install', async (agent, file) => {
+    const paths = sampleProject();
+    write(paths, file, '\n  \n');
+    await syncProject(paths, { agents: [agent] });
+    expect(readManifest(paths).mcp).toMatchObject([{ file, createdFile: false }]);
+    uninstallProject(paths);
+    expect(has(paths, file)).toBe(true);
+    expect(read(paths, file)).not.toContain('dfl');
+  });
+
+  it('keeps agent dirs that existed before dfl, also when they are empty', async () => {
+    const paths = sampleProject();
+    fs.mkdirSync(abs(paths, '.kiro'));
+    fs.mkdirSync(abs(paths, '.cursor'));
+    await syncProject(paths, { agents: ['kiro', 'cursor', 'claude'] });
+    expect(readManifest(paths).createdDirs).toEqual(['.claude', '.claude/skills', '.cursor/skills', '.kiro/settings', '.kiro/skills']);
+
+    // Deselecting an agent removes only the dirs dfl created for it.
+    await syncProject(paths, { agents: ['kiro', 'claude'] });
+    expect(has(paths, '.cursor/skills')).toBe(false);
+    expect(has(paths, '.cursor/mcp.json')).toBe(true); // committed team config stays
+    expect(readManifest(paths).createdDirs).not.toContain('.cursor/skills');
+
+    uninstallProject(paths);
+    expect(fs.readdirSync(abs(paths, '.kiro'))).toEqual([]);
+    expect(fs.readdirSync(abs(paths, '.cursor'))).toEqual([]);
+    expect(has(paths, '.claude')).toBe(false); // dfl created it
+    expect(has(paths, '.mcp.json')).toBe(false);
+  });
+
+  it('only accepts agent config dirs in the manifest', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    fs.mkdirSync(abs(paths, 'src'));
+    const data = JSON.parse(read(paths, '.df/installed.json')) as Record<string, unknown>;
+    write(paths, '.df/installed.json', JSON.stringify({ ...data, createdDirs: ['.claude', '.claude/skills', 'src', '..', '/tmp'] }));
+    const { manifest, warnings } = loadManifest(paths);
+    expect(manifest.createdDirs).toEqual(['.claude', '.claude/skills']);
+    expect(warnings.filter((w) => w.startsWith('Ignored suspicious directory'))).toHaveLength(3);
+  });
+
+  it('removes no parent dirs for a manifest that does not record them (older dfl)', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    const { createdDirs: _, ...legacy } = readManifest(paths);
+    writeManifest(paths, legacy);
+    uninstallProject(paths);
+    expect(fs.readdirSync(abs(paths, '.claude/skills'))).toEqual([]);
+  });
+});
+
+describe('OS junk in skill dirs (safety-1)', () => {
+  it('deletes .DS_Store and Thumbs.db with a skill dir that is no longer produced', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude', 'cursor'] });
+    write(paths, '.claude/skills/build/.DS_Store', 'x');
+    write(paths, '.cursor/skills/plan/assets/Thumbs.db', 'x');
+    writeSampleFlow(paths, withoutBuild());
+    fs.rmSync(abs(paths, '.df/sample/steps/build'), { recursive: true });
+
+    const report = await syncProject(paths, { agents: ['claude'] });
+    expect(report.warnings.join('\n')).not.toMatch(/Kept/);
+    expect(report.removed).toEqual(expect.arrayContaining(['.claude/skills/build', '.cursor/skills/plan']));
+    expect(has(paths, '.claude/skills/build')).toBe(false);
+    expect(has(paths, '.cursor/skills')).toBe(false);
+  });
+
+  it('removes a dir that only holds OS junk and still keeps real user files', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    // Left behind by an older run: only junk, no SKILL.md and no marker.
+    write(paths, '.claude/skills/old/.DS_Store', 'x');
+    write(paths, '.claude/skills/plan/notes.txt', 'mine');
+    writeManifest(paths, {
+      ...readManifest(paths),
+      skills: [...readManifest(paths).skills, { agents: ['claude'], name: 'old', dir: '.claude/skills/old', files: ['SKILL.md'] }],
+    });
+    const report = uninstallProject(paths);
+    expect(has(paths, '.claude/skills/old')).toBe(false);
+    expect(read(paths, '.claude/skills/plan/notes.txt')).toBe('mine');
+    expect(report.warnings).toEqual([expect.stringMatching(/^Kept \.claude\/skills\/plan\/: .*notes\.txt/)]);
+  });
+
+  it('removes a created parent dir that only holds OS junk, but keeps a pre-existing one', async () => {
+    const paths = sampleProject();
+    fs.mkdirSync(abs(paths, '.kiro'));
+    await syncProject(paths, { agents: ['claude', 'kiro'] });
+    write(paths, '.claude/skills/.DS_Store', 'x');
+    write(paths, '.claude/Thumbs.db', 'x');
+    write(paths, '.kiro/.DS_Store', 'x');
+    uninstallProject(paths);
+    expect(has(paths, '.claude')).toBe(false);
+    expect(fs.readdirSync(abs(paths, '.kiro'))).toEqual(['.DS_Store']);
+  });
+});
+
+describe.skipIf(!symlinks)('symlinked skills dir (safety-2)', () => {
+  it('records the skipped dir and reports the skills as not installed until it is a real dir', async () => {
+    const paths = sampleProject();
+    fs.mkdirSync(abs(paths, '.agents/skills'), { recursive: true });
+    fs.mkdirSync(abs(paths, '.claude'));
+    fs.symlinkSync('../.agents/skills', abs(paths, '.claude/skills'));
+
+    const report = await syncProject(paths, { agents: ['claude', 'codex'] });
+    expect(report.skills.every((skill) => skill.dir.startsWith('.agents/skills/'))).toBe(true);
+    expect(readManifest(paths).skippedDirs).toEqual(['.claude/skills']);
+    const state = checkSyncState(paths);
+    expect(state).toMatchObject({ installed: true, upToDate: false });
+    expect(state.reason).toMatch(/no skills are installed in \.claude\/skills \(Claude Code\): it is a symbolic link/);
+    expect(state.fix).toMatch(/Replace it with a real directory, then run `dfl flow-update`/);
+
+    fs.unlinkSync(abs(paths, '.claude/skills'));
+    expect(checkSyncState(paths).upToDate).toBe(false);
+    await syncProject(paths);
+    expect(readManifest(paths).skippedDirs).toBeUndefined();
+    expect(checkSyncState(paths)).toEqual({ installed: true, upToDate: true });
+  });
+});
+
+describe('fingerprint and process environment (safety-3)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('does not depend on DFL_VAR_* or DFL_ENV_* of the running process', async () => {
+    const paths = sampleProject();
+    vi.stubEnv('DFL_VAR_REVIEWER', 'alice');
+    vi.stubEnv('DFL_ENV_TOKEN_HINT', 'x');
+    await syncProject(paths, { agents: ['claude'] });
+    expect(read(paths, '.claude/skills/plan/SKILL.md')).toBeDefined();
+    const withEnv = computeSyncFingerprint(paths);
+    expect(checkSyncState(paths).upToDate).toBe(true);
+    vi.unstubAllEnvs();
+    expect(computeSyncFingerprint(paths)).toBe(withEnv);
+    expect(checkSyncState(paths).upToDate).toBe(true);
+    // Stored values still count.
+    setVar(paths, 'reviewer', 'bob', 'personal');
+    expect(checkSyncState(paths).upToDate).toBe(false);
+  });
+});
+
+describe('unreadable install manifest (safety-4)', () => {
+  it('fails with INVALID_MANIFEST and a recovery hint, and status names the fix', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    write(paths, '.df/installed.json', '{"skills": [');
+
+    let error: unknown;
+    try {
+      loadManifest(paths);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(DflError);
+    expect(error).toMatchObject({ code: 'INVALID_MANIFEST', hint: expect.stringMatching(/Delete the file and run `dfl install` again/) });
+    expect((error as Error).message).toMatch(/cannot parse JSON \(/);
+    await expect(syncProject(paths)).rejects.toMatchObject({ code: 'INVALID_MANIFEST' });
+    expect(() => uninstallProject(paths)).toThrow(/Invalid install manifest/);
+
+    const state = checkSyncState(paths);
+    expect(state).toMatchObject({ installed: true, upToDate: false, fix: 'Delete .df/installed.json and run `dfl install` again.' });
+    expect(state.reason).toMatch(/^invalid install manifest .*cannot parse JSON/);
+
+    fs.rmSync(paths.manifestFile);
+    await syncProject(paths, { agents: ['claude'] });
+    expect(checkSyncState(paths)).toEqual({ installed: true, upToDate: true });
+  });
+});
+
+describe('manifests without agents or skills (engine-mcp-3, cli-content-tui-2)', () => {
+  it('a sync without selected agents (fresh clone) does not count as installed', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    await syncProject(paths);
+    expect(readManifest(paths)).toMatchObject({ agents: [], skills: [] });
+    expect(isInstalledForUser(paths)).toBe(false);
+    expect(checkSyncState(paths)).toEqual({ installed: false, upToDate: false, reason: NOT_INSTALLED_MESSAGE });
+
+    // Older manifests without an agents list still count when they list installed skills.
+    await syncProject(paths, { agents: ['claude'] });
+    const { agents: _, ...legacy } = JSON.parse(read(paths, '.df/installed.json')) as Record<string, unknown>;
+    write(paths, '.df/installed.json', JSON.stringify(legacy));
+    expect(isInstalledForUser(paths)).toBe(true);
+  });
+
+  it('a manifest without flow and skills reports that no skills are installed yet', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    const manifest = readManifest(paths);
+    writeManifest(paths, { version: 1, agents: manifest.agents, skills: [], mcp: manifest.mcp, dflVersion: packageVersion() });
+    expect(checkSyncState(paths)).toEqual({ installed: true, upToDate: false, reason: "no flow's skills are installed yet" });
+    writeManifest(paths, { version: 1, agents: manifest.agents, skills: [], mcp: manifest.mcp });
+    expect(checkSyncState(paths).reason).toBe("no flow's skills are installed yet");
+  });
+});
+
+describe('skills of a flow that is no longer active (cli-content-tui-1)', () => {
+  it('says the installed skills are this flow’s and suggests flow-update or flow use', async () => {
+    const paths = sampleProject();
+    setActiveFlow(paths, 'sample', 'project');
+    await syncProject(paths, { agents: ['claude'] });
+    createFlow(paths, 'other', { steps: ['alpha'] });
+    expect(checkFlowSyncState(paths, 'sample')).toEqual({ installed: true, upToDate: true });
+    expect(checkFlowSyncState(paths, 'other')).toBeUndefined();
+
+    // The team default changes (git pull); local.json has no activeFlow.
+    setActiveFlow(paths, 'other', 'project');
+    expect(checkFlowSyncState(paths, 'sample')).toEqual({
+      installed: true,
+      upToDate: false,
+      reason: 'the installed skills are for flow "sample" but the active flow is "other"',
+      fix: 'Run `dfl flow-update` to install the skills of "other", or `dfl flow use sample` to keep working on "sample".',
+    });
+    expect(checkFlowSyncState(paths, 'other')).toMatchObject({ upToDate: false, reason: expect.stringMatching(/for flow "sample"/) });
+
+    uninstallProject(paths);
+    expect(checkFlowSyncState(paths, 'sample')).toBeUndefined();
+  });
+});
+
+describe('CLI reports (safety-2, safety-4, cli-content-tui-1)', () => {
+  const ANSI = /\u001B\[[0-9;]*m/g;
+
+  /** Runs `dfl --root <root> --no-color …args` in-process (non-interactive), capturing its output. */
+  async function cli(root: string, ...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+    const { runCli } = await import('../src/run.js');
+    let stdout = '';
+    let stderr = '';
+    const capture =
+      (sink: (text: string) => void) =>
+      (chunk: unknown, ...rest: unknown[]): boolean => {
+        sink(typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf8'));
+        (rest.find((arg) => typeof arg === 'function') as (() => void) | undefined)?.();
+        return true;
+      };
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(capture((text) => (stdout += text)) as never);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(capture((text) => (stderr += text)) as never);
+    try {
+      const code = await runCli(['node', 'dfl', '--root', root, '--no-color', ...args]);
+      return { code, stdout: stdout.replace(ANSI, ''), stderr: stderr.replace(ANSI, '') };
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('CI', '1');
+    vi.stubEnv('DFL_ROOT', '');
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.skipIf(!symlinks)('install marks an agent whose skills dir is a symlink and gives no "Next: run" line for it', async () => {
+    const root = makeTempDir();
+    fs.mkdirSync(path.join(root, '.agents', 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.claude'));
+    fs.symlinkSync('../.agents/skills', path.join(root, '.claude', 'skills'));
+
+    const only = await cli(root, 'install', '--yes', '--agents', 'claude', '--flow', 'feature', '--no-mcp');
+    expect(only.code).toBe(0);
+    expect(only.stdout).toMatch(/Claude Code {2}\.claude\/skills\/\n {2}▲ Not installed: \.claude\/skills is a symbolic link/);
+    expect(only.stdout).not.toMatch(/Next: run/);
+    expect(only.stdout).toMatch(/No skills were installed for Claude Code/);
+    const status = await cli(root, 'status');
+    expect(status.stderr).toMatch(/no skills are installed in \.claude\/skills \(Claude Code\).*Replace it with a real directory, then run `dfl flow-update`/);
+
+    const both = await cli(root, 'install', '--yes', '--agents', 'claude,codex', '--no-mcp');
+    expect(both.stdout).toMatch(/Next: run \$spec-feature in your agent/);
+    expect(both.stdout).toMatch(/Not installed: \.claude\/skills/);
+  });
+
+  it('status names the recovery for an unreadable manifest and for the skills of a switched flow', async () => {
+    const root = makeTempDir();
+    expect((await cli(root, 'install', '--yes', '--agents', 'claude', '--flow', 'feature', '--no-mcp')).code).toBe(0);
+    expect((await cli(root, 'flow', 'create', 'fixes', '--from', 'bugfix')).code).toBe(0);
+    const configFile = path.join(root, '.df', 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(configFile, 'utf8')), activeFlow: 'fixes' }));
+
+    const other = await cli(root, 'status', '--flow', 'feature');
+    expect(other.stderr).toMatch(
+      /installed skills are for flow "feature" but the active flow is "fixes"\. Run `dfl flow-update` to install the skills of "fixes", or `dfl flow use feature`/,
+    );
+    const json = JSON.parse((await cli(root, 'status', '--flow', 'feature', '--json')).stdout) as Record<string, any>;
+    expect(json['skills']).toMatchObject({ installed: true, upToDate: false, hint: expect.stringMatching(/`dfl flow use feature`/) });
+
+    fs.writeFileSync(path.join(root, '.df', 'installed.json'), '{"skills": [');
+    const broken = await cli(root, 'status');
+    expect(broken.stderr).toMatch(/invalid install manifest .*Delete \.df\/installed\.json and run `dfl install` again\./);
+    expect(broken.stderr).not.toMatch(/Run `dfl flow-update`/);
+    const update = await cli(root, 'flow-update');
+    expect(update.code).toBe(1);
+    expect(update.stderr).toMatch(/Delete the file and run `dfl install` again/);
   });
 });

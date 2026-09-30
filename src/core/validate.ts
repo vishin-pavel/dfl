@@ -5,7 +5,7 @@ import path from 'node:path';
 import { DflError, errorMessage } from './errors.js';
 import { SKILL_TEMPLATE_FILE, normalizeTransitions, parseFlowDefinition, skillNameFor } from './flow.js';
 import { exists, isFile, listDirs, readJson, readText, walkFiles } from './fsx.js';
-import { RESERVED_FLOW_NAMES, isValidId } from './ids.js';
+import { RESERVED_FLOW_NAMES, digitsOnlyStepIdMessage, isDigitsOnlyId, isValidId } from './ids.js';
 import { createFlowMachine } from './machine.js';
 import { createHandlebars, readRenderedOutputs, type HandlebarsEnv } from './render.js';
 import type { FlowDefinition, FlowStateNodeConfig, ProjectPaths, ValidationIssue } from './types.js';
@@ -457,6 +457,8 @@ function definitionIssues(def: FlowDefinition, expectedName?: string): KeyedIssu
     const final = node.type === 'final';
     if (!isValidId(id)) {
       error(issueKey('step-id', id), `Invalid step id "${id}": use lowercase letters, digits and single hyphens, max 64 characters.`, id);
+    } else if (isDigitsOnlyId(id)) {
+      error(issueKey('step-id', id), `${digitsOnlyStepIdMessage(id).message} Rename it, e.g. to "step-${id}".`, id);
     }
     checkStateNode(id, node, states, error);
 

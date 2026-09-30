@@ -1,4 +1,4 @@
-import { readTextIfExists, removePath, writeText } from './fsx.js';
+import { isFile, isSymlink, readText, readTextIfExists, removePath, writeText } from './fsx.js';
 import type { ProjectPaths } from './types.js';
 
 export const DF_GITIGNORE_CONTENT = [
@@ -43,6 +43,8 @@ export interface ManagedBlockOptions {
    * line is kept.
    */
   knownLines?: string[] | undefined;
+  /** How warnings name the file (e.g. `.gitignore`). Default: its path. */
+  displayName?: string | undefined;
 }
 
 export interface ManagedBlockResult {
@@ -58,6 +60,8 @@ interface Scan {
   kept: string[];
   /** At least one well-formed block was found. */
   hadBlock: boolean;
+  /** Something of dfl's was dropped: a block or an orphan start marker. */
+  dropped: boolean;
   warnings: string[];
 }
 
@@ -74,12 +78,14 @@ function scan(text: string, file: string, marker: string, knownLines: string[]):
   const kept: string[] = [];
   const warnings: string[] = [];
   let hadBlock = false;
+  let dropped = false;
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
     if (line.trim() === start) {
       let j = i + 1;
       while (j < lines.length && lines[j]!.trim() !== end && lines[j]!.trim() !== start) j++;
+      dropped = true;
       if (j < lines.length && lines[j]!.trim() === end) {
         hadBlock = true;
         i = j + 1;
@@ -97,13 +103,16 @@ function scan(text: string, file: string, marker: string, knownLines: string[]):
     kept.push(line);
     i++;
   }
-  return { kept, hadBlock, warnings };
+  return { kept, hadBlock, dropped, warnings };
 }
 
 /**
  * Inserts or replaces the marked block in a gitignore-style file (an empty `lines` array removes
  * it) and reports malformed markers instead of dropping user lines. With `deleteIfEmpty`, a file
  * that held nothing but dfl's block(s) is deleted when the block is removed.
+ *
+ * A file that is a symbolic link is never written through, replaced or deleted: when the block would
+ * change, it is left untouched and a warning says to edit it by hand.
  */
 export function updateManagedBlock(
   file: string,
@@ -112,12 +121,17 @@ export function updateManagedBlock(
 ): ManagedBlockResult {
   const marker = options.marker ?? MANAGED_MARKER;
   const { start, end } = blockBounds(marker);
-  const current = readTextIfExists(file);
+  const link = isSymlink(file);
+  // Through a link the target is only read, to tell whether the block would change.
+  const current = link ? (isFile(file) ? readText(file) : undefined) : readTextIfExists(file);
   const text = current ?? '';
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const { kept, hadBlock, warnings } = scan(text, file, marker, [...(options.knownLines ?? []), ...lines]);
-  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
+  const name = options.displayName ?? file;
+  const { kept, hadBlock, dropped, warnings } = scan(text, name, marker, [...(options.knownLines ?? []), ...lines]);
   const unique = [...new Set(lines.filter((line) => line.trim() !== ''))];
+  // Nothing of dfl's to remove: the file stays byte for byte (no trailing-newline or blank-line cleanup).
+  if (unique.length === 0 && !dropped) return { changed: false, warnings, deleted: false };
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
   const parts: string[] = [...kept];
   if (unique.length > 0) {
     if (parts.length > 0) parts.push('');
@@ -125,6 +139,14 @@ export function updateManagedBlock(
   }
   const next = parts.length > 0 ? parts.join(eol) + eol : '';
   if (current === undefined && next === '') return { changed: false, warnings, deleted: false };
+  if (link && next !== text) {
+    const what = unique.length > 0 ? `update the "${start}" block in it` : `remove the "${start}" … "${end}" block from it`;
+    warnings.push(
+      `${name} is a symbolic link, and dfl never writes through or replaces symlinks: ${what} by hand` +
+        (unique.length > 0 ? '.' : ' (dfl no longer needs it: every skill dir ignores itself).'),
+    );
+    return { changed: false, warnings, deleted: false };
+  }
   const onlyDfl = hadBlock && warnings.length === 0 && kept.every((line) => line.trim() === '');
   if (next === '' && options.deleteIfEmpty && onlyDfl) {
     removePath(file);
@@ -153,8 +175,10 @@ export function removeManagedBlock(file: string, marker: string = MANAGED_MARKER
  * writes it: skill dirs carry their own `.gitignore`). Deletes the file only when it held nothing
  * but that block; a missing end marker never costs user lines (a warning is returned instead).
  * `knownLines` are the lines dfl wrote into the block (the previous manifest's skill dirs + `/`).
+ * A symlinked `.gitignore` is left untouched; a warning asks to remove the block by hand.
  */
 export function removeLegacyGitignoreBlock(paths: ProjectPaths, knownLines: string[] = []): ManagedBlockResult {
-  if (readTextIfExists(paths.rootGitignoreFile) === undefined) return { changed: false, warnings: [], deleted: false };
-  return updateManagedBlock(paths.rootGitignoreFile, [], { knownLines, deleteIfEmpty: true });
+  const file = paths.rootGitignoreFile;
+  if (!isSymlink(file) && readTextIfExists(file) === undefined) return { changed: false, warnings: [], deleted: false };
+  return updateManagedBlock(file, [], { knownLines, deleteIfEmpty: true, displayName: '.gitignore' });
 }
