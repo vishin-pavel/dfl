@@ -1,0 +1,81 @@
+# Plan the implementation
+
+Turn the approved spec into an ordered implementation plan made of small increments. Each
+increment must leave the code base building, tested and committable, so the work can be reviewed
+and, if needed, stopped at any point.
+
+## Inputs
+
+- The spec at `{{vars.specsDir}}/<slug>.md`. Find the slug in the text the user typed after the
+  command, or derive it from the current branch (`git branch --show-current`, then strip the
+  `{{vars.branchPrefix}}` prefix), or ask the user.
+- The code base, in particular the modules the spec touches and their tests.
+
+If there is no approved spec, stop and tell the user; send the flow back to the spec step
+instead of planning from a guess.
+
+## Procedure
+
+1. **Read the spec completely**: goals, non-goals, acceptance criteria, edge cases. If something
+   required for planning is missing or contradictory, list it and fire `BACK` so the spec gets
+   fixed first. Do not silently fill gaps.
+2. **Map the change.** List the files and modules to modify, new modules to create, data or
+   schema changes, configuration, and documentation. Open each relevant file and note the
+   patterns to reuse: error handling, logging, dependency injection, test style and helpers.
+3. **Find the risks.** Unknown APIs, performance limits, migrations, concurrency, external
+   services. Put a small spike or a test that proves the risky assumption at the start of the
+   plan, so bad news arrives early.
+4. **Split the work into increments** (typically 3 to 10). For each increment write:
+   - a one-line goal;
+   - the files it touches;
+   - the tests to add or change (unit, integration, end-to-end) and what they assert;
+   - the acceptance criteria it covers.
+
+   Order them foundations first: types and data model, then core logic, then integration and
+   user-facing parts, then documentation and cleanup. Every increment ends with
+   `{{vars.testCommand}}` passing.
+5. **Check traceability.** Every acceptance criterion must be covered by at least one increment
+   and one test. Every increment must serve at least one acceptance criterion or be an explicit
+   enabling task. Remove anything that serves neither.
+6. **Write the plan** into the spec file, as a new section at the end:
+
+   ```markdown
+   ## Implementation plan
+
+   ### 1. <goal>
+   - [ ] Change: <files and what changes>
+   - [ ] Tests: <test files and cases>
+   - Covers: AC1, AC3
+
+   ### Traceability
+   | Acceptance criterion | Increments | Tests |
+   |----------------------|------------|-------|
+   ```
+
+7. **Review the plan with the user.** Point out the risky decisions, the alternatives you
+   rejected and why, and anything that changes public behaviour. Adjust until the user approves.
+8. **Commit** the updated spec on the feature branch:
+   `git commit -am "docs: implementation plan for <slug>"` (or add the file explicitly if the
+   working tree contains other changes).
+
+## Outputs
+
+- An `## Implementation plan` section in `{{vars.specsDir}}/<slug>.md` with checkbox increments
+  and a traceability table.
+- A commit with the plan on `{{vars.branchPrefix}}<slug>`.
+
+## Exit criteria
+
+- The user approved the plan.
+- Every acceptance criterion is traced to increments and tests.
+- Every increment is small enough to implement and review in one sitting.
+
+## Pitfalls
+
+- Do not start coding "just to try something" outside an explicit spike increment.
+- Do not plan features the spec lists as non-goals, and do not widen scope quietly: if the plan
+  needs more than the spec allows, go back and change the spec with the user.
+- Avoid one giant "implement everything" increment; it defeats verification and review.
+- Prefer existing helpers and patterns over new abstractions; name the helper you will reuse.
+
+{{> flow-context}}

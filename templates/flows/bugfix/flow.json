@@ -1,0 +1,76 @@
+{
+  "name": "bugfix",
+  "title": "Bug fix",
+  "description": "Reproduce a bug as a failing test, find its root cause, fix it, verify the fix and ship it.",
+  "version": "1.0.0",
+  "skillPrefix": "",
+  "vars": {
+    "mainBranch": {
+      "description": "Default branch that fix branches start from and pull requests target",
+      "default": "main",
+      "scope": "project"
+    },
+    "testCommand": {
+      "description": "Command that runs the full test suite",
+      "default": "npm test",
+      "scope": "project"
+    },
+    "branchPrefix": {
+      "description": "Prefix for your bug fix branch names",
+      "default": "fix/",
+      "scope": "personal"
+    },
+    "reviewer": {
+      "description": "GitHub handle (without the leading @) to request pull request reviews from; leave empty to choose per pull request",
+      "scope": "personal",
+      "required": false
+    }
+  },
+  "machine": {
+    "id": "bugfix",
+    "initial": "reproduce-bug",
+    "states": {
+      "reproduce-bug": {
+        "description": "Reproduce a reported bug reliably and capture it as a failing automated test. Use when starting work on a bug report, crash or regression.",
+        "meta": { "title": "Reproduce" },
+        "on": { "NEXT": "diagnose-bug" }
+      },
+      "diagnose-bug": {
+        "description": "Find the root cause of a reproduced bug and agree on a fix approach before changing code. Use once the bug reproduces reliably.",
+        "meta": { "title": "Diagnose" },
+        "on": {
+          "NEXT": "fix-bug",
+          "BACK": { "target": "reproduce-bug", "description": "The reproduction turned out to be wrong or incomplete" }
+        }
+      },
+      "fix-bug": {
+        "description": "Fix the diagnosed root cause with the smallest safe change and make the reproduction test pass. Use after diagnosis or when verification failed.",
+        "meta": { "title": "Fix" },
+        "on": {
+          "NEXT": "verify-fix",
+          "BACK": { "target": "diagnose-bug", "description": "The fix showed that the diagnosis was wrong" }
+        }
+      },
+      "verify-fix": {
+        "description": "Verify that the fix removes the bug, the full suite passes and nothing nearby regressed. Use after the fix is committed.",
+        "meta": { "title": "Verify" },
+        "on": {
+          "NEXT": "ship-fix",
+          "FAILED": { "target": "fix-bug", "description": "The bug still reproduces or something regressed" }
+        }
+      },
+      "ship-fix": {
+        "description": "Ship the verified fix by pushing the branch and opening a pull request that explains cause and fix. Use when verification passes.",
+        "meta": { "title": "Ship" },
+        "on": {
+          "NEXT": "done",
+          "CHANGES_REQUESTED": { "target": "fix-bug", "description": "Pull request reviewers or CI require code changes" }
+        }
+      },
+      "done": {
+        "type": "final",
+        "description": "The fix is shipped."
+      }
+    }
+  }
+}

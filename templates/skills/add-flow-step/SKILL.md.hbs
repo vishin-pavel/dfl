@@ -1,0 +1,118 @@
+---
+name: add-flow-step
+description: Add a new step to the project's active dfl development flow. Interviews the user, drafts the step's skill template, wires its transitions through the dfl MCP server and re-installs the skills. Use when the user wants to add, insert or create a step in their development flow.
+---
+{{!--
+  Built-in dfl skill. This file is itself a Handlebars template: every literal double-brace
+  example meant for the agent is escaped with a backslash so it survives rendering.
+--}}
+# Add a step to the development flow
+
+A dfl flow is a state machine stored in `.df/<flow>/flow.json`. Every non-final state is a
+**step** with a skill template at `.df/<flow>/steps/<step-id>/SKILL.md.hbs`; dfl renders it into
+an Agent Skill (slash command) for every coding agent configured in this project. Your job is to
+design the new step with the user, write its template and let dfl wire and install it.
+
+{{#if flow.name}}
+Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`), {{flow.stepCount}} steps:
+
+{{#each flow.steps}}
+{{number}}. **{{this.title}}** (`{{id}}`){{#each next}} [{{event}} → {{id}}]{{/each}}
+{{else}}
+(no steps yet)
+{{/each}}
+
+This is a snapshot; always read the live flow with `get_flow` before changing anything.
+{{else}}
+No flow was active at the last sync. Call `list_flows` and ask the user which flow to change
+(every tool accepts a `flow` argument), or suggest `{{dfl.cli}} flow use <name>`.
+{{/if}}
+
+## Tools
+
+Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with a prefix, such as
+`mcp__{{dfl.mcpServer}}__add_step`). If they are not available, use the CLI fallbacks at the end.
+
+## Procedure
+
+1. **Read the flow.** Call `get_flow`: steps in order, their transitions (event → target), the
+   initial step, the declared variables and which step is current.
+2. **Read the authoring guide.** Call `get_authoring_guide` and follow it when writing the
+   template. Call `get_step` on the existing step most similar to the new one and reuse its
+   structure and tone, so the flow reads consistently.
+3. **Interview the user.** Ask a few questions at a time and propose defaults they can accept:
+   - **Purpose**: what the step achieves and when an agent should use it. Use the text the user
+     typed after the command as the starting point.
+   - **Id**: kebab-case (lowercase letters, digits, single hyphens), at most 64 characters,
+     unique in the flow and different from the built-in skills `add-flow-step`,
+     `edit-flow-step` and `delete-flow-step`. It becomes the skill name and slash command.
+   - **Title**: one to three words, shown in lists and the flow viewer.
+   - **Description**: one sentence of at most 200 characters that starts with a verb and says
+     when to use the step. Agents use it to decide when to invoke the skill automatically.
+   - **Position**: after which step (that step's `NEXT` then leads to the new step, and the new
+     step's `NEXT` goes where the old one went) or before which step.
+   - **Extra events**: for example `FAILED` back to an implementation step, `CHANGES_REQUESTED`,
+     `BACK`. Events are UPPER_SNAKE_CASE; targets must be existing step ids or the final state.
+   - **Inputs and outputs**: what the step reads (files from earlier steps, the text the user
+     typed after the command) and what it produces (files, commits, reports); how "done" is
+     decided.
+   - **Variables**: team-wide values such as commands and paths are **project** variables
+     (committed in `.df/config.json`); per-developer values such as handles or branch prefixes
+     are **personal** variables (in the git-ignored `.df/local.json`, which is why rendered
+     skills are git-ignored too). Reuse the variables from `get_flow` before inventing new ones.
+4. **Draft the template body** following the guide:
+   - No YAML frontmatter: dfl generates `name` and `description` from flow.json. Only
+     `allowed-tools` or `license` may appear in frontmatter.
+   - Sections: goal, inputs, a numbered procedure, outputs, exit criteria, pitfalls. Use concrete
+     commands with variables, such as `\{{vars.testCommand}}`.
+   - Context you can use: `\{{project.name}}`, `\{{flow.title}}`, `\{{step.title}}`,
+     `\{{step.description}}`, `\{{vars.<name>}}`, `\{{env.<NAME>}}`, `\{{dfl.cli}}`; conditionals
+     like `\{{#if vars.reviewer}}` ... `\{{/if}}`; loops like `\{{#each step.next}}` ... `\{{/each}}`;
+     the helper `\{{command skillName}}` for another step's slash command.
+   - The last line must be exactly `\{{> flow-context}}`. This partial appends the flow position,
+     the next steps and the instructions for completing the step; do not write your own.
+   - Never write the placeholders that agents expand when a skill runs as a command: a dollar
+     sign followed by ARGUMENTS or by a digit, a line that begins with an exclamation mark
+     followed by a backtick, or an at-sign directly followed by a word. Refer to arguments as
+     "the text the user typed after the command".
+   - Aim for 60 to 140 lines of instructions an agent can follow without guessing.
+5. **Show the draft to the user**: id, title, description, position, the transitions before and
+   after the change, new variables, and the full template. Iterate until they approve it.
+6. **Create the step** with `add_step`: `id`, `title`, `description`, `after` or `before`,
+   optionally `event` (the event used to splice the step in, default `NEXT`), `on` for extra
+   transitions (for example `{ "FAILED": "implement-feature" }`) and `template`. dfl writes the
+   files, re-renders and re-installs the skills, and returns the step, a sync summary and
+   warnings.
+7. **Declare new variables**, if any: `add_step` cannot do it. Add them to the `vars` object of
+   `.df/<flow>/flow.json` (`description`, `default`, `scope`: `project` or `personal`,
+   `required`), set values with `{{dfl.cli}} vars set <name> <value>` (add `--personal` for
+   personal ones), then call `sync`.
+8. **Validate** with `validate_flow`. Fix every error (usually with `update_step`) and explain the
+   warnings to the user, for example a step that is unreachable from the initial step.
+9. **Report**: the new slash command (from the `skillName` in the result), where the step sits
+   (previous → new → next), and the files to commit (`git add .df/<flow>`) so the team gets the
+   step; teammates run `{{dfl.cli}} flow-update` after pulling. Some agents only discover new
+   skills after a restart or a skills reload; tell the user if the command does not show up.
+
+Do not fire `transition`, `complete_step` or `goto_step` here: adding a step does not change
+where the user currently is in the flow.
+
+## CLI fallbacks
+
+| MCP tool | CLI |
+|----------|-----|
+| `get_flow` | `{{dfl.cli}} step list` and read `.df/<flow>/flow.json` |
+| `add_step` | `{{dfl.cli}} step add <id> --after <step> --title "<title>" --description "<description>"` (or `--before <step>`, `--event <EVENT>`) |
+| `on` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` |
+| `template` | write `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` |
+| `validate_flow` | `{{dfl.cli}} flow validate` |
+| `sync` | `{{dfl.cli}} flow-update` |
+
+Without the MCP server there is no authoring guide tool; follow the rules in step 4.
+
+## Pitfalls
+
+- Edit only `.df/<flow>/...` files. Rendered `SKILL.md` files and the installed copies in agent
+  skill folders are regenerated on every sync, so edits there are lost.
+- Prefer the tools over hand-editing flow.json; if you do edit it, run `validate_flow` after.
+- Keep one responsibility per step. If the user describes two, propose two steps.

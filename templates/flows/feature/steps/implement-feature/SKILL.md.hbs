@@ -1,0 +1,64 @@
+# Implement the feature
+
+Execute the implementation plan increment by increment: tests first, minimal code to make them
+pass, a green suite and a commit after every increment. Stay inside the scope of the spec.
+
+## Inputs
+
+- The spec and its `## Implementation plan` section in `{{vars.specsDir}}/<slug>.md` (derive
+  the slug from the branch name `{{vars.branchPrefix}}<slug>` or from the text the user typed
+  after the command).
+- If the flow came back here from verification (`FAILED`) or review (`CHANGES_REQUESTED`): the
+  list of failures or findings. Look for it earlier in the conversation, in the pull request
+  comments, or ask the user. Fix exactly those items first; do not redo finished increments.
+
+## Procedure
+
+1. **Prepare the workspace.** Check out `{{vars.branchPrefix}}<slug>`, run `git status` and make
+   sure there are no stray changes. Run `{{vars.testCommand}}` once to record the baseline. If it
+   already fails before you change anything, tell the user and agree on how to proceed.
+2. **Pick the first unchecked increment** in the plan (or the first open finding when you came
+   back from verification or review).
+3. **Write or update the tests first.** Run them and confirm they fail for the expected reason
+   (an assertion about the missing behaviour, not a typo or import error).
+4. **Implement the smallest change that makes them pass.** Follow the patterns you noted in the
+   plan: existing helpers, error types, logging, naming. Handle the edge cases the spec lists.
+5. **Run the tests.** Use a focused subset while iterating, then the full `{{vars.testCommand}}`
+   before finishing the increment. Also run the project's type checker, linter and formatter if
+   it has them (look at the package scripts, Makefile or CI configuration).
+6. **Tick the increment's checkboxes** in the plan and commit with a message that describes the
+   behaviour, for example `feat(export): add CSV writer for invoices`. One increment, one commit
+   (or a few small ones); never one commit for the whole feature.
+7. **Repeat** steps 2 to 6 until every increment is done.
+8. **When the plan is wrong**, stop. For a small deviation (an extra helper, a renamed file),
+   update the plan and mention it in your summary. For a real change of approach, explain it to
+   the user and fire `BACK` to revise the plan together.
+9. **Update the surroundings**: user documentation, changelog, configuration examples and
+   migration notes affected by the feature.
+10. **Self-check the whole branch** before leaving the step:
+    `git diff {{vars.mainBranch}}...HEAD --stat` for scope, then read the full diff for leftovers.
+
+## Outputs
+
+- Commits on `{{vars.branchPrefix}}<slug>`, one or more per increment.
+- New and updated tests covering every acceptance criterion.
+- The plan in the spec with all increments checked (and deviations noted).
+
+## Exit criteria
+
+- Every increment of the plan is done, or the user agreed to drop it and the plan says so.
+- `{{vars.testCommand}}` passes locally, along with type checks and lint if the project has them.
+- The diff contains no debug output, commented-out code, stray TODOs or unrelated changes.
+- The working tree is clean (everything committed).
+
+## Pitfalls
+
+- Never weaken, skip or delete a test to make the suite pass. If a test is wrong, say so and
+  fix it deliberately in its own commit.
+- Do not tick acceptance criteria as verified here; the verification step does that with
+  evidence.
+- No drive-by refactors or mass reformatting. Note them as follow-ups for the review.
+- Do not let uncommitted work pile up; small commits make review and rollback cheap.
+- Do not add dependencies the plan did not mention without asking the user.
+
+{{> flow-context}}

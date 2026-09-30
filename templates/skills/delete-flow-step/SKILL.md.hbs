@@ -1,0 +1,92 @@
+---
+name: delete-flow-step
+description: Delete a step from the project's active dfl development flow after showing how its transitions will be rewired and getting explicit confirmation, then re-install the skills. Use when the user wants to remove, drop or delete a flow step.
+---
+# Delete a step from the development flow
+
+Deleting a step removes its state from `.df/<flow>/flow.json`, deletes its directory
+`.df/<flow>/steps/<step-id>/` (template and any extra files) and uninstalls its skill from every
+configured coding agent. Transitions that pointed to the step are rewired so the flow stays
+connected. This is destructive, so explain the consequences and get explicit confirmation first.
+
+{{#if flow.name}}
+Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`):
+
+{{#each flow.steps}}
+{{number}}. **{{this.title}}** (`{{id}}`){{#each next}} [{{event}} → {{id}}]{{/each}}
+{{else}}
+(no steps yet)
+{{/each}}
+
+This is a snapshot; always read the live flow with `get_flow` before changing anything.
+{{else}}
+No flow was active at the last sync. Call `list_flows` and ask the user which flow to change
+(every tool accepts a `flow` argument).
+{{/if}}
+
+## Tools
+
+Use the tools of the `{{dfl.mcpServer}}` MCP server. If they are not available, use the CLI
+fallbacks at the end.
+
+## Procedure
+
+1. **Identify the step.** Take it from the text the user typed after the command, or call
+   `get_flow` and ask the user to pick one. Final states (such as `done`) are not steps and
+   cannot be deleted this way.
+2. **Inspect it** with `get_step`: its outgoing transitions, its incoming transitions (every
+   step and event that leads to it) and its files. Call `get_status` to see whether it is the
+   current step.
+3. **Work out the rewiring** exactly as dfl will apply it:
+   - every incoming transition is redirected to the deleted step's `NEXT` target;
+   - if the step is the initial step, its `NEXT` target becomes the new initial step;
+   - its other outgoing transitions (`FAILED`, `BACK`, ...) disappear with it;
+   - if it has no `NEXT` transition, the deletion is refused (error `CANNOT_REWIRE`) unless it is
+     forced, and forcing drops the incoming transitions instead of rewiring them.
+4. **Show the user the before and after picture**, for example:
+
+   ```text
+   before: plan --NEXT--> build --NEXT--> review;  review --CHANGES_REQUESTED--> build
+   after:  plan --NEXT--> review;                  review --CHANGES_REQUESTED--> review
+   ```
+
+   Point out anything that becomes odd, like the self-loop above, a step that becomes
+   unreachable, or a flow that can no longer reach its final state. Also say that the step's
+   template and files are deleted (recoverable from git only if they were committed), and that
+   if it is the current step the flow position falls back to the initial step.
+5. **Ask for explicit confirmation**, naming the step: "Delete step `<id>`?" Proceed only on a
+   clear yes. If the user wants some transitions to go elsewhere, fix them first with
+   `update_step` (for example point `CHANGES_REQUESTED` to another step), then delete.
+6. **Delete** with `delete_step` (`step`). dfl rewires the transitions, deletes the directory,
+   re-installs the skills and returns a sync summary and warnings.
+7. **If dfl refuses with `CANNOT_REWIRE`**, explain which transitions would be dropped and what
+   that means for the flow. Offer the alternative of first giving the step a `NEXT` transition
+   with `update_step`. Call `delete_step` with `force: true` only if the user agrees after that
+   explanation.
+8. **Validate** with `validate_flow` and explain the remaining warnings. Offer fixes for
+   unreachable steps or a missing path to the final state.
+9. **Report**: the removed slash command, the new transitions around the gap, and the current
+   step (if the deleted step was current, call `get_status` and offer `goto_step` to the step the
+   user was really at). Remind the user to commit `.df/<flow>` so the team gets the change
+   (teammates run `{{dfl.cli}} flow-update` after pulling) and that some agents only notice
+   removed skills after a restart or a skills reload.
+
+## CLI fallbacks
+
+| MCP tool | CLI |
+|----------|-----|
+| `get_flow` / `get_step` | `{{dfl.cli}} step list`, then read `.df/<flow>/flow.json` |
+| `get_status` | `{{dfl.cli}} status` |
+| `delete_step` | `{{dfl.cli}} step remove <id>` (add `--force` only after the user agreed) |
+| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` |
+| `validate_flow` | `{{dfl.cli}} flow validate` |
+| `goto_step` | `{{dfl.cli}} goto <step>` |
+
+## Pitfalls
+
+- Never delete without an explicit confirmation in this conversation, and never force without a
+  second one.
+- Do not delete files under `.df/` or in agent skill folders by hand; dfl tracks what it
+  installed and cleans up on sync.
+- Deleting the only step of a flow leaves nothing to run; suggest deleting or switching the flow
+  instead (`{{dfl.cli}} flow list`).

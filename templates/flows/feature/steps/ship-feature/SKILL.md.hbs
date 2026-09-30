@@ -1,0 +1,86 @@
+{{!--
+  Uses the personal var "reviewer": every developer usually asks someone different for reviews,
+  so the value lives in .df/local.json. The rendered SKILL.md contains it, which is why dfl
+  git-ignores rendered skills. Set it with: dfl vars set reviewer <handle> --personal
+--}}
+# Ship the feature
+
+Get the reviewed branch merged into `{{vars.mainBranch}}`: sync it, open a pull request that
+tells reviewers everything they need, get CI green and reviews approved, merge, clean up.
+
+## Inputs
+
+- The reviewed branch `{{vars.branchPrefix}}<slug>`.
+- The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md`.
+- Accepted nits and follow-ups from the review step.
+- Any instructions in the text the user typed after the command (draft pull request, target
+  branch, labels, linked issue).
+
+## Procedure
+
+1. **Sync with the base branch.** `git fetch origin`, then rebase onto or merge
+   `origin/{{vars.mainBranch}}`, whichever the team uses (ask if unsure). Resolve conflicts
+   carefully and run `{{vars.testCommand}}` again afterwards.
+2. **Tidy the history** if the team squashes or expects clean commits: fold fixup commits and
+   make every message describe behaviour. Ask before rewriting history that was already pushed.
+3. **Push the branch**: `git push -u origin HEAD` (after a rebase of an already pushed branch
+   use `git push --force-with-lease`, never a plain force push).
+4. **Write the pull request description**:
+
+   ```markdown
+   ## Summary
+   <what the feature does and why, in two or three sentences>
+
+   ## Spec
+   {{vars.specsDir}}/<slug>.md
+
+   ## Changes
+   - <main changes, grouped by area>
+
+   ## How it was verified
+   - <suite result, acceptance criteria evidence, manual checks>
+
+   ## Notes for reviewers
+   - <risky areas, trade-offs, accepted nits, follow-ups>
+   ```
+
+5. **Open the pull request** against `{{vars.mainBranch}}`. With the GitHub CLI:
+   `gh pr create --base {{vars.mainBranch}} --title "<title>" --body-file <file>{{#if vars.reviewer}} --reviewer {{vars.reviewer}}{{/if}}`.
+   Without it, give the user the compare link printed by `git push` and the description to paste.
+{{#if vars.reviewer}}
+   Review is requested from **{{vars.reviewer}}** (your personal default reviewer).
+{{else}}
+   No default reviewer is configured, so ask the user whom to request. They can set a personal
+   default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.
+{{/if}}
+6. **Watch CI** (`gh pr checks --watch` when available). If a check fails, read its log. Fix
+   pure pipeline problems (for example a missing lockfile entry) here; for failing tests or code
+   problems fire `CHANGES_REQUESTED` so the fix goes through implementation, verification and
+   review again. Pushing to the same branch updates the pull request.
+7. **Handle review comments.** Answer questions directly. When reviewers ask for code changes,
+   collect them as a numbered list and fire `CHANGES_REQUESTED`.
+8. **Merge** only when checks are green, reviews are approved and the user tells you to, using
+   the repository's merge method (`gh pr merge` or the web UI).
+9. **Clean up** after the merge: `git switch {{vars.mainBranch}}`, `git pull`, then
+   `git branch -d {{vars.branchPrefix}}<slug>`. Mention follow-ups the user may want to file.
+
+## Outputs
+
+- A pull request against `{{vars.mainBranch}}` with a complete description.
+- After merge: the feature on `{{vars.mainBranch}}` and the local branch removed.
+
+## Exit criteria
+
+- The pull request is merged, or the user explicitly takes over the remaining steps (for example
+  waiting for approval and merging themselves).
+- CI is green on the final commit.
+
+## Pitfalls
+
+- Never merge with failing or pending checks, and never bypass branch protection.
+- Never force push without `--force-with-lease`, and never to `{{vars.mainBranch}}`.
+- Do not change code in this step beyond conflict resolution; code changes go back through
+  implementation with `CHANGES_REQUESTED`.
+- Keep the description honest: list known limitations and skipped checks.
+
+{{> flow-context}}

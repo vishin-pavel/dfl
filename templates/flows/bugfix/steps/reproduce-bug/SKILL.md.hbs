@@ -1,0 +1,81 @@
+{{!--
+  Bug fix flow, first step. Uses the project vars mainBranch and testCommand (shared, stored in
+  .df/config.json) and the personal var branchPrefix (per developer, stored in .df/local.json).
+  Because rendered skills contain personal values, dfl git-ignores them; commit only this template.
+--}}
+# Reproduce the bug
+
+A bug that cannot be reproduced cannot be shown to be fixed. Turn the report into a reliable,
+minimal reproduction and capture it as an automated test that fails today for the reported
+reason. Do not try to fix anything yet.
+
+## Inputs
+
+- The text the user typed after the command: the bug report (symptom, error message, steps,
+  environment). If it is empty, ask the user to describe the bug.
+- Linked issues, logs, stack traces, screenshots or failing CI runs the user mentions.
+
+## Procedure
+
+1. **Collect the facts** and write them down:
+   - expected behaviour versus actual behaviour;
+   - the exact error text or stack trace;
+   - version or commit, environment (OS, runtime and dependency versions, configuration, data);
+   - when it started and whether it used to work (a regression).
+   Ask the user for anything missing that matters; do not guess environment details.
+2. **Create the working branch** from an up-to-date `{{vars.mainBranch}}`, with a short kebab-case
+   slug such as `1234-empty-cart-total` (issue number first when there is one):
+
+   ```sh
+   git fetch origin {{vars.mainBranch}}
+   git switch -c {{vars.branchPrefix}}<slug> origin/{{vars.mainBranch}}
+   ```
+
+3. **Reproduce manually** with the smallest set of steps you can. Record the exact commands,
+   inputs and the observed output.
+4. **If it does not reproduce**, do not move on. Compare your environment with the reporter's,
+   try the reported version (check out the tag or commit), try the reported data, and add
+   temporary logging around the suspected area. Report back to the user with what you tried.
+5. **Minimise.** Remove every step, input field and configuration option that is not needed for
+   the failure. The smaller the reproduction, the easier the diagnosis.
+6. **Capture it as an automated test** at the lowest level that still shows the bug: unit test
+   over integration test over end-to-end test. Name the test after the expected behaviour
+   (for example "total is zero for an empty cart"), not after the ticket.
+7. **Run it** (the single test first, then `{{vars.testCommand}}`) and confirm that the new test
+   fails, that it fails with the symptom from the report, and that no other test changed.
+8. **For regressions**, find the change that introduced the bug if it is cheap:
+   `git bisect start`, mark a bad and a good commit, and let the new test decide each step
+   (`git bisect run` with the command that runs only that test). Finish with `git bisect reset`.
+9. **Write the reproduction note** in the conversation:
+
+   ```markdown
+   Symptom: ...
+   Environment: ...
+   Steps: 1. ... 2. ...
+   Expected: ...   Actual: ...
+   Failing test: <file> - <test name>
+   Introduced by: <commit, if known>
+   ```
+
+10. **Commit the failing test** on the fix branch, marked in the message (for example
+    `test: reproduce empty cart total bug`). Do not push a failing test to a shared branch.
+
+## Outputs
+
+- Branch `{{vars.branchPrefix}}<slug>` with a commit containing the failing test.
+- The reproduction note.
+
+## Exit criteria
+
+- The bug reproduces every time with the documented steps.
+- An automated test fails because of the bug. If the bug truly cannot be automated (hardware,
+  third-party UI), the user agreed to a precise manual reproduction instead.
+
+## Pitfalls
+
+- Do not start fixing while reproducing; an early "fix" hides the real cause.
+- A test that fails for a different reason (setup error, wrong fixture) is not a reproduction.
+- Avoid sleeps and timing assumptions in the test; flaky reproductions waste the next steps.
+- Remove temporary logging before committing.
+
+{{> flow-context}}

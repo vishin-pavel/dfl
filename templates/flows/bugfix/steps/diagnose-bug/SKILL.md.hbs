@@ -1,0 +1,68 @@
+# Diagnose the root cause
+
+Find out **why** the bug happens, not just where it crashes, and agree with the user on how to
+fix it. The output of this step is an explanation that someone else could check, plus a chosen
+fix approach. No production code changes yet.
+
+## Inputs
+
+- The failing reproduction test and the reproduction note from the previous step (look in the
+  conversation, the latest commits on `{{vars.branchPrefix}}<slug>`, or ask the user).
+- Any hints in the text the user typed after the command.
+
+## Procedure
+
+1. **Start from the failing test.** Run it and read the failure and stack trace top-down. Locate
+   the code path from the entry point to the failure.
+2. **Form hypotheses** about the cause and write each one down with a prediction: "if X is the
+   cause, then Y should be observable". Test the cheapest hypothesis first with a small
+   experiment: an extra assertion, a debug log, a breakpoint, a quick script.
+3. **Keep a log** of hypothesis, experiment and result. It prevents going in circles and becomes
+   the evidence in the diagnosis summary.
+4. **Trace the bad data back** to the point where it first becomes wrong. The place that crashes
+   is often far downstream of the place that is broken.
+5. **Use history.** `git log -p -- <file>` and `git blame` on the suspicious lines show when and
+   why they changed. If the reproduction step found the introducing commit, read that commit
+   in full.
+6. **Ask "why" until you reach a defect**: a wrong condition, a missing case, a broken contract
+   between modules, bad configuration or bad data. "It throws" or "the value is null" is a
+   symptom, not a root cause.
+7. **Measure the blast radius.** Search for the same pattern elsewhere (other callers of the
+   function, copies of the logic). Check whether wrong data was already persisted, whether other
+   users or features are affected, and whether there is a security impact.
+8. **Explain why it was not caught**: missing test, wrong assumption in an existing test,
+   untested configuration. This tells the fix step which extra tests to add.
+9. **Propose fix options**, at least two when the fix is not obvious, with trade-offs (size,
+   risk, performance, compatibility). Recommend one. Say whether existing data needs repair.
+10. **Clean up** every temporary log, assertion and script you added.
+11. **Write the diagnosis summary** and get the user's agreement on the fix:
+
+    ```markdown
+    Root cause: ...
+    Evidence: ...
+    Why it was not caught: ...
+    Also affected: ...
+    Proposed fix: ... (alternatives considered: ...)
+    Data repair needed: yes/no
+    ```
+
+## Outputs
+
+- The diagnosis summary with the agreed fix approach.
+- A clean working tree (no leftover instrumentation).
+
+## Exit criteria
+
+- The root cause explains every observed symptom, and the evidence supports it.
+- The user agreed on the fix approach.
+
+If the investigation shows the reproduction was wrong (a different bug, a test that fails for
+another reason), fire `BACK` and fix the reproduction first.
+
+## Pitfalls
+
+- Do not stop at the first plausible explanation; check that it predicts the exact failure.
+- Do not change production code "to see what happens" without recording and reverting it.
+- Do not ignore other occurrences of the same defect; they belong in the fix or in follow-ups.
+
+{{> flow-context}}

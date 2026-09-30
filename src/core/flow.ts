@@ -239,8 +239,11 @@ export function defaultStepTemplate(step: { title: string; description?: string 
   return [
     `# {{step.title}}`,
     '',
+    // Standalone block lines are dropped by Handlebars: no blank gap when the step has no description.
+    '{{#if step.description}}',
     '{{step.description}}',
     '',
+    '{{/if}}',
     '## Instructions',
     '',
     `<!-- Describe what the agent must do in the "${step.title}" step. -->`,

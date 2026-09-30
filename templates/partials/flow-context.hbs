@@ -1,0 +1,28 @@
+## Flow context
+
+{{#if step}}
+This is step {{step.number}} of {{flow.stepCount}} (**{{step.title}}**) of the flow **{{flow.title}}** (`{{flow.name}}`).
+{{#if step.prev.length}}
+Previous: {{#each step.prev}}{{#unless @first}}; {{/unless}}{{title}} (`{{command skillName}}`, via `{{event}}`){{/each}}.
+{{/if}}
+
+**Before you start:** call the `get_status` tool of the `{{dfl.mcpServer}}` MCP server (CLI fallback: `{{dfl.cli}} status`). If the current step is not `{{step.id}}`, tell the user and ask whether to switch to this step (`goto_step`) or continue with the current one.
+
+{{#if step.next.length}}
+**When done:** pick the event that matches the outcome:
+{{#each step.next}}
+- `{{event}}` → {{#if final}}flow complete{{else}}{{title}} (`{{command skillName}}`){{/if}}{{#if description}}: {{description}}{{/if}}
+{{/each}}
+
+Call the `complete_step` tool with `{"step": "{{step.id}}", "event": "<EVENT>"}` (CLI fallback: `{{dfl.cli}} next <EVENT>`), then tell the user the slash command of the next step, or that the flow is complete.
+{{else}}
+**When done:** this step has no outgoing events, so the flow ends here; tell the user.
+{{/if}}
+{{else}}
+{{#if flow.name}}
+Active flow: **{{flow.title}}** (`{{flow.name}}`) with {{flow.stepCount}} steps: {{#each flow.steps}}{{#unless @first}}, {{/unless}}{{title}} (`{{command skillName}}`){{/each}}.
+{{else}}
+This project has no active flow yet.
+{{/if}}
+Use the `get_flow` and `get_status` tools of the `{{dfl.mcpServer}}` MCP server to inspect it (CLI fallback: `{{dfl.cli}} status`).
+{{/if}}

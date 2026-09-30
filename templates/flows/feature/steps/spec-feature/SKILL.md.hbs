@@ -1,0 +1,93 @@
+{{!--
+  Feature flow, first step. Uses the project vars specsDir and mainBranch (shared, stored in
+  .df/config.json) and the personal var branchPrefix (per developer, stored in .df/local.json).
+  Because rendered skills contain personal values, dfl git-ignores them; commit only this template.
+--}}
+# Write the feature spec
+
+Turn the user's feature request into a short, reviewable spec that says **what** to build and
+**how everyone will know it works**, not how to build it. Every later step of the {{flow.title}}
+flow (plan, implementation, verification, review) is checked against this document, so vague
+wording here turns into rework later.
+
+## Inputs
+
+- The text the user typed after the command: the feature request. If it is empty, ask the user
+  what they want to build and why.
+- Anything the user links or mentions: issue, ticket, design, discussion. Read it if you can.
+- The code base: the modules, data models and tests the feature will touch.
+- Existing specs in `{{vars.specsDir}}/`. If the team already has a house style there, follow it
+  instead of the outline below.
+
+## Procedure
+
+1. **Restate the request** in two or three sentences (who needs what, and why) and confirm it
+   with the user before going further.
+2. **Explore before asking.** Search the code base for related features, entry points, data
+   models, configuration and tests. Note the constraints you find: public APIs or CLI contracts,
+   persisted data and migrations, feature flags, performance-sensitive paths.
+3. **Interview the user about the gaps only.** Ask a few focused questions at a time; offer
+   options with a recommended default instead of open questions. Cover:
+   - the primary user and the problem the feature solves;
+   - what is explicitly out of scope;
+   - edge cases: empty and very large inputs, invalid input, permissions, concurrency;
+   - error handling and what the user sees when something fails;
+   - compatibility: existing data, public interfaces, configuration, documentation.
+4. **Choose a slug**: a short kebab-case name for the feature, for example `csv-export`. It names
+   the spec file and the branch, and later steps use it to find the spec.
+5. **Write the spec** to `{{vars.specsDir}}/<slug>.md` with this outline:
+
+   ```markdown
+   # <Feature name>
+
+   ## Problem
+   ## Goals
+   ## Non-goals
+   ## User-facing behaviour
+   ## Acceptance criteria
+   - [ ] AC1: Given <context>, when <action>, then <observable result>.
+   ## Edge cases and errors
+   ## Open questions
+   ```
+
+   Every acceptance criterion must be observable and testable: later it maps to at least one
+   automated test or a documented manual check. Number them (AC1, AC2, ...) so the plan,
+   the tests and the verification report can refer to them.
+6. **Resolve the open questions** with the user. Either answer each one in the spec or move it
+   explicitly to Non-goals. A spec with unresolved open questions is not finished.
+7. **Create the working branch**, unless the user prefers to stay on the current one. Start from
+   an up-to-date `{{vars.mainBranch}}`:
+
+   ```sh
+   git fetch origin {{vars.mainBranch}}
+   git switch -c {{vars.branchPrefix}}<slug> origin/{{vars.mainBranch}}
+   ```
+
+   If the working tree has unrelated uncommitted changes, ask the user what to do with them
+   before switching branches.
+8. **Commit the spec** on the branch (ask first if the team does not keep specs in git):
+   `git add {{vars.specsDir}}/<slug>.md` and `git commit -m "docs: spec for <slug>"`.
+9. **Get explicit approval.** Show the user the goals, non-goals and acceptance criteria and ask
+   whether they approve the spec as the contract for this feature.
+
+## Outputs
+
+- `{{vars.specsDir}}/<slug>.md` with numbered acceptance criteria and no open questions.
+- Branch `{{vars.branchPrefix}}<slug>` containing the spec commit.
+
+## Exit criteria
+
+- The user explicitly approved the spec, in particular the acceptance criteria.
+- Each acceptance criterion can be verified by a test or a precise manual check.
+- Scope is small enough for one pull request; otherwise the user agreed to split it and this
+  spec covers only the first part.
+
+## Pitfalls
+
+- Do not design the implementation here (class names, file layout, algorithms). That is the
+  planning step's job; only record hard technical constraints.
+- Do not invent requirements. Unknowns go into Open questions and are asked, not guessed.
+- Keep it short: one or two screens. A long spec usually means the feature should be split.
+- Do not write production code in this step, even if the change looks trivial.
+
+{{> flow-context}}

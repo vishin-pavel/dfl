@@ -1,0 +1,61 @@
+{{!--
+  Quick change flow, first step. Uses the project var testCommand (shared, stored in
+  .df/config.json). Add personal vars to flow.json if your team wants per-developer values.
+--}}
+# Plan the quick change
+
+Small changes still deserve thirty seconds of thinking. Confirm that the change really is small
+and low-risk, find exactly where it goes, and agree on a plan of a few lines before editing.
+
+## Inputs
+
+- The text the user typed after the command: what to change. If it is empty, ask the user.
+- The code base: the files and tests around the change.
+
+## Procedure
+
+1. **Restate the change** in one sentence, including the observable result ("the CLI prints the
+   version with a leading v", "the button label reads Save"). Confirm it if there is any doubt.
+2. **Locate it.** Search the code base for the relevant files, then read them and their tests.
+   Note the conventions you must follow (naming, formatting, error handling, test style).
+3. **Size check.** This flow is meant for changes that:
+   - touch a handful of files at most;
+   - do not change public APIs, data schemas, persisted formats or security-sensitive code;
+   - add no new dependencies;
+   - can be checked with the existing tests or one or two new ones.
+
+   If the change fails this check, say so and recommend a fuller flow (list the flows of this
+   project with `{{dfl.cli}} flow list` and switch with `{{dfl.cli}} flow use <name>`). Continue
+   here only if the user insists.
+4. **Write the plan** in the conversation, short and concrete:
+
+   ```markdown
+   Goal: <one sentence>
+   Files: <path> - <what changes>
+   Check: <test to add or update>, then {{vars.testCommand}}
+   Risk: <what could break, or "none known">
+   ```
+
+5. **Check the working tree** with `git status`. If there are unrelated uncommitted changes, tell
+   the user now so they do not get mixed into this change.
+6. **Get a quick OK** from the user on the plan. A short "yes" is enough; adjust the plan if they
+   add requirements, and re-run the size check if the plan grows.
+
+## Outputs
+
+- A plan of a few lines: goal, files, how it will be checked, risk.
+
+## Exit criteria
+
+- The change passed the size check (or the user explicitly chose this flow anyway).
+- The user agreed to the plan.
+
+## Pitfalls
+
+- Do not skip reading the code because the change "is obvious"; most quick changes that go wrong
+  missed a second place that needed the same edit.
+- Do not start editing in this step.
+- Do not let a quick change quietly become a feature. If new requirements appear, re-plan or
+  switch flows.
+
+{{> flow-context}}

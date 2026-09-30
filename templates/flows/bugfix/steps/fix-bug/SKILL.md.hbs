@@ -1,0 +1,63 @@
+# Fix the bug
+
+Apply the agreed fix at the root cause with the smallest change that fully removes the bug,
+make the reproduction test pass and protect the neighbouring cases with tests.
+
+## Inputs
+
+- The diagnosis summary and the agreed fix approach from the previous step.
+- The failing reproduction test on `{{vars.branchPrefix}}<slug>`.
+- If the flow came back here from verification (`FAILED`) or from pull request review
+  (`CHANGES_REQUESTED`): the list of failures or requested changes. Look for it in the
+  conversation or the pull request, or ask the user. Address exactly those items first.
+- Extra constraints in the text the user typed after the command.
+
+## Procedure
+
+1. **Confirm the baseline.** Run the reproduction test (it must fail) and `{{vars.testCommand}}`
+   (everything else should pass). If the baseline differs, find out why before editing.
+2. **Implement the agreed fix** at the root cause, following the conventions of the surrounding
+   code. Prefer fixing the broken contract over adding a special case at the crash site.
+3. **Cover the blast radius.** Fix the other occurrences found during diagnosis, or list them as
+   follow-ups if the user agreed to keep this change small. Add tests for the sibling cases and
+   edge cases the diagnosis revealed (for example the "why it was not caught" item).
+4. **Run the tests**: the reproduction test first, then the related tests, then the full
+   `{{vars.testCommand}}`. Also run the type checker and linter if the project has them.
+5. **Data repair**, if the diagnosis said existing data is wrong: write the repair as a separate,
+   idempotent script or migration with a dry-run mode, test it on a copy, and ask the user
+   before it runs against any shared environment.
+6. **Review your own diff**: `git diff` (and `git diff {{vars.mainBranch}}...HEAD` for the whole
+   branch). Only the fix, its tests and required docs should be there; remove debug code.
+7. **Commit** with a message that names the defect and explains the cause in the body:
+
+   ```text
+   fix(cart): return zero total for empty carts
+
+   The total reducer had no initial value, so an empty cart produced
+   undefined, which the UI rendered as NaN.
+   ```
+
+8. **If the fix does not work** because the diagnosis was wrong (the test still fails for a
+   different reason, or fixing it breaks the assumptions of the diagnosis), stop and fire
+   `BACK` to revisit the diagnosis with the user instead of stacking guesses.
+
+## Outputs
+
+- A commit (or a few) on `{{vars.branchPrefix}}<slug>` containing the fix and its tests.
+- A short summary: what changed, why it fixes the root cause, which tests were added.
+
+## Exit criteria
+
+- The reproduction test passes, and so does `{{vars.testCommand}}`.
+- The change addresses the root cause from the diagnosis, not only the symptom.
+- The working tree is clean.
+
+## Pitfalls
+
+- Do not swallow the exception or add a null check at the crash site if the bad value comes
+  from elsewhere; that hides the bug and creates new ones.
+- Never edit the reproduction test to match the buggy behaviour.
+- Do not bundle refactors, dependency upgrades or unrelated fixes into the fix branch.
+- Keep behaviour changes that users will notice visible: mention them for the changelog.
+
+{{> flow-context}}

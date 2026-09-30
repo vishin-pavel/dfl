@@ -1,0 +1,63 @@
+# Check the change
+
+Make sure the quick change does what the plan said, breaks nothing, and is ready to commit. Your
+verdict finishes the flow (`NEXT`) or sends the work back (`FAILED`).
+
+## Inputs
+
+- The plan (goal, files, check) and the summary of the edits from the previous steps.
+- The working tree with the change, or the latest commit if the user already committed it.
+- Anything extra to check from the text the user typed after the command.
+
+## Procedure
+
+1. **Run the full suite**: `{{vars.testCommand}}`. Also run the type checker, linter and formatter
+   check if the project has them (look at the package scripts, Makefile or CI configuration).
+   If something fails, check whether it also fails without the change (for example with
+   `git stash`, run, `git stash pop`) so you report pre-existing failures separately.
+2. **Review the diff**: `git diff` (plus `git diff --staged` if anything is staged, or
+   `git show HEAD` if the change is already committed). Check that:
+   - only the planned files changed, plus the dependent docs or tests;
+   - there is no debug output, commented-out code or accidental whitespace churn;
+   - names, formatting and error handling match the surrounding code;
+   - no secrets, local paths or generated files slipped in;
+   - generated artifacts that must change with the code (snapshots, lockfiles, docs generated
+     from code) were regenerated with the project's tools, not edited by hand.
+3. **Confirm the goal is met.** Demonstrate the observable result from the plan: run the command,
+   the test or the page and show the output. "It compiles" is not a demonstration.
+4. **Report the result** to the user:
+
+   ```markdown
+   Goal met: yes/no - <evidence>
+   Suite: <command> - passed/failed (<details>)
+   Diff: <n> files, only planned changes: yes/no
+   ```
+
+5. **Offer to commit** when everything passes, with a message that describes the behaviour, for
+   example `fix(cli): print version with leading v`. Commit only the files that belong to this
+   change (`git add <files>`, not `git add -A`) and only if the user agrees.
+6. **Decide with the user**:
+   - everything passes: fire `NEXT` to finish the flow;
+   - anything fails: fire `FAILED` with a short numbered list of the problems. That list is the
+     input of the change step.
+
+## Outputs
+
+- The check report with evidence.
+- Optionally a commit with the change.
+
+## Exit criteria
+
+- `{{vars.testCommand}}` passes, along with the other checks the project uses.
+- The diff contains only the intended change.
+- The goal from the plan is demonstrated, and the user agrees the change is done.
+
+## Pitfalls
+
+- Do not fix problems inside the check; send them back with `FAILED` so they are checked again.
+- Do not declare success on a partial test run; the full suite must pass.
+- Do not commit or push without the user's agreement.
+- If the check keeps failing after two rounds, the change is probably not quick: suggest
+  re-planning it or switching to a fuller flow.
+
+{{> flow-context}}

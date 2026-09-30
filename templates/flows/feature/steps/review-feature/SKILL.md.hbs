@@ -1,0 +1,68 @@
+# Review the feature branch
+
+Review the complete change like a demanding senior engineer who did not write it. The goal is to
+catch what tests cannot: wrong behaviour the tests also got wrong, security and performance
+problems, scope creep and code that will be hard to maintain.
+
+## Inputs
+
+- The branch diff: `git diff {{vars.mainBranch}}...HEAD` and the commit list
+  `git log --oneline {{vars.mainBranch}}..HEAD`.
+- The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md` (slug from the branch
+  name `{{vars.branchPrefix}}<slug>`).
+- Any focus areas mentioned in the text the user typed after the command.
+
+## Procedure
+
+1. **Refresh the base.** Run `git fetch origin {{vars.mainBranch}}` and check how far the branch
+   is behind. If `origin/{{vars.mainBranch}}` changed files this branch touches, tell the user
+   and agree on rebasing or merging before the review, since conflicts can change behaviour.
+2. **Read the spec first**, then the diff file by file, tests included. For each file ask:
+   - **Correctness**: logic and boundary errors, null or missing values, error paths, resource
+     cleanup, time zones and encodings, concurrency and ordering assumptions.
+   - **Spec fit**: does it do what the spec says, and nothing the non-goals exclude?
+   - **Tests**: do they assert behaviour (not implementation details), cover failure paths and
+     edge cases, and would they fail if the feature broke?
+   - **Security**: input validation, injection (SQL, shell, HTML), authorization checks,
+     secrets in code or logs, unsafe deserialization, new dependencies and their licences.
+   - **Performance**: unbounded loops or memory, repeated queries, blocking work on hot paths.
+   - **Maintainability**: naming, duplication of existing helpers, dead code, comments that
+     explain why rather than what, consistency with the surrounding code.
+   - **Compatibility**: public API, CLI or configuration changes, data migrations, docs and
+     changelog entries.
+3. **Record findings** with a severity, a location (`path:line`) and a concrete suggestion:
+   - **blocker**: must be fixed before shipping (bugs, security, spec violations);
+   - **should fix**: real problems that are cheap to fix now;
+   - **nit**: optional polish; never blocks.
+4. **Present the review** to the user grouped by severity, blockers first. Say explicitly when a
+   category had no findings, so the user knows it was checked.
+5. **Decide with the user**:
+   - blockers, or should-fix items the user wants addressed: fire `CHANGES_REQUESTED`. The
+     numbered findings become the input of the implementation step;
+   - otherwise fire `NEXT`. Keep accepted nits and follow-ups; they go into the pull request
+     description in the next step.
+{{#if vars.reviewer}}
+6. Human review by **{{vars.reviewer}}** happens on the pull request in the next step. Write
+   down anything they should look at closely, such as risky areas or deliberate trade-offs.
+{{/if}}
+
+## Outputs
+
+- A review report grouped by severity with locations and suggested fixes.
+- The verdict: approved, or changes requested with a numbered list of findings.
+
+## Exit criteria
+
+- Every changed file was read, including tests and configuration.
+- No blockers remain open, or the flow went back with `CHANGES_REQUESTED`.
+- The user agrees with the verdict.
+
+## Pitfalls
+
+- Do not fix findings during the review. Mixing reviewing and editing hides changes from the
+  verification step; send them back through implementation instead.
+- Do not rubber-stamp. If you found nothing, look again at error handling, tests and security.
+- Do not bury blockers among nits, and do not block on personal style preferences.
+- Review the whole branch, not only the latest commit.
+
+{{> flow-context}}

@@ -242,6 +242,11 @@ export interface StepRef {
   skillName: string;
   title: string;
   final: boolean;
+  /**
+   * Outgoing refs: the transition's description, else the target step's description.
+   * Incoming refs: the transition's description only.
+   */
+  description?: string | undefined;
 }
 
 export interface StepContext {

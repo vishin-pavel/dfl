@@ -1,0 +1,62 @@
+# Make the change
+
+Implement the agreed quick plan with minimal, focused edits that match the surrounding code.
+Nothing more than the plan, nothing less.
+
+## Inputs
+
+- The plan from the previous step (goal, files, check, risk). If you cannot find it in the
+  conversation, ask the user to restate it or fire `BACK` to plan again.
+- If the flow came back here from the check (`FAILED`): the list of problems the check found.
+  Fix exactly those first.
+- Extra details in the text the user typed after the command.
+
+## Procedure
+
+1. **Confirm the starting point.** Run `git status`. Leave unrelated uncommitted changes alone
+   and make sure you can tell them apart from yours (mention them to the user).
+2. **Edit only the planned files.** Follow the existing style: naming, formatting, error
+   handling, comments. Search for other places that need the same edit (duplicated constants,
+   documentation, translations, snapshots) and include them.
+3. **Add or update a test** when behaviour changes. Keep it next to the existing tests for that
+   code and in the same style.
+4. **Run the relevant tests** while you work, for example the test file you touched. The full
+   `{{vars.testCommand}}` run happens in the check step, but run it now too if it is fast.
+5. **Watch the scope.** If the change turns out bigger than planned (more files, an API change,
+   a new dependency, surprising behaviour), stop and tell the user. Fire `BACK` to re-plan, or
+   suggest switching to a fuller flow.
+6. **Update what depends on the change**: docs, examples, configuration samples, changelog if the
+   project keeps one and the change is user-visible.
+7. **Summarize** the edits for the user: files changed, what changed in each, tests added.
+
+## Checklist by kind of change
+
+- **Rename** (function, option, file): search for every usage, including strings, docs,
+  configuration, scripts and tests; keep a deprecated alias if the name is public.
+- **Default or configuration value**: update the documentation, examples and tests that mention
+  the old value.
+- **User-visible text**: check translations, snapshots and tests that assert the old text.
+- **Dependency patch bump**: update the lockfile with the package manager (never by hand) and
+  read the dependency's changelog for behaviour changes.
+- **Small bug**: add a test that fails without the edit; if the cause is unclear, the bug fix
+  flow is the better fit.
+
+## Outputs
+
+- The edited files and tests in the working tree (committing happens after the check).
+- A short summary of the edits.
+
+## Exit criteria
+
+- Every item of the plan is done (and every problem from a failed check is addressed).
+- The relevant tests pass locally.
+- No debug output, commented-out code or unrelated edits remain.
+
+## Pitfalls
+
+- No drive-by refactors or reformatting of untouched code; they make the diff hard to check.
+- Do not silence failing tests, linters or type errors to finish faster.
+- Do not commit other people's or earlier uncommitted work together with this change.
+- If the same edit is needed in many places, that is a sign the change is not quick; re-plan.
+
+{{> flow-context}}

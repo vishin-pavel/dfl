@@ -89,8 +89,6 @@ Effective active flow = `local.activeFlow ?? config.activeFlow ?? (only flow if 
   "flows": {
     "feature": {
       "current": "implement-feature",
-      "done": false,
-      "snapshot": { "...": "xstate persisted snapshot" },
       "history": [{ "from": "plan-feature", "to": "implement-feature", "event": "NEXT", "at": "2026-09-30T10:00:00.000Z" }],
       "updatedAt": "2026-09-30T10:00:00.000Z"
     }
@@ -98,9 +96,11 @@ Effective active flow = `local.activeFlow ?? config.activeFlow ?? (only flow if 
 }
 ```
 
-State is stored per flow; switching flows keeps each flow's position.
-If the stored snapshot no longer matches the machine (step deleted/renamed), the
-state falls back to the machine's initial state and a warning is reported.
+State is stored per flow; switching flows keeps each flow's position. Only the
+current state key is stored (`done` is derived from the machine). History is
+chronological and capped at 200 entries. If the stored step no longer exists
+(deleted/renamed outside dfl), the state falls back to the machine's initial state
+and a warning is reported; a corrupt `state.json` is ignored and rewritten.
 
 ### 1.4 `installed.json` (ignored)
 
@@ -109,16 +109,17 @@ state falls back to the machine's initial state and a warning is reported.
   "version": 1,
   "flow": "feature",
   "agents": ["claude", "cursor"],
-  "skills": [{ "agent": "claude", "name": "plan-feature", "dir": ".claude/skills/plan-feature", "files": ["SKILL.md"] }],
-  "mcp": [{ "agent": "claude", "file": ".mcp.json", "server": "dfl" }],
-  "gitignore": [".claude/skills/plan-feature/"]
+  "skills": [{ "agents": ["claude"], "name": "plan-feature", "dir": ".claude/skills/plan-feature", "files": ["SKILL.md"] }],
+  "mcp": [{ "agents": ["claude"], "file": ".mcp.json", "server": "dfl" }]
 }
 ```
 
 Every sync computes the new set of skill dirs, removes dirs listed in the previous
 manifest that are no longer wanted (deleted steps, switched flow, removed agent),
 then writes the new manifest. dfl never deletes a directory it did not create
-(it is only deleted if it is in the manifest).
+(it is only deleted if it is in the manifest), and never overwrites or deletes a skill
+dir whose `SKILL.md` lacks dfl's `metadata.dfl-*` keys (a user-authored skill).
+The managed `.gitignore` block is derived from the manifest's skill dirs.
 
 ---
 
@@ -189,11 +190,12 @@ Handlebars 4 (`noEscape: true`, non-strict), one environment per render with:
 }
 StepContext = { id, skillName, title, description, index, number /*1-based*/, final,
                 next: StepRef[] /* transitions */, prev: StepRef[] /* incoming */ }
-StepRef     = { event, id, skillName, title }
+StepRef     = { event, id, skillName, title, final, description }
 ```
 
 **Helpers**: `eq ne and or not` (logic), `default value fallback`, `upper lower kebab title`,
-`json value`, `join array sep`, `indent n text`.
+`json value [spaces]`, `join array sep`, `indent n text` (also block form), `command skillName` (`/name`).
+Logic helpers also work as block helpers (`{{#eq a b}}…{{else}}…{{/eq}}`).
 
 **Partials** (registered globally, overridable by `.df/<flow>/partials/<name>.hbs`):
 - `{{> flow-context}}` – a "Where this step sits in the flow" section: flow title,
@@ -268,7 +270,7 @@ client `roots` (first `file://` root containing `.df/`) → nearest ancestor of 
 1. Resolve active flow + agents (`opts.agents ?? local.agents ?? config.agents`).
 2. Resolve vars; missing required vars → `opts.promptVar(def)` (interactive) or error.
 3. Render the active flow: every `steps/**/*.md.hbs` → `.md` (inside `.df`).
-4. Render built-in skills from the package (`templates/builtin-skills/*`) in memory.
+4. Render built-in skills from the package (`templates/skills/*`) in memory.
 5. For every agent: copy each step dir (rendered `.md` + static non-`.hbs` files)
    into `<skillsDir>/<skillName>/`, plus built-ins; or write fallback command files.
 6. Remove stale dirs from the previous manifest; write the new manifest.
@@ -289,29 +291,31 @@ client `roots` (first `file://` root containing `.df/`) → nearest ancestor of 
 ## 6. CLI
 
 ```
-dfl install [--agents a,b] [--flow <tpl-or-name>] [--yes] [--no-mcp] [--root <dir>]
-dfl uninstall [--purge]
-dfl flow-update                      # alias: dfl update – re-render + re-install (after git pull / edits)
-dfl status                           # active flow, current step, available events
-dfl next [event]                     # fire event (default NEXT)
+dfl install [--agents a,b] [--flow <tpl-or-name>] [--yes] [--no-mcp] [--project-agents]
+dfl uninstall [--purge] [--yes]
+dfl flow-update [--dry-run] [--no-mcp] [--yes]   # alias: dfl update – re-render + re-install
+dfl status [--flow <f>] [--json]     # active flow, current step, available events
+dfl next [event] [--from <step>]     # fire event (default NEXT)
 dfl goto <step>                      # jump to a step
-dfl reset                            # back to initial
+dfl reset [--yes]                    # back to initial
 dfl flow list | templates
 dfl flow use <name> [--project]
-dfl flow create <name> [--from <template>] [--title <t>]
-dfl flow import <git-url|github:owner/repo[/path][#ref]|path> [--name <n>]
+dfl flow create <name> [--from <template> | --steps a,b] [--title <t>] [--description <d>] [--use]
+dfl flow import <git-url|github:owner/repo[/path][#ref]|path> [--name <n>] [--flow <names...>] [--force] [--use]
 dfl flow delete <name> [--yes]
-dfl flow validate [name]
-dfl flow view [name] [--zoom <0-3>] [--print]
+dfl flow validate [name] [--json]
+dfl flow view [name] [--zoom <0-3>] [--print] [--lr] [--ascii]
 dfl step list [--flow <f>]
-dfl step add <id> [--after <step>|--before <step>] [--title] [--description] [--event NEXT]
-dfl step edit <id> [--title] [--description] [--rename <new-id>]
-dfl step remove <id> [--force]
+dfl step add <id> [--after <step>|--before <step>] [--title] [--description] [--event NEXT] [--template-file <f>]
+dfl step edit <id> [--title] [--description] [--rename <new-id>] [--template-file <f>] [--initial]
+dfl step remove <id> [--force] [--yes]
 dfl step transition <id> <event> <target|--remove>
-dfl vars list | set <key> <value> [--personal]
-dfl agents                           # supported agents, detection, where skills go
-dfl mcp [--root <dir>]               # stdio MCP server
+dfl vars list | set <key> <value> [--personal|--project] | unset <key>
+dfl agents [--json]                  # supported agents, detection, where skills go
+dfl mcp                              # stdio MCP server (global --root <dir> / DFL_ROOT)
 ```
+Global options: `--root <dir>`, `--no-color`, `-v/--version`. Step mutations accept
+`--flow <f>` and `--no-sync`; list/status commands accept `--json`.
 
 Rich output: `@clack/prompts` for wizards/spinners/notes, `picocolors` for colour,
 Ink (React) for the full-screen flow viewer. All commands work non-interactively
@@ -325,7 +329,8 @@ terminal (minus a 1-line header and 1-line footer) and follows resizes.
 
 | key | action |
 |-----|--------|
-| `w` `a` `s` `d` | pan up / left / down / right by one step cell (node pitch) |
+| `w` `a` `s` `d` (or arrows) | pan up / left / down / right by a quarter of the viewport |
+| `W` `A` `S` `D` (PgUp/PgDn) | pan a full page |
 | `q` | zoom in (more detail) |
 | `e` | zoom out (less detail) |
 | `x` | exit (Ctrl+C also exits) |
@@ -333,11 +338,12 @@ terminal (minus a 1-line header and 1-line footer) and follows resizes.
 Layout: elkjs `layered` + orthogonal routing laid out in terminal cells, drawn on a
 character canvas (see the prototype in the research notes). Zoom levels:
 `0` one-line `[Title…]` nodes, `1` 3-row boxes with the title, `2` cards with title +
-wrapped description, `3` cards with title + description + skill command and events.
+wrapped description (max 3 lines), `3` cards with title + full description + skill
+command. Events are edge labels; `NEXT` edges are unlabelled.
 Default zoom = the highest level whose canvas fits the terminal, min 1.
 The current step is drawn with a heavy border. Non-TTY or `--print` prints the
-whole canvas. `l` toggles top-to-bottom / left-to-right, `c` centers the current step.
-Uppercase `W A S D` pan a full page.
+whole canvas (default zoom 2, `--lr`, `--ascii`). `l` toggles top-to-bottom /
+left-to-right, `c` centers the current step.
 
 ---
 
@@ -355,12 +361,13 @@ the sync summary. Tools (all return JSON text + `structuredContent`):
 | `get_status` | current step, its skill command, available events, history tail |
 | `get_step` | one step: metadata, transitions, template path, rendered skill text |
 | `transition` | fire an event (default `NEXT`) → new current step |
-| `complete_step` | shorthand for `transition NEXT` from a given step (checks it is current) |
+| `complete_step` | fire an event (default `NEXT`) from a given step (checks it is current) |
 | `goto_step` | jump to a step |
 | `add_step` | create step (dir + SKILL.md.hbs + machine wiring), then re-sync |
 | `update_step` | change title/description/template/transitions/rename, then re-sync |
 | `delete_step` | delete step, rewire transitions, then re-sync |
 | `validate_flow` | validation issues |
+| `get_authoring_guide` | how to write step templates (context, helpers, rules, example) |
 | `sync` | same as `dfl flow-update` |
 
 Resources: `dfl://flow` (active flow JSON), `dfl://steps/{id}` (step template).

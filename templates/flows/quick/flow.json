@@ -1,0 +1,45 @@
+{
+  "name": "quick",
+  "title": "Quick change",
+  "description": "A lightweight plan, change and check loop for small, low-risk changes that do not need a spec.",
+  "version": "1.0.0",
+  "skillPrefix": "",
+  "vars": {
+    "testCommand": {
+      "description": "Command that runs the full test suite",
+      "default": "npm test",
+      "scope": "project"
+    }
+  },
+  "machine": {
+    "id": "quick",
+    "initial": "plan-change",
+    "states": {
+      "plan-change": {
+        "description": "Scope a small, low-risk change and agree on a short plan before editing. Use for quick fixes, tweaks and chores that do not need a spec.",
+        "meta": { "title": "Plan" },
+        "on": { "NEXT": "make-change" }
+      },
+      "make-change": {
+        "description": "Make the planned small change with minimal, focused edits. Use after the quick plan is agreed or when the check found problems.",
+        "meta": { "title": "Change" },
+        "on": {
+          "NEXT": "check-change",
+          "BACK": { "target": "plan-change", "description": "The change is bigger or different than planned" }
+        }
+      },
+      "check-change": {
+        "description": "Check the small change by running the tests, reviewing the diff and confirming the goal is met. Use after the change is made.",
+        "meta": { "title": "Check" },
+        "on": {
+          "NEXT": "done",
+          "FAILED": { "target": "make-change", "description": "Tests fail or the change does not meet its goal" }
+        }
+      },
+      "done": {
+        "type": "final",
+        "description": "The change is complete."
+      }
+    }
+  }
+}

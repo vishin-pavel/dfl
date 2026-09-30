@@ -1,0 +1,107 @@
+---
+name: edit-flow-step
+description: Change a step of the project's active dfl development flow (its skill instructions, title, description, transitions, id or position) through the dfl MCP server and re-install the skills. Use when the user wants to modify, rename, reorder or rewire a flow step.
+---
+{{!--
+  Built-in dfl skill. This file is itself a Handlebars template: every literal double-brace
+  example meant for the agent is escaped with a backslash so it survives rendering.
+--}}
+# Edit a step of the development flow
+
+Each step of a dfl flow is a state in `.df/<flow>/flow.json` (id, title, description,
+transitions) plus a skill template at `.df/<flow>/steps/<step-id>/SKILL.md.hbs`. dfl renders the
+template into an Agent Skill for every configured coding agent. Change the source through the
+tools below; never edit the rendered skills.
+
+{{#if flow.name}}
+Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`):
+
+{{#each flow.steps}}
+{{number}}. **{{this.title}}** (`{{id}}`){{#each next}} [{{event}} → {{id}}]{{/each}}
+{{else}}
+(no steps yet)
+{{/each}}
+
+This is a snapshot; always read the live flow with `get_flow` before changing anything.
+{{else}}
+No flow was active at the last sync. Call `list_flows` and ask the user which flow to change
+(every tool accepts a `flow` argument).
+{{/if}}
+
+## Tools
+
+Use the tools of the `{{dfl.mcpServer}}` MCP server. If they are not available, use the CLI
+fallbacks at the end.
+
+## Procedure
+
+1. **Identify the step.** Take it from the text the user typed after the command, or call
+   `get_flow` and ask the user to pick one. Then call `get_step` to read its title, description,
+   outgoing and incoming transitions, the template text and the rendered skill.
+2. **Ask what should change** if the user has not said it precisely:
+   - **Instructions**: the template body (what the agent does in this step).
+   - **Title or description**: the description is what agents use for automatic invocation, so
+     keep it one sentence of at most 200 characters that starts with a verb and says when to
+     use the step.
+   - **Transitions**: add, retarget or remove events, for example a `FAILED` event back to an
+     implementation step.
+   - **Id**: a rename changes the slash command, the directory and every transition that
+     targets the step; the current position in the flow is kept.
+   - **Position**: steps are ordered by their `NEXT` transitions, so moving a step means
+     rewiring (see below).
+   - **Initial step**: make this the step the flow starts with.
+3. **For template changes**, call `get_authoring_guide` first. Edit the current template from
+   `get_step` minimally; keep its structure unless the user asks for a rewrite. Rules:
+   - no YAML frontmatter except `allowed-tools` or `license`;
+   - the last line stays exactly `\{{> flow-context}}`;
+   - variables are written as `\{{vars.<name>}}`; per-developer values belong in personal
+     variables, team-wide ones in project variables;
+   - never write the placeholders agents expand when a skill runs as a command: a dollar sign
+     followed by ARGUMENTS or a digit, a line starting with an exclamation mark and a backtick,
+     or an at-sign directly followed by a word.
+4. **Show a diff-like summary before applying**: for each changed section, the old and the new
+   lines (prefix removed lines with `-` and added lines with `+`), plus any change of title,
+   description, transitions or id. Wait for the user's approval.
+5. **Apply** with `update_step`. One call can combine `title`, `description`, `template`,
+   `rename`, `on` (an event mapped to a target sets it, mapped to `null` removes it) and
+   `initial: true`. dfl re-renders and re-installs the skills and returns the step, a sync
+   summary and warnings.
+6. **Validate** with `validate_flow`. Fix errors right away and explain warnings to the user
+   (for example a step that became unreachable).
+7. **Report** what changed. After a rename, give the new slash command and say the old one is
+   gone. Remind the user to commit `.df/<flow>` so the team gets the change (teammates run
+   `{{dfl.cli}} flow-update` after pulling), and that some agents only pick up changed skills
+   after a restart or a skills reload.
+
+## Moving a step
+
+A move is a sequence of transition changes. Plan it, show the before and after chain to the
+user, then apply it with several `update_step` calls and validate at the end. Example: to move
+`b` in `a → b → c → d` so that the order becomes `a → c → b → d`:
+
+1. `a`: `on: { "NEXT": "c" }`
+2. `c`: `on: { "NEXT": "b" }`
+3. `b`: `on: { "NEXT": "d" }`
+
+Check the other events that pointed to or from the moved step (`FAILED`, `BACK`, ...) and ask
+the user whether they should change too.
+
+## CLI fallbacks
+
+| MCP tool | CLI |
+|----------|-----|
+| `get_flow` / `get_step` | `{{dfl.cli}} step list`, then read `.df/<flow>/flow.json` and the step's `SKILL.md.hbs` |
+| `update_step` title, description, rename | `{{dfl.cli}} step edit <id> --title "<title>" --description "<description>" --rename <new-id>` |
+| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` (or `--remove`) |
+| `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` (or `{{dfl.cli}} step edit <id> --template-file <file>`) |
+| `update_step` initial | `{{dfl.cli}} step edit <id> --initial` |
+| `validate_flow` | `{{dfl.cli}} flow validate` |
+
+## Pitfalls
+
+- Edit only `.df/<flow>/...` files. Rendered `SKILL.md` files and installed copies in agent skill
+  folders are regenerated on every sync, so edits there are lost.
+- Do not fire `transition`, `complete_step` or `goto_step` while editing; editing a step does
+  not change where the user is in the flow.
+- Do not remove the last transition that leads to the final state without replacing it; the
+  flow could then never finish.

@@ -1,0 +1,89 @@
+{
+  "name": "feature",
+  "title": "Feature development",
+  "description": "Take a feature from a written spec through planning, implementation, verification and review to a merged pull request.",
+  "version": "1.0.0",
+  "skillPrefix": "",
+  "vars": {
+    "mainBranch": {
+      "description": "Default branch that feature branches start from and pull requests target",
+      "default": "main",
+      "scope": "project"
+    },
+    "specsDir": {
+      "description": "Directory (relative to the project root) where feature specs are written",
+      "default": "docs/specs",
+      "scope": "project"
+    },
+    "testCommand": {
+      "description": "Command that runs the full test suite",
+      "default": "npm test",
+      "scope": "project"
+    },
+    "branchPrefix": {
+      "description": "Prefix for your feature branch names",
+      "default": "feature/",
+      "scope": "personal"
+    },
+    "reviewer": {
+      "description": "GitHub handle (without the leading @) to request pull request reviews from; leave empty to choose per pull request",
+      "scope": "personal",
+      "required": false
+    }
+  },
+  "machine": {
+    "id": "feature",
+    "initial": "spec-feature",
+    "states": {
+      "spec-feature": {
+        "description": "Write a feature spec with goals, scope and testable acceptance criteria. Use when starting a new feature or when a feature request is still vague.",
+        "meta": { "title": "Spec" },
+        "on": { "NEXT": "plan-feature" }
+      },
+      "plan-feature": {
+        "description": "Turn an approved feature spec into an ordered implementation plan of small, tested increments. Use after the spec is agreed and before writing code.",
+        "meta": { "title": "Plan" },
+        "on": {
+          "NEXT": "implement-feature",
+          "BACK": { "target": "spec-feature", "description": "The spec is missing information needed to plan" }
+        }
+      },
+      "implement-feature": {
+        "description": "Implement the planned feature increment by increment with tests on the feature branch. Use when a plan exists or when verification or review sent work back.",
+        "meta": { "title": "Implement" },
+        "on": {
+          "NEXT": "verify-feature",
+          "BACK": { "target": "plan-feature", "description": "The plan turned out to be wrong and must be revised" }
+        }
+      },
+      "verify-feature": {
+        "description": "Verify the implemented feature against every acceptance criterion and run the full test suite. Use when the implementation is believed to be complete.",
+        "meta": { "title": "Verify" },
+        "on": {
+          "NEXT": "review-feature",
+          "FAILED": { "target": "implement-feature", "description": "Tests or acceptance criteria failed" }
+        }
+      },
+      "review-feature": {
+        "description": "Review the feature branch diff like a strict code reviewer before it ships. Use after verification passes and before opening a pull request.",
+        "meta": { "title": "Review" },
+        "on": {
+          "NEXT": "ship-feature",
+          "CHANGES_REQUESTED": { "target": "implement-feature", "description": "The review found issues that need code changes" }
+        }
+      },
+      "ship-feature": {
+        "description": "Ship the reviewed feature by pushing the branch, opening the pull request and seeing it through CI and merge. Use when the review is approved.",
+        "meta": { "title": "Ship" },
+        "on": {
+          "NEXT": "done",
+          "CHANGES_REQUESTED": { "target": "implement-feature", "description": "Pull request reviewers or CI require code changes" }
+        }
+      },
+      "done": {
+        "type": "final",
+        "description": "The feature is merged."
+      }
+    }
+  }
+}

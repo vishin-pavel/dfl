@@ -1,0 +1,69 @@
+# Verify the feature
+
+Act as an independent tester: assume nothing works until you have evidence. Check every
+acceptance criterion of the spec, run the full suite and look for regressions. Your verdict
+decides whether the work moves on to review (`NEXT`) or goes back to implementation (`FAILED`).
+
+## Inputs
+
+- The spec with its acceptance criteria and implementation plan: `{{vars.specsDir}}/<slug>.md`
+  (slug from the branch name `{{vars.branchPrefix}}<slug>` or the text the user typed after the
+  command).
+- The feature branch with all implementation work committed.
+
+## Procedure
+
+1. **Start from a clean state.** `git status` must show no uncommitted changes. If it does, ask
+   the user whether they belong to the feature; verification runs against committed code only.
+2. **Run the full suite**: `{{vars.testCommand}}`. Record the result (passed, failed, skipped).
+   Then run everything else CI runs: type checks, lint, build. Read the CI configuration (for
+   example `.github/workflows/`) to find the exact commands.
+3. **Check each acceptance criterion** from the spec, one by one:
+   - find the automated test(s) that prove it and make sure they actually assert the observable
+     result, not just that the code runs;
+   - if no test covers it, try the behaviour yourself (run the CLI, call the API, open the page)
+     and record the exact commands and the observed output;
+   - mark it pass or fail with the evidence.
+4. **Probe the edge cases** listed in the spec: empty and very large inputs, invalid input,
+   missing permissions, failures of external services, repeated or concurrent calls.
+5. **Look for regressions** around the change: run or exercise the features that share code
+   with it. Compare behaviour with `{{vars.mainBranch}}` when in doubt.
+6. **Inspect the diff for leftovers**: `git diff {{vars.mainBranch}}...HEAD`. Look for debug
+   output, focused or skipped tests, hard-coded credentials or local paths, large generated files.
+7. **Write the verification report** in the conversation, and append it to the spec under a
+   `## Verification` section if the team keeps it there:
+
+   ```markdown
+   | Acceptance criterion | Evidence | Result |
+   |----------------------|----------|--------|
+   | AC1 | test name or manual check | pass / fail |
+
+   Suite: <command> - <n> passed, <n> failed, <n> skipped
+   Other failures and regressions: ...
+   ```
+
+8. **Decide with the user**:
+   - everything passes: fire `NEXT` to move to review;
+   - anything fails: fire `FAILED`. The list of failures (criterion, observed vs expected,
+     how to reproduce) becomes the input of the implementation step, so make it precise.
+
+## Outputs
+
+- A verification report with a verdict for every acceptance criterion.
+- For failures: a numbered list of problems with reproduction steps.
+
+## Exit criteria
+
+- Every acceptance criterion has evidence: a passing test or a documented manual check.
+- `{{vars.testCommand}}` and the other CI checks pass on the committed code.
+- No regressions or leftovers were found, or they were reported and the flow went back.
+
+## Pitfalls
+
+- Do not fix code in this step. Report the failure and fire `FAILED`; the fix goes through
+  implementation so it gets tests and commits like everything else.
+- A flaky test counts as a failure until it is explained.
+- "The tests pass" is not the same as "the criterion is met": check what the tests assert.
+- Do not verify against uncommitted changes; the result must be reproducible from the branch.
+
+{{> flow-context}}
