@@ -6,6 +6,7 @@ import {
   createFlowMachine,
   gotoStep,
   loadRuntimeState,
+  moveCurrentInRuntime,
   renameStateInRuntime,
   resetFlow,
   saveRuntimeState,
@@ -197,5 +198,36 @@ describe('renameStateInRuntime', () => {
     const paths = makeTempProject();
     renameStateInRuntime(paths, 'sample', 'a', 'b');
     expect(fs.existsSync(paths.stateFile)).toBe(false);
+  });
+});
+
+describe('moveCurrentInRuntime', () => {
+  it('moves the current step of one flow and records STEP_REMOVED', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths, sampleFlowDefinition('one'));
+    writeSampleFlow(paths, sampleFlowDefinition('two'));
+    sendEvent(paths, loadFlow(paths, 'one'));
+    sendEvent(paths, loadFlow(paths, 'two'));
+    expect(moveCurrentInRuntime(paths, 'one', 'build', 'review')).toBe(true);
+    const file = readState(paths);
+    expect(file.flows['one']!.current).toBe('review');
+    expect(file.flows['one']!.history.map((h) => `${h.from}>${h.to}:${h.event}`)).toEqual(['plan>build:NEXT', 'build>review:STEP_REMOVED']);
+    expect(file.flows['one']!.updatedAt).toBe(file.flows['one']!.history.at(-1)!.at);
+    expect(file.flows['two']!.current).toBe('build');
+  });
+
+  it('is a no-op when the flow is elsewhere or has no state', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    expect(moveCurrentInRuntime(paths, 'sample', 'build', 'review')).toBe(false);
+    expect(fs.existsSync(paths.stateFile)).toBe(false);
+    sendEvent(paths, loadFlow(paths, 'sample'));
+    const before = fs.readFileSync(paths.stateFile, 'utf8');
+    expect(moveCurrentInRuntime(paths, 'sample', 'review', 'plan')).toBe(false);
+    expect(moveCurrentInRuntime(paths, 'other', 'build', 'plan')).toBe(false);
+    fs.writeFileSync(paths.stateFile, '{ not json');
+    expect(moveCurrentInRuntime(paths, 'sample', 'build', 'plan')).toBe(false);
+    expect(fs.readFileSync(paths.stateFile, 'utf8')).toBe('{ not json');
+    expect(before).toContain('"current": "build"');
   });
 });

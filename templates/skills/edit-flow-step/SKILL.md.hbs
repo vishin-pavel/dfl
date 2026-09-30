@@ -4,7 +4,9 @@ description: Change a step of the project's active dfl development flow (its ski
 ---
 {{!--
   Built-in dfl skill. This file is itself a Handlebars template: every literal double-brace
-  example meant for the agent is escaped with a backslash so it survives rendering.
+  example meant for the agent is escaped with a backslash so it survives rendering. To show the
+  agent a backslash followed by literal braces, write a double backslash, an empty comment and
+  an escaped mustache: the double backslash renders one backslash and the comment renders nothing.
 --}}
 # Edit a step of the development flow
 
@@ -44,28 +46,46 @@ fallbacks at the end.
      keep it one sentence of at most 200 characters that starts with a verb and says when to
      use the step.
    - **Transitions**: add, retarget or remove events, for example a `FAILED` event back to an
-     implementation step.
+     implementation step, or change an event's condition (its description, shown to the agent
+     as the reason to fire it). Every event other than `NEXT` should have one; when you
+     retarget an event, check that its condition still fits.
    - **Id**: a rename changes the slash command, the directory and every transition that
      targets the step; the current position in the flow is kept.
    - **Position**: steps are ordered by their `NEXT` transitions, so moving a step means
      rewiring (see below).
    - **Initial step**: make this the step the flow starts with.
-3. **For template changes**, call `get_authoring_guide` first. Edit the current template from
-   `get_step` minimally; keep its structure unless the user asks for a rewrite. Rules:
+3. **Check the templates.** For template changes, call `get_authoring_guide` first. Edit the
+   current template from `get_step` minimally; keep its structure unless the user asks for a
+   rewrite. Rules:
    - no YAML frontmatter except `allowed-tools` or `license`;
    - the last line stays exactly `\{{> flow-context}}`;
    - variables are written as `\{{vars.<name>}}`; per-developer values belong in personal
      variables, team-wide ones in project variables;
+   - literal double braces that are not dfl expressions, such as GitHub Actions
+     `$\{{ secrets.NPM_TOKEN }}` or Vue, Jinja, Helm and Go templates (`\{{ message }}`), are
+     escaped with a backslash: `$\\{{!}}\{{ secrets.NPM_TOKEN }}`, `\\{{!}}\{{ message }}`. Unescaped,
+     they render as empty text or break the template;
    - never write the placeholders agents expand when a skill runs as a command: a dollar sign
      followed by ARGUMENTS or a digit, a line starting with an exclamation mark and a backtick,
      or an at-sign directly followed by a word.
+
+   When transitions, the id or the position change, templates can go stale too: step
+   instructions often name events and neighbours ("fire `FAILED` to go back to
+   implementation"). Check the edited step's own template and, with `get_step`, the templates of
+   the steps in its incoming and outgoing transitions for removed or retargeted events in
+   backticks and for text naming the old neighbour or the old id. Draft minimal edits for them
+   too, even when the user only asked for a transition change.
 4. **Show a diff-like summary before applying**: for each changed section, the old and the new
    lines (prefix removed lines with `-` and added lines with `+`), plus any change of title,
-   description, transitions or id. Wait for the user's approval.
+   description, transitions or id, and the edits to other steps' templates. Wait for the user's
+   approval.
 5. **Apply** with `update_step`. One call can combine `title`, `description`, `template`,
-   `rename`, `on` (an event mapped to a target sets it, mapped to `null` removes it) and
-   `initial: true`. dfl re-renders and re-installs the skills and returns the step, a sync
-   summary and warnings.
+   `rename`, `on` and `initial: true`. In `on`, an event mapped to a target sets it (an existing
+   condition is kept), mapped to `{ "target": "implement-feature", "description": "Tests failed" }`
+   sets the target and its condition, and mapped to `null` removes it. Apply the edits to other
+   steps' templates with one `update_step` call per step. dfl re-renders and re-installs the
+   skills and returns the step (with its `rendered` skill text), a sync summary and warnings.
+   Read the rendered text and check that commands and code samples survived rendering.
 6. **Validate** with `validate_flow`. Fix errors right away and explain warnings to the user
    (for example a step that became unreachable).
 7. **Report** what changed. After a rename, give the new slash command and say the old one is
@@ -84,7 +104,9 @@ user, then apply it with several `update_step` calls and validate at the end. Ex
 3. `b`: `on: { "NEXT": "d" }`
 
 Check the other events that pointed to or from the moved step (`FAILED`, `BACK`, ...) and ask
-the user whether they should change too.
+the user whether they should change too. Then check the templates of the moved step and of its
+old and new neighbours for text that describes the old order (step 3), and update them in the
+same change.
 
 ## CLI fallbacks
 
@@ -92,7 +114,7 @@ the user whether they should change too.
 |----------|-----|
 | `get_flow` / `get_step` | `{{dfl.cli}} step list`, then read `.df/<flow>/flow.json` and the step's `SKILL.md.hbs` |
 | `update_step` title, description, rename | `{{dfl.cli}} step edit <id> --title "<title>" --description "<description>" --rename <new-id>` |
-| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` (or `--remove`) |
+| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` (add `--description "<condition>"` to set its condition), or `{{dfl.cli}} step transition <id> <EVENT> --remove` |
 | `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` (or `{{dfl.cli}} step edit <id> --template-file <file>`) |
 | `update_step` initial | `{{dfl.cli}} step edit <id> --initial` |
 | `validate_flow` | `{{dfl.cli}} flow validate` |

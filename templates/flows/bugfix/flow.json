@@ -15,7 +15,12 @@
       "default": "npm test",
       "scope": "project"
     },
-    "branchPrefix": {
+    "bugNotesDir": {
+      "description": "Directory (relative to the project root) where bug notes (reproduction, diagnosis, verification) are written",
+      "default": "docs/bugs",
+      "scope": "project"
+    },
+    "fixBranchPrefix": {
       "description": "Prefix for your bug fix branch names",
       "default": "fix/",
       "scope": "personal"

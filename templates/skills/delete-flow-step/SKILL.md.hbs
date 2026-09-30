@@ -7,7 +7,8 @@ description: Delete a step from the project's active dfl development flow after 
 Deleting a step removes its state from `.df/<flow>/flow.json`, deletes its directory
 `.df/<flow>/steps/<step-id>/` (template and any extra files) and uninstalls its skill from every
 configured coding agent. Transitions that pointed to the step are rewired so the flow stays
-connected. This is destructive, so explain the consequences and get explicit confirmation first.
+connected, and a transition that would then point back at its own step is removed. This is
+destructive, so explain the consequences and get explicit confirmation first.
 
 {{#if flow.name}}
 Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`):
@@ -38,38 +39,55 @@ fallbacks at the end.
    step and event that leads to it) and its files. Call `get_status` to see whether it is the
    current step.
 3. **Work out the rewiring** exactly as dfl will apply it:
-   - every incoming transition is redirected to the deleted step's `NEXT` target;
-   - if the step is the initial step, its `NEXT` target becomes the new initial step;
-   - its other outgoing transitions (`FAILED`, `BACK`, ...) disappear with it;
+   - every incoming transition is redirected to the deleted step's `NEXT` target and keeps its
+     event and description;
+   - **except** a transition whose source is that `NEXT` target itself (for example its `FAILED`,
+     `BACK` or `CHANGES_REQUESTED` back to the deleted step): redirected, it would point at its own
+     source, so dfl **removes** it instead;
+   - if the step is the initial step, its `NEXT` target becomes the new initial step (the first
+     remaining step when that target is a final state);
+   - its own outgoing transitions (`FAILED`, `BACK`, ...) disappear with it;
    - if it has no `NEXT` transition, the deletion is refused (error `CANNOT_REWIRE`) unless it is
-     forced, and forcing drops the incoming transitions instead of rewiring them.
-4. **Show the user the before and after picture**, for example:
+     forced; forcing removes the incoming transitions instead of rewiring them, and if it was the
+     initial step, the first remaining step becomes the initial one.
+4. **Check the neighbouring templates.** Other steps often name events and neighbours in their
+   instructions ("fire `FAILED` to go back to implementation"). Call `get_step` on every step
+   whose transitions change: the steps whose events are redirected, the steps that lose a
+   transition, and a new initial step. Search each template for the removed events in backticks
+   and for text that names the deleted step or its role. Draft minimal edits as a diff (prefix
+   removed lines with `-` and added lines with `+`).
+5. **Show the user the before and after picture**, for example:
 
    ```text
    before: plan --NEXT--> build --NEXT--> review;  review --CHANGES_REQUESTED--> build
-   after:  plan --NEXT--> review;                  review --CHANGES_REQUESTED--> review
+   after:  plan --NEXT--> review;  review --CHANGES_REQUESTED--> (removed: it would loop on review)
    ```
 
-   Point out anything that becomes odd, like the self-loop above, a step that becomes
-   unreachable, or a flow that can no longer reach its final state. Also say that the step's
-   template and files are deleted (recoverable from git only if they were committed), and that
-   if it is the current step the flow position falls back to the initial step.
-5. **Ask for explicit confirmation**, naming the step: "Delete step `<id>`?" Proceed only on a
+   List every transition that is removed (above, the review's way back for changes disappears)
+   and anything else that becomes odd: a step that becomes unreachable, or a flow that can no
+   longer reach its final state. If the user wants to keep a removed transition, point it at
+   another step with `update_step` first. Include the template edits from step 4. Also say that
+   the step's template and files are deleted (recoverable from git only if they were committed),
+   and that if it is the current step, the flow position moves away from it.
+6. **Ask for explicit confirmation**, naming the step: "Delete step `<id>`?" Proceed only on a
    clear yes. If the user wants some transitions to go elsewhere, fix them first with
    `update_step` (for example point `CHANGES_REQUESTED` to another step), then delete.
-6. **Delete** with `delete_step` (`step`). dfl rewires the transitions, deletes the directory,
-   re-installs the skills and returns a sync summary and warnings.
-7. **If dfl refuses with `CANNOT_REWIRE`**, explain which transitions would be dropped and what
+7. **Delete** with `delete_step` (`step`). dfl rewires the transitions, deletes the directory,
+   re-installs the skills and returns a sync summary and warnings. Compare the result, including
+   the warnings about removed transitions, with the picture you showed and tell the user about
+   any difference.
+8. **If dfl refuses with `CANNOT_REWIRE`**, explain which transitions would be dropped and what
    that means for the flow. Offer the alternative of first giving the step a `NEXT` transition
    with `update_step`. Call `delete_step` with `force: true` only if the user agrees after that
    explanation.
-8. **Validate** with `validate_flow` and explain the remaining warnings. Offer fixes for
-   unreachable steps or a missing path to the final state.
-9. **Report**: the removed slash command, the new transitions around the gap, and the current
-   step (if the deleted step was current, call `get_status` and offer `goto_step` to the step the
-   user was really at). Remind the user to commit `.df/<flow>` so the team gets the change
-   (teammates run `{{dfl.cli}} flow-update` after pulling) and that some agents only notice
-   removed skills after a restart or a skills reload.
+9. **Update the neighbouring templates** from step 4 with `update_step` (`template`), as approved.
+10. **Validate** with `validate_flow` and explain the remaining warnings. Offer fixes for
+    unreachable steps or a missing path to the final state.
+11. **Report**: the removed slash command, the new transitions around the gap, the removed
+    transitions, and the current step (call `get_status`; if the deleted step was current, offer
+    `goto_step` to the step the user was really at). Remind the user to commit `.df/<flow>` so the
+    team gets the change (teammates run `{{dfl.cli}} flow-update` after pulling) and that some
+    agents only notice removed skills after a restart or a skills reload.
 
 ## CLI fallbacks
 
@@ -77,10 +95,15 @@ fallbacks at the end.
 |----------|-----|
 | `get_flow` / `get_step` | `{{dfl.cli}} step list`, then read `.df/<flow>/flow.json` |
 | `get_status` | `{{dfl.cli}} status` |
-| `delete_step` | `{{dfl.cli}} step remove <id>` (add `--force` only after the user agreed) |
-| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` |
+| `delete_step` | `{{dfl.cli}} step remove <id> --yes` (add `--force` only after the second confirmation from step 8) |
+| `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` (or `--remove`) |
+| `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` |
 | `validate_flow` | `{{dfl.cli}} flow validate` |
 | `goto_step` | `{{dfl.cli}} goto <step>` |
+
+The CLI cannot ask for confirmation from an agent's shell, so `step remove` needs `--yes`. Pass it
+only after the user confirmed the deletion in this conversation (step 6); `--yes` does not force a
+deletion that dfl refuses with `CANNOT_REWIRE`.
 
 ## Pitfalls
 
@@ -88,5 +111,7 @@ fallbacks at the end.
   second one.
 - Do not delete files under `.df/` or in agent skill folders by hand; dfl tracks what it
   installed and cleans up on sync.
-- Deleting the only step of a flow leaves nothing to run; suggest deleting or switching the flow
-  instead (`{{dfl.cli}} flow list`).
+- dfl refuses to delete the only step of a flow (`LAST_STEP`); suggest switching to another flow
+  (`{{dfl.cli}} flow list`, `{{dfl.cli}} flow use <name>`) or deleting the whole flow
+  (`{{dfl.cli}} flow delete <name> --yes`, only after the user confirmed it here).
+- Do not fire `transition` or `complete_step` here; deleting a step is not progress in the flow.

@@ -16,11 +16,16 @@ export const RESERVED_FLOW_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 export function isValidId(id: string): boolean {
-  return id.length > 0 && id.length <= MAX_ID_LENGTH && ID_RE.test(id);
+  return typeof id === 'string' && id.length > 0 && id.length <= MAX_ID_LENGTH && ID_RE.test(id);
+}
+
+/** A valid, non-reserved flow name (see {@link assertValidFlowName}). */
+export function isValidFlowName(name: string): boolean {
+  return typeof name === 'string' && isValidId(name) && !RESERVED_FLOW_NAMES.has(name);
 }
 
 export function assertValidFlowName(name: string): void {
-  if (!isValidId(name)) {
+  if (typeof name !== 'string' || !isValidId(name)) {
     throw new DflError(`Invalid flow name "${name}".`, {
       hint: 'Use lowercase letters, digits and single hyphens (e.g. "feature" or "bug-fix"), max 64 characters.',
       code: 'INVALID_NAME',

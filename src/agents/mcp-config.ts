@@ -22,7 +22,7 @@ import {
 import { loadProjectConfig } from '../core/config.js';
 import { DflError } from '../core/errors.js';
 import { readTextIfExists, removePath, writeText } from '../core/fsx.js';
-import { packageRoot } from '../core/paths.js';
+import { PACKAGE_NAME, packageRoot } from '../core/paths.js';
 import type { McpServerSpec, ProjectPaths } from '../core/types.js';
 
 /** The server name dfl registers in every agent MCP config. */
@@ -141,6 +141,35 @@ function plain(value: unknown): unknown {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+/** What an upsert would change. */
+export type McpUpsertStatus = 'added' | 'updated' | 'unchanged';
+
+/**
+ * The text an upsert of `<keyPath>.<name> = entry` would write (undefined when the file already holds
+ * an equal entry) and whether an entry existed before. Throws DflError for invalid files.
+ */
+function computeJsonUpsert(
+  file: string,
+  keyPath: string[],
+  name: string,
+  entry: unknown,
+  options: UpsertJsonOptions,
+): { next: string | undefined; had: boolean } {
+  const raw = readTextIfExists(file);
+  const isNew = raw === undefined || raw.trim() === '';
+  const source = isNew ? JSON.stringify(options.initial ?? {}, null, 2) : raw;
+  const doc = parseJsonDocument(file, source);
+  const jsonPath = [...keyPath, name];
+  assertContainers(file, doc.root, keyPath);
+  const existing = isNew ? undefined : findNodeAtLocation(doc.root, jsonPath);
+  if (existing !== undefined && isDeepStrictEqual(plain(getNodeValue(existing)), plain(entry))) return { next: undefined, had: true };
+  const formatting = isNew ? { insertSpaces: true, tabSize: 2, eol: '\n' } : detectFormatting(doc.text);
+  let next = applyModification(doc.text, jsonPath, entry, formatting);
+  if (isNew) next += formatting.eol;
+  const text = doc.bom + next;
+  return { next: text === raw ? undefined : text, had: existing !== undefined };
+}
+
 /** Sets `<keyPath>.<name> = entry` in a JSON/JSONC file (creates the file if missing). Returns true if changed. */
 export function upsertJsonEntry(
   file: string,
@@ -149,22 +178,35 @@ export function upsertJsonEntry(
   entry: unknown,
   options: UpsertJsonOptions = {},
 ): boolean {
-  const raw = readTextIfExists(file);
-  const isNew = raw === undefined || raw.trim() === '';
-  const source = isNew ? JSON.stringify(options.initial ?? {}, null, 2) : raw;
-  const doc = parseJsonDocument(file, source);
-  const jsonPath = [...keyPath, name];
-  assertContainers(file, doc.root, keyPath);
-  const existing = findNodeAtLocation(doc.root, jsonPath);
-  if (!isNew && existing !== undefined && isDeepStrictEqual(plain(getNodeValue(existing)), plain(entry))) return false;
-  const formatting = isNew ? { insertSpaces: true, tabSize: 2, eol: '\n' } : detectFormatting(doc.text);
-  let next = applyModification(doc.text, jsonPath, entry, formatting);
-  if (isNew) next += formatting.eol;
-  return writeText(file, doc.bom + next);
+  const { next } = computeJsonUpsert(file, keyPath, name, entry, options);
+  return next === undefined ? false : writeText(file, next);
 }
 
-/** Removes `<keyPath>.<name>`; deletes the file if it becomes `{}` or `{ <key>: {} }` only. Returns true if changed. */
-export function removeJsonEntry(file: string, keyPath: string[], name: string): boolean {
+/** What upsertJsonEntry would do, without writing (throws like upsertJsonEntry on invalid files). */
+export function planJsonUpsert(
+  file: string,
+  keyPath: string[],
+  name: string,
+  entry: unknown,
+  options: UpsertJsonOptions = {},
+): McpUpsertStatus {
+  const { next, had } = computeJsonUpsert(file, keyPath, name, entry, options);
+  return next === undefined ? 'unchanged' : had ? 'updated' : 'added';
+}
+
+export interface RemoveEntryOptions {
+  /** Drop the container (e.g. `mcpServers`) when the removal leaves it empty. Default true. */
+  dropEmptyContainer?: boolean | undefined;
+  /** Delete the file when nothing but disposable content (`{}`, `$schema`) is left. Default true. */
+  deleteEmptyFile?: boolean | undefined;
+}
+
+/**
+ * Removes `<keyPath>.<name>`. By default also drops the container it emptied and deletes the file
+ * when it becomes `{}` (or only `$schema`); pass `dropEmptyContainer` / `deleteEmptyFile: false`
+ * for files and containers dfl did not create. Returns true if changed.
+ */
+export function removeJsonEntry(file: string, keyPath: string[], name: string, options: RemoveEntryOptions = {}): boolean {
   const raw = readTextIfExists(file);
   if (raw === undefined || raw.trim() === '') return false;
   const doc = parseJsonDocument(file, raw);
@@ -172,22 +214,48 @@ export function removeJsonEntry(file: string, keyPath: string[], name: string): 
   const formatting = detectFormatting(doc.text);
   let text = applyModification(doc.text, [...keyPath, name], undefined, formatting);
 
-  // Drop the container when this removal left it empty (unless it holds comments).
   if (keyPath.length > 0) {
     const root = parseTree(text, [], PARSE_OPTIONS);
     const container = root && findNodeAtLocation(root, keyPath);
     if (container && container.type === 'object' && isBareEmptyObject(text, container)) {
-      text = applyModification(text, keyPath, undefined, formatting);
+      text =
+        options.dropEmptyContainer === false
+          ? // Keep the user's container, without the whitespace the removal left inside it.
+            `${text.slice(0, container.offset)}{}${text.slice(container.offset + container.length)}`
+          : applyModification(text, keyPath, undefined, formatting);
     }
   }
 
   const root = parseTree(text, [], PARSE_OPTIONS);
   const remaining = (root?.children ?? []).map((prop) => String(prop.children?.[0]?.value));
-  if (remaining.every((key) => DISPOSABLE_ROOT_KEYS.has(key)) && !hasComments(text)) {
+  if (options.deleteEmptyFile !== false && remaining.every((key) => DISPOSABLE_ROOT_KEYS.has(key)) && !hasComments(text)) {
     removePath(file);
     return true;
   }
   return writeText(file, doc.bom + text);
+}
+
+/** The value of `<keyPath>.<name>` (undefined when the file or the entry is missing). Throws DflError for invalid JSON. */
+export function readJsonEntry(file: string, keyPath: string[], name: string): unknown {
+  const raw = readTextIfExists(file);
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const doc = parseJsonDocument(file, raw);
+  const node = findNodeAtLocation(doc.root, [...keyPath, name]);
+  return node === undefined ? undefined : plain(getNodeValue(node));
+}
+
+/** True when the file exists (non-blank) and parses. */
+export function jsonFileExists(file: string): boolean {
+  const raw = readTextIfExists(file);
+  return raw !== undefined && raw.trim() !== '';
+}
+
+/** True when `<keyPath>` exists in the file (false for missing or unparsable files). */
+export function hasJsonContainer(file: string, keyPath: string[]): boolean {
+  const raw = readTextIfExists(file);
+  if (raw === undefined) return false;
+  const root = parseTree(splitBom(raw).text, [], PARSE_OPTIONS);
+  return root !== undefined && findNodeAtLocation(root, keyPath) !== undefined;
 }
 
 export function hasJsonEntry(file: string, keyPath: string[], name: string): boolean {
@@ -430,13 +498,16 @@ function renderTomlServer(spec: McpServerSpec): string[] {
 const isServerPath = (headerPath: string[], name: string): boolean =>
   headerPath.length >= 2 && headerPath[0] === 'mcp_servers' && headerPath[1] === name;
 
-/** Writes/replaces the `[mcp_servers.<name>]` table in a TOML file. Returns true if changed. */
-export function upsertTomlServer(file: string, spec: McpServerSpec): boolean {
+/** The text upsertTomlServer would write (undefined when unchanged) and whether the table existed. */
+function computeTomlUpsert(file: string, spec: McpServerSpec): { next: string | undefined; had: boolean } {
+  const current = readTextIfExists(file);
   const doc = readTomlDocument(file) ?? { lines: [], eol: '\n', finalEol: true };
+  const headers = scanTomlHeaders(doc.lines);
   // dfl owns the server table and its `env` subtable; other subtables (e.g. per-tool approval) stay.
   const owned = (headerPath: string[]): boolean =>
     isServerPath(headerPath, spec.name) && (headerPath.length === 2 || (headerPath.length === 3 && headerPath[2] === 'env'));
-  const ranges = tableRanges(doc.lines, scanTomlHeaders(doc.lines), owned);
+  const had = headers.some((header) => header.path.length === 2 && isServerPath(header.path, spec.name));
+  const ranges = tableRanges(doc.lines, headers, owned);
   const kept = removeRanges(doc.lines, ranges);
   const at = ranges[0]?.start ?? kept.length;
   const before = kept.slice(0, at);
@@ -450,11 +521,27 @@ export function upsertTomlServer(file: string, spec: McpServerSpec): boolean {
     ...(after.length > 0 ? ['', ...after] : []),
   ];
   const finalEol = doc.finalEol || after.length === 0;
-  return writeText(file, lines.join(doc.eol) + (finalEol ? doc.eol : ''));
+  const text = lines.join(doc.eol) + (finalEol ? doc.eol : '');
+  return { next: text === current ? undefined : text, had };
 }
 
-/** Removes `[mcp_servers.<name>]` and all its subtables; deletes the file when nothing else is left. */
-export function removeTomlServer(file: string, name: string): boolean {
+/** Writes/replaces the `[mcp_servers.<name>]` table in a TOML file. Returns true if changed. */
+export function upsertTomlServer(file: string, spec: McpServerSpec): boolean {
+  const { next } = computeTomlUpsert(file, spec);
+  return next === undefined ? false : writeText(file, next);
+}
+
+/** What upsertTomlServer would do, without writing. */
+export function planTomlUpsert(file: string, spec: McpServerSpec): McpUpsertStatus {
+  const { next, had } = computeTomlUpsert(file, spec);
+  return next === undefined ? 'unchanged' : had ? 'updated' : 'added';
+}
+
+/**
+ * Removes `[mcp_servers.<name>]` and all its subtables; deletes the file when nothing else is left
+ * (unless `deleteEmptyFile` is false: the file then stays, emptied).
+ */
+export function removeTomlServer(file: string, name: string, options: { deleteEmptyFile?: boolean | undefined } = {}): boolean {
   const doc = readTomlDocument(file);
   if (!doc) return false;
   const ranges = tableRanges(doc.lines, scanTomlHeaders(doc.lines), (headerPath) => isServerPath(headerPath, name));
@@ -462,10 +549,48 @@ export function removeTomlServer(file: string, name: string): boolean {
   const kept = removeRanges(doc.lines, ranges);
   while (isBlank(kept[kept.length - 1])) kept.pop();
   if (kept.length === 0) {
+    if (options.deleteEmptyFile === false) return writeText(file, '');
     removePath(file);
     return true;
   }
   return writeText(file, kept.join(doc.eol) + (doc.finalEol ? doc.eol : ''));
+}
+
+const TOML_STRING_RE = /"((?:[^"\\]|\\.)*)"|'([^']*)'/g;
+
+/** Decoded single-line TOML string values in `text`, in order. */
+function tomlStrings(text: string): string[] {
+  return [...text.matchAll(TOML_STRING_RE)].map((match) =>
+    match[1] !== undefined ? decodeTomlBasicString(match[1]) : (match[2] ?? ''),
+  );
+}
+
+/**
+ * `command` and `args` of the `[mcp_servers.<name>]` table (undefined when the table is missing).
+ * Understands the simple forms dfl writes (single-line strings, arrays of strings).
+ */
+export function readTomlServer(file: string, name: string): { command?: string | undefined; args?: string[] | undefined } | undefined {
+  const doc = readTomlDocument(file);
+  if (!doc) return undefined;
+  const headers = scanTomlHeaders(doc.lines);
+  const index = headers.findIndex((header) => header.path.length === 2 && isServerPath(header.path, name));
+  if (index < 0) return undefined;
+  const header = headers[index]!;
+  const body = doc.lines.slice(header.line + 1, headers[index + 1]?.line ?? doc.lines.length);
+  const result: { command?: string; args?: string[] } = {};
+  for (let i = 0; i < body.length; i++) {
+    const match = /^\s*(command|args)\s*=\s*(.*)$/.exec(body[i]!);
+    if (!match) continue;
+    let value = match[2]!;
+    if (match[1] === 'command') {
+      result.command = tomlStrings(value)[0];
+      continue;
+    }
+    // Arrays may span several lines.
+    while (!value.includes(']') && i + 1 < body.length) value += `\n${body[++i]}`;
+    result.args = tomlStrings(value.slice(0, value.lastIndexOf(']') + 1));
+  }
+  return result;
 }
 
 export function hasTomlServer(file: string, name: string): boolean {
@@ -478,6 +603,101 @@ export function hasTomlServer(file: string, name: string): boolean {
 // Server spec
 // ---------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function rootOf(paths: ProjectPaths | string): string {
+  return typeof paths === 'string' ? paths : paths.root;
+}
+
+/** True when `<root>/package.json` lists dfl in dependencies, devDependencies or optionalDependencies. */
+export function projectDependsOnDfl(root: string): boolean {
+  let pkg: unknown;
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  } catch {
+    return false;
+  }
+  if (!isRecord(pkg)) return false;
+  return ['dependencies', 'devDependencies', 'optionalDependencies'].some((key) => {
+    const deps = pkg[key];
+    return isRecord(deps) && Object.hasOwn(deps, PACKAGE_NAME);
+  });
+}
+
+/**
+ * How to run the dfl CLI in this project, as argv: `npx --no-install dfl` when the project's
+ * package.json depends on dfl, otherwise `dfl`. Depends only on the project (never on which dfl
+ * binary is running), so every developer writes the same committed MCP entry. `--no-install`
+ * keeps npx from fetching an unrelated public package named `dfl`.
+ */
+export function dflLauncherArgv(paths: ProjectPaths | string): string[] {
+  return projectDependsOnDfl(rootOf(paths)) ? ['npx', '--no-install', 'dfl'] : ['dfl'];
+}
+
+/** dflLauncherArgv as a command string (`npx --no-install dfl` or `dfl`): `dfl.cli` in templates, MCP guide, CLI hints. */
+export function dflLauncher(paths: ProjectPaths | string): string {
+  return dflLauncherArgv(paths).join(' ');
+}
+
+/**
+ * The command agents use to start the dfl MCP server: config.json `mcp` override →
+ * `npx --no-install dfl mcp` when `<root>/package.json` depends on dfl → `dfl mcp`. Name is always `dfl`.
+ * The second parameter is ignored (kept for backwards compatibility): the spec never depends on the running binary.
+ */
+export function resolveMcpServerSpec(paths: ProjectPaths, _runningPackageRoot?: string): McpServerSpec {
+  const override = loadProjectConfig(paths).mcp;
+  if (override) return { name: MCP_SERVER_NAME, command: override.command, args: [...override.args] };
+  const [command, ...args] = dflLauncherArgv(paths);
+  return { name: MCP_SERVER_NAME, command: command!, args: [...args, 'mcp'] };
+}
+
+/** Package runners whose `dfl` argument counts as a dfl launcher. */
+const PACKAGE_RUNNERS: ReadonlySet<string> = new Set(['npx', 'pnpm', 'yarn']);
+
+function commandName(command: string): string {
+  return path.basename(command.replaceAll('\\', '/')).replace(/\.(cmd|exe|ps1)$/i, '').toLowerCase();
+}
+
+/**
+ * True when an MCP entry's command looks like dfl: `dfl …`, `npx|pnpm|yarn … dfl …` (or the package
+ * name), or exactly the config.json `mcp` override. Uninstall only removes entries that pass.
+ */
+export function isDflLauncher(
+  entry: { command?: unknown; args?: unknown },
+  override?: { command: string; args: string[] } | undefined,
+): boolean {
+  if (typeof entry.command !== 'string') return false;
+  const args = Array.isArray(entry.args) ? entry.args.filter((arg): arg is string => typeof arg === 'string') : [];
+  if (override && entry.command === override.command && isDeepStrictEqual(args, override.args)) return true;
+  const name = commandName(entry.command);
+  if (name === 'dfl') return true;
+  return (
+    PACKAGE_RUNNERS.has(name) &&
+    args.some((arg) => arg === 'dfl' || arg === PACKAGE_NAME || arg.startsWith(`${PACKAGE_NAME}@`))
+  );
+}
+
+/** True when an executable `name` is on PATH (PATHEXT is honoured on Windows). */
+export function isCommandOnPath(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const dirs = (env['PATH'] ?? env['Path'] ?? '').split(path.delimiter).filter(Boolean);
+  const exts = process.platform === 'win32' ? ['', ...(env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';')] : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      try {
+        const file = path.join(dir, name + ext);
+        if (!fs.statSync(file).isFile()) continue;
+        if (process.platform !== 'win32') fs.accessSync(file, fs.constants.X_OK);
+        return true;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return false;
+}
+
 function realpathOrResolve(p: string): string {
   try {
     return fs.realpathSync.native(p);
@@ -486,23 +706,15 @@ function realpathOrResolve(p: string): string {
   }
 }
 
-function isInside(child: string, parent: string): boolean {
-  const rel = path.relative(parent, child);
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
 /**
- * The command agents use to start the dfl MCP server:
- * config.json `mcp` override → `npx --no-install dfl mcp` when the running dfl lives inside
- * `<root>/node_modules` → `dfl mcp`. Name is always `dfl`.
- * `runningPackageRoot` defaults to the installed package root (overridable for tests).
+ * Where a dfl package inside the project is installed: the project-relative directory holding the
+ * outermost `node_modules` above it (`''` for `<root>/node_modules`, `frontend` for
+ * `<root>/frontend/node_modules/...`); undefined when the package is outside the project (global).
  */
-export function resolveMcpServerSpec(paths: ProjectPaths, runningPackageRoot: string = packageRoot()): McpServerSpec {
-  const override = loadProjectConfig(paths).mcp;
-  if (override) return { name: MCP_SERVER_NAME, command: override.command, args: [...override.args] };
-  const nodeModules = realpathOrResolve(path.join(paths.root, 'node_modules'));
-  if (isInside(realpathOrResolve(runningPackageRoot), nodeModules)) {
-    return { name: MCP_SERVER_NAME, command: 'npx', args: ['--no-install', 'dfl', 'mcp'] };
-  }
-  return { name: MCP_SERVER_NAME, command: 'dfl', args: ['mcp'] };
+export function localInstallPrefix(root: string, pkgRoot: string = packageRoot()): string | undefined {
+  const rel = path.relative(realpathOrResolve(root), realpathOrResolve(pkgRoot));
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  const segments = rel.split(path.sep);
+  const index = segments.indexOf('node_modules');
+  return index < 0 ? undefined : segments.slice(0, index).join('/');
 }

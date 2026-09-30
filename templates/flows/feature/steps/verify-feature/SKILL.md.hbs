@@ -7,8 +7,8 @@ decides whether the work moves on to review (`NEXT`) or goes back to implementat
 ## Inputs
 
 - The spec with its acceptance criteria and implementation plan: `{{vars.specsDir}}/<slug>.md`
-  (slug from the branch name `{{vars.branchPrefix}}<slug>` or the text the user typed after the
-  command).
+  (slug from the branch name `{{vars.featureBranchPrefix}}<slug>` or the text the user typed
+  after the command).
 - The feature branch with all implementation work committed.
 
 ## Procedure
@@ -27,8 +27,9 @@ decides whether the work moves on to review (`NEXT`) or goes back to implementat
 4. **Probe the edge cases** listed in the spec: empty and very large inputs, invalid input,
    missing permissions, failures of external services, repeated or concurrent calls.
 5. **Look for regressions** around the change: run or exercise the features that share code
-   with it. Compare behaviour with `{{vars.mainBranch}}` when in doubt.
-6. **Inspect the diff for leftovers**: `git diff {{vars.mainBranch}}...HEAD`. Look for debug
+   with it. Compare behaviour with `origin/{{vars.mainBranch}}` when in doubt.
+6. **Inspect the diff for leftovers**: run `git fetch origin {{vars.mainBranch}}`, then
+   `git diff origin/{{vars.mainBranch}}...HEAD` (only this branch's commits). Look for debug
    output, focused or skipped tests, hard-coded credentials or local paths, large generated files.
 7. **Write the verification report** in the conversation, and append it to the spec under a
    `## Verification` section if the team keeps it there:
@@ -41,6 +42,11 @@ decides whether the work moves on to review (`NEXT`) or goes back to implementat
    Suite: <command> - <n> passed, <n> failed, <n> skipped
    Other failures and regressions: ...
    ```
+
+   If you appended it to the spec, commit it on the feature branch before firing an event, so
+   review, shipping and a return to implementation all find it:
+   `git add {{vars.specsDir}}/<slug>.md` and `git commit -m "docs: verification report for <slug>"`.
+   This is the only commit of this step, and it is not a code fix.
 
 8. **Decide with the user**:
    - everything passes: fire `NEXT` to move to review;
@@ -57,6 +63,7 @@ decides whether the work moves on to review (`NEXT`) or goes back to implementat
 - Every acceptance criterion has evidence: a passing test or a documented manual check.
 - `{{vars.testCommand}}` and the other CI checks pass on the committed code.
 - No regressions or leftovers were found, or they were reported and the flow went back.
+- The working tree is clean (the verification report, if kept in the spec, is committed).
 
 ## Pitfalls
 

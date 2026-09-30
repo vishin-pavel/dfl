@@ -1,8 +1,11 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import stringWidth from 'string-width';
 import { describe, expect, it } from 'vitest';
 import { buildFlowModel } from '../src/core/flow.js';
+import type { FlowDefinition } from '../src/core/types.js';
 import {
   centerOn,
   clampView,
@@ -14,16 +17,99 @@ import {
   renderGraph,
   splitCells,
   viewport,
+  type CanvasBox,
   type FlowGraph,
   type RenderedCanvas,
   type ZoomLevel,
 } from '../src/tui/graph/index.js';
+import { edgeLabelText } from '../src/tui/graph/measure.js';
+import { layoutFlowGraph } from '../src/tui/graph/render.js';
 import { sampleFlowDefinition } from './helpers/project.js';
 
 const model = buildFlowModel(sampleFlowDefinition(), path.join(os.tmpdir(), 'dfl-graph-test'));
 const graph = flowToGraph(model);
 const ZOOMS: ZoomLevel[] = [0, 1, 2, 3];
 const DIRECTIONS = ['TB', 'LR'] as const;
+const ARROWS = '▼◄▲►';
+const ASCII_ARROWS = 'v<^>';
+
+type Machine = FlowDefinition['machine'];
+const T1: Omit<Machine, 'id'> = {
+  initial: 'a',
+  states: { a: { on: { NEXT: 'b', CANCEL: 'done' } }, b: { on: { NEXT: 'c' } }, c: { on: { NEXT: 'd' } }, d: { on: { NEXT: 'done' } }, done: { type: 'final' } },
+};
+const T2: Omit<Machine, 'id'> = {
+  initial: 'a',
+  states: { a: { on: { NEXT: 'b', SKIP: 'd' } }, b: { on: { NEXT: 'c' } }, c: { on: { NEXT: 'd' } }, d: { on: { NEXT: 'done' } }, done: { type: 'final' } },
+};
+
+function flowDef(machine: Omit<Machine, 'id'>, name = 'f'): FlowDefinition {
+  return { name, machine: { id: name, ...machine } } as FlowDefinition;
+}
+
+const TEMPLATE_FLOWS = fileURLToPath(new URL('../templates/flows/', import.meta.url));
+
+function templateDef(name: string): FlowDefinition {
+  return JSON.parse(fs.readFileSync(path.join(TEMPLATE_FLOWS, name, 'flow.json'), 'utf8')) as FlowDefinition;
+}
+
+const graphOf = (def: FlowDefinition): FlowGraph => flowToGraph(buildFlowModel(def, os.tmpdir()));
+
+/** a→b→c→done with a c→b BACK loop and one-letter titles (the zoom-0 worst case). */
+const m1: FlowGraph = {
+  nodes: [
+    { id: 'a', title: 'A' },
+    { id: 'b', title: 'B' },
+    { id: 'c', title: 'C' },
+    { id: 'done', title: 'Done', final: true },
+  ],
+  edges: [
+    { from: 'a', to: 'b' },
+    { from: 'b', to: 'c' },
+    { from: 'c', to: 'done' },
+    { from: 'c', to: 'b', label: 'BACK' },
+  ],
+};
+
+/** Cards whose B→C and D→C (RETRY) endpoints used to snap onto the same cell at zoom 2 LR. */
+const m4 = graphOf(
+  flowDef({
+    initial: 'a',
+    states: {
+      a: { description: 'theta gamma lambda eta eta kappa', on: { NEXT: 'b' } },
+      b: { description: 'alpha alpha zeta theta zeta zeta delta', on: { NEXT: 'c' } },
+      c: { description: 'zeta delta beta', on: { NEXT: 'd' } },
+      d: { description: 'delta epsilon beta kappa', on: { NEXT: 'done', RETRY: 'c' } },
+      done: { type: 'final' },
+    },
+  }),
+);
+
+/** Three parallel a→b edges and two b→a loops: labels between parallel lines. */
+const par = graphOf(
+  flowDef({
+    initial: 'a',
+    states: { a: { on: { NEXT: 'b', RETRY: 'b', SKIP: 'b' } }, b: { on: { NEXT: 'done', BACK: 'a', UNDO: 'a' } }, done: { type: 'final' } },
+  }),
+);
+
+const templates = Object.fromEntries(['feature', 'bugfix', 'quick'].map((name) => [name, graphOf(templateDef(name))]));
+
+/** Cells of the canvas (one entry per cell). */
+const cellsOf = (canvas: RenderedCanvas): string[][] => canvas.lines.map(lineCells);
+
+const inBox = (boxes: Record<string, CanvasBox>, x: number, y: number): boolean =>
+  Object.values(boxes).some((b) => x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h);
+
+function arrowCells(canvas: RenderedCanvas, glyphs: string): string[] {
+  const out: string[] = [];
+  cellsOf(canvas).forEach((row, y) =>
+    row.forEach((c, x) => {
+      if (glyphs.includes(c) && c !== '' && !inBox(canvas.boxes, x, y)) out.push(`${x},${y}`);
+    }),
+  );
+  return out;
+}
 
 /** The cell at (x, y), treating wide glyphs as occupying two cells. */
 function cellAt(canvas: RenderedCanvas, x: number, y: number): string | undefined {
@@ -63,6 +149,30 @@ describe('flowToGraph', () => {
     const prefixed = flowToGraph(buildFlowModel(def, os.tmpdir()), { labelNext: true });
     expect(prefixed.nodes[0]?.detail).toBe('/x-plan');
     expect(prefixed.edges[0]?.label).toBe('NEXT');
+  });
+
+  it('shows the skill invocation of the selected agents as the detail line', () => {
+    const detail = (agents?: Parameters<typeof flowToGraph>[1]) => flowToGraph(model, agents).nodes[0]?.detail;
+    expect(detail()).toBe('/plan');
+    expect(detail({ agents: [] })).toBe('/plan');
+    expect(detail({ agents: ['claude'] })).toBe('/plan');
+    expect(detail({ agents: ['codex'] })).toBe('$plan');
+    expect(detail({ agents: ['claude', 'codex'] })).toBe('/plan $plan');
+    expect(flowToGraph(model, { agents: ['codex'] }).nodes.at(-1)?.detail).toBeUndefined(); // final state
+  });
+
+  it('orders nodes by declaration with the initial state first and final states last', () => {
+    // BFS from the initial state would give a, b, d, c, done (the SKIP target d comes early).
+    const t2 = buildFlowModel(flowDef(T2), os.tmpdir());
+    expect(flowToGraph(t2).nodes.map((n) => n.id)).toEqual(['a', 'b', 'c', 'd', 'done']);
+    const shuffled = buildFlowModel(
+      flowDef({
+        initial: 'a',
+        states: { done: { type: 'final' }, b: { on: { NEXT: 'done' } }, cancelled: { type: 'final' }, a: { on: { NEXT: 'b', CANCEL: 'cancelled' } } },
+      }),
+      os.tmpdir(),
+    );
+    expect(flowToGraph(shuffled).nodes.map((n) => n.id)).toEqual(['a', 'b', 'done', 'cancelled']);
   });
 });
 
@@ -164,6 +274,204 @@ describe('renderGraph', () => {
 
   it('renders an empty graph as an empty canvas', async () => {
     expect(await renderGraph({ nodes: [], edges: [] }, { zoom: 1 })).toEqual({ lines: [], width: 0, height: 0, boxes: {} });
+  });
+});
+
+describe('edge ends', () => {
+  const cases: Array<[string, FlowGraph]> = [['m1', m1], ['m4', m4], ['par', par], ['sample', graph], ...Object.entries(templates)];
+
+  for (const [name, g] of cases) {
+    it(`gives every edge of ${name} its own end cells and arrowhead at every zoom and direction`, async () => {
+      const edges = g.edges.filter((e) => e.from !== e.to).length;
+      for (const direction of DIRECTIONS) {
+        for (const zoom of ZOOMS) {
+          const where = `${name} zoom ${zoom} ${direction}`;
+          const laid = (await layoutFlowGraph(g, { zoom, direction }))!;
+          expect(laid.layout.edges, where).toHaveLength(edges);
+          // No two edges start or end on the same cell (no merged lines, no shared arrowhead).
+          const ends = laid.layout.edges.flatMap((e) => [e.points[0]!, e.points.at(-1)!].map((p) => `${p.x},${p.y}`));
+          expect(new Set(ends).size, where).toBe(ends.length);
+
+          const uni = await renderGraph(g, { zoom, direction });
+          const arrows = arrowCells(uni, ARROWS);
+          expect(arrows, where).toHaveLength(edges);
+          // --ascii draws the same geometry with v<^> arrowheads.
+          const ascii = await renderGraph(g, { zoom, direction, ascii: true });
+          expect(arrowCells(ascii, ASCII_ARROWS), `${where} ascii`).toEqual(arrows);
+        }
+      }
+    });
+  }
+
+  it('keeps zoom-0 nodes on one line and routes extra edges above/below them in LR', async () => {
+    const canvas = await renderGraph(m1, { zoom: 0, direction: 'LR' });
+    expect(canvas.lines.map((l) => l.trimEnd())).toMatchInlineSnapshot(`
+      [
+        "[A]───►[B]───────────►[C]───►(Done)",
+        "        ▲              │",
+        "        │              │",
+        "        │              │",
+        "        ╰──────────────╯",
+        "              BACK",
+      ]
+    `);
+    expect(Object.values(canvas.boxes).every((b) => b.h === 1)).toBe(true);
+  });
+
+  it('widens zoom-0 nodes so edges do not share a column in TB', async () => {
+    const canvas = await renderGraph(m1, { zoom: 0, direction: 'TB' });
+    expect(canvas.lines.map((l) => l.trimEnd())).toMatchInlineSnapshot(`
+      [
+        "  [A]",
+        "   │",
+        "   │",
+        "   │╭────────╮",
+        "   ▼▼        │",
+        " [ B ]       │",
+        "    │        │",
+        "    │        │",
+        "    │   BACK │",
+        "    │        │",
+        "    ▼        │",
+        " [ C ]       │",
+        "   ││        │",
+        "   ││        │",
+        "   │╰────────╯",
+        "   ▼",
+        "(Done)",
+      ]
+    `);
+    expect(canvas.lines.join('\n')).toContain('[ B ]');
+  });
+
+  it('moves a loop off a cell a straight edge already uses (m4, zoom 2 LR)', async () => {
+    const laid = (await layoutFlowGraph(m4, { zoom: 2, direction: 'LR' }))!;
+    const intoC = laid.layout.edges.filter((e) => e.to === 'c').map((e) => e.points.at(-1)!);
+    expect(intoC).toHaveLength(2);
+    expect(intoC[0]).not.toEqual(intoC[1]);
+    const canvas = await renderGraph(m4, { zoom: 2, direction: 'LR' });
+    const c = canvas.boxes.c!;
+    const column = cellsOf(canvas).map((row) => row[c.x - 1]);
+    expect(column.filter((cell) => cell === '►')).toHaveLength(2);
+  });
+});
+
+describe('layout order', () => {
+  /** Box of each node on the rendered canvas; `along` is y (TB) or x (LR). */
+  async function positions(g: FlowGraph, zoom: ZoomLevel, direction: 'TB' | 'LR') {
+    const canvas = await renderGraph(g, { zoom, direction });
+    const along = (id: string): number => (direction === 'TB' ? canvas.boxes[id]!.y : canvas.boxes[id]!.x);
+    return { canvas, along };
+  }
+
+  for (const [name, machine] of [
+    ['CANCEL a→done', T1],
+    ['SKIP a→d', T2],
+  ] as const) {
+    it(`draws an acyclic flow with ${name} as forward edges only, Done last`, async () => {
+      const g = graphOf(flowDef(machine));
+      for (const direction of DIRECTIONS) {
+        for (const zoom of ZOOMS) {
+          const { canvas, along } = await positions(g, zoom, direction);
+          for (const e of g.edges) expect(along(e.to), `${e.from}→${e.to} zoom ${zoom} ${direction}`).toBeGreaterThan(along(e.from));
+          const last = Math.max(...Object.keys(canvas.boxes).map(along));
+          expect(along('done')).toBe(last);
+        }
+      }
+    });
+  }
+
+  it('keeps the NEXT chain in order when a cyclic flow gets a skip (feature + TRIVIAL spec→ship)', async () => {
+    const def = templateDef('feature');
+    const spec = def.machine.states['spec-feature']!;
+    spec.on = { ...spec.on, TRIVIAL: 'ship-feature' };
+    const g = graphOf(def);
+    const chain = ['spec-feature', 'plan-feature', 'implement-feature', 'verify-feature', 'review-feature', 'ship-feature', 'done'];
+    for (const zoom of ZOOMS) {
+      const { along } = await positions(g, zoom, 'TB');
+      for (let i = 1; i < chain.length; i++) expect(along(chain[i]!), `${chain[i]} zoom ${zoom}`).toBeGreaterThan(along(chain[i - 1]!));
+      for (const e of g.edges) {
+        const upward = along(e.to) < along(e.from);
+        expect(upward, `${e.from} ${e.label ?? 'NEXT'} ${e.to}`).toBe(['BACK', 'FAILED', 'CHANGES_REQUESTED'].includes(e.label ?? ''));
+      }
+    }
+  });
+});
+
+describe('edge labels', () => {
+  const LINE = new Set([...'│─├┤┬┴┼╭╮╰╯▼◄▲►']);
+
+  /**
+   * Every label must read as belonging to exactly one line: inline on a `───` run, touching a
+   * horizontal run with no other line in the row beyond it, or beside a vertical run at least 2 cells
+   * closer to it than to any line on its other side.
+   */
+  function expectAttached(canvas: RenderedCanvas, labels: string[], where: string): void {
+    const cells = cellsOf(canvas);
+    const isLine = (x: number, y: number): boolean => LINE.has(cells[y]?.[x] ?? ' ') && !inBox(canvas.boxes, x, y);
+    const gap = (x: number, y: number, dx: number): number => {
+      for (let n = 0; ; n++) {
+        const c = cells[y]?.[x + n * dx];
+        if (c === undefined) return Infinity;
+        if (c !== ' ') return isLine(x + n * dx, y) ? n : Infinity;
+      }
+    };
+    const rowHasLine = (y: number, x0: number, x1: number): boolean => {
+      for (let x = x0; x <= x1; x++) if (isLine(x, y)) return true;
+      return false;
+    };
+    let found = 0;
+    cells.forEach((row, y) => {
+      const line = row.join('');
+      for (const label of new Set(labels)) {
+        for (let x = line.indexOf(label); x >= 0; x = line.indexOf(label, x + 1)) {
+          if (inBox(canvas.boxes, x, y)) continue;
+          found++;
+          const w = label.length;
+          const what = `${where}: "${label}" at ${x},${y}`;
+          if (row[x - 1] === '─' && row[x + w] === '─') continue; // inline
+          const above = rowHasLine(y - 1, x, x + w - 1);
+          const below = rowHasLine(y + 1, x, x + w - 1);
+          if (above !== below) {
+            const far = above ? y + 1 : y - 1;
+            expect(rowHasLine(far, x - 1, x + w), `${what} sits between two horizontal runs`).toBe(false);
+            continue;
+          }
+          const left = gap(x - 1, y, -1);
+          const right = gap(x + w, y, 1);
+          const near = Math.min(left, right);
+          const far = Math.max(left, right);
+          expect(near, `${what} is not next to a line`).toBeLessThanOrEqual(1);
+          expect(far - near, `${what} is as close to another line (${left} left, ${right} right)`).toBeGreaterThanOrEqual(2);
+        }
+      }
+    });
+    expect(found, `${where}: labels drawn`).toBe(labels.length);
+  }
+
+  const cases: Array<[string, FlowGraph]> = [['par', par], ['sample', graph], ...Object.entries(templates)];
+  for (const [name, g] of cases) {
+    it(`attaches every label of ${name} to its own line`, async () => {
+      for (const direction of DIRECTIONS) {
+        for (const zoom of ZOOMS) {
+          const canvas = await renderGraph(g, { zoom, direction });
+          const labels = g.edges.filter((e) => e.label && e.from !== e.to).map((e) => edgeLabelText(e.label, zoom)!);
+          expectAttached(canvas, labels, `${name} zoom ${zoom} ${direction}`);
+        }
+      }
+    });
+  }
+
+  it('puts labels on the same side of vertical lines (left) in TB', async () => {
+    const canvas = await renderGraph(templates.feature!, { zoom: 1, direction: 'TB' });
+    const cells = cellsOf(canvas);
+    for (const [y, row] of cells.entries()) {
+      const line = row.join('');
+      for (const label of ['BACK', 'FAILED']) {
+        const x = line.indexOf(label);
+        if (x >= 0) expect(`${row[x + label.length]}${row[x + label.length + 1]}`, `${label} at row ${y}`).toBe(' │');
+      }
+    }
   });
 });
 

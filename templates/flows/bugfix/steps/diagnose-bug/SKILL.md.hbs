@@ -6,8 +6,10 @@ fix approach. No production code changes yet.
 
 ## Inputs
 
-- The failing reproduction test and the reproduction note from the previous step (look in the
-  conversation, the latest commits on `{{vars.branchPrefix}}<slug>`, or ask the user).
+- The failing reproduction test and the `## Reproduction` section of
+  `{{vars.bugNotesDir}}/<slug>.md` (the slug is the current branch name without the
+  `{{vars.fixBranchPrefix}}` prefix). If the note is missing, look in the latest commits on the
+  branch or ask the user; fire `BACK` if there is no reliable reproduction.
 - Any hints in the text the user typed after the command.
 
 ## Procedure
@@ -35,9 +37,11 @@ fix approach. No production code changes yet.
 9. **Propose fix options**, at least two when the fix is not obvious, with trade-offs (size,
    risk, performance, compatibility). Recommend one. Say whether existing data needs repair.
 10. **Clean up** every temporary log, assertion and script you added.
-11. **Write the diagnosis summary** and get the user's agreement on the fix:
+11. **Write the diagnosis summary** as a new section at the end of `{{vars.bugNotesDir}}/<slug>.md`
+    and get the user's agreement on the fix:
 
     ```markdown
+    ## Diagnosis
     Root cause: ...
     Evidence: ...
     Why it was not caught: ...
@@ -46,9 +50,15 @@ fix approach. No production code changes yet.
     Data repair needed: yes/no
     ```
 
+12. **Commit the diagnosis** once the user agreed, so the fix step can read it in a new
+    session: `git add {{vars.bugNotesDir}}/<slug>.md` and
+    `git commit -m "docs: diagnosis for <slug>"`. This notes commit is the only change of this
+    step; production code stays untouched.
+
 ## Outputs
 
-- The diagnosis summary with the agreed fix approach.
+- The `## Diagnosis` section in `{{vars.bugNotesDir}}/<slug>.md` with the agreed fix approach,
+  committed on the fix branch.
 - A clean working tree (no leftover instrumentation).
 
 ## Exit criteria

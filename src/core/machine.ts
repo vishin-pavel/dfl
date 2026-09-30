@@ -36,6 +36,8 @@ export const HISTORY_LIMIT = 200;
 export const GOTO_EVENT = 'GOTO';
 /** Event recorded in history by `resetFlow`. */
 export const RESET_EVENT = 'RESET';
+/** Event recorded in history when the current step was removed and the position moved (`moveCurrentInRuntime`). */
+export const STEP_REMOVED_EVENT = 'STEP_REMOVED';
 
 /** Builds an xstate machine from `def.machine` (plain JSON config, no setup()). Throws DflError on xstate errors. */
 export function createFlowMachine(def: FlowDefinition): AnyStateMachine {
@@ -170,6 +172,27 @@ export function renameStateInRuntime(paths: ProjectPaths, flow: string, from: st
   if (JSON.stringify(next) === JSON.stringify(entry)) return;
   file.flows[flow] = next;
   writeJson(paths.stateFile, file);
+}
+
+/**
+ * Moves the current step of `flow` from `from` to `to` in `.df/state.json` and records a
+ * `STEP_REMOVED` history entry (used when the current step is removed from the flow). Other flows and
+ * the existing history are kept. No-op (returns false) when state.json is missing or unreadable, the
+ * flow has no entry, or its current step is not `from`.
+ */
+export function moveCurrentInRuntime(paths: ProjectPaths, flow: string, from: string, to: string): boolean {
+  if (from === to || !exists(paths.stateFile)) return false;
+  const { file, problem } = readStateFile(paths);
+  const entry = file.flows[flow];
+  if (problem || !entry || entry.current !== from) return false;
+  const at = new Date().toISOString();
+  file.flows[flow] = {
+    current: to,
+    history: [...entry.history, { from, to, event: STEP_REMOVED_EVENT, at }].slice(-HISTORY_LIMIT),
+    updatedAt: at,
+  };
+  writeJson(paths.stateFile, file);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

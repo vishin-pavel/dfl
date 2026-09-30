@@ -6,18 +6,24 @@ to shipping (`NEXT`) or back to fixing (`FAILED`).
 
 ## Inputs
 
-- The fix commits on `{{vars.branchPrefix}}<slug>`, including the reproduction test.
-- The reproduction note (manual steps) and the diagnosis summary (blast radius).
+- The fix commits on `{{vars.fixBranchPrefix}}<slug>`, including the reproduction test.
+- The `## Reproduction` (manual steps) and `## Diagnosis` (blast radius) sections of
+  `{{vars.bugNotesDir}}/<slug>.md`; the slug is the current branch name without the
+  `{{vars.fixBranchPrefix}}` prefix.
 - Anything extra to check from the text the user typed after the command.
 
 ## Procedure
 
 1. **Start clean.** `git status` must show no uncommitted changes; verification runs against
    committed code only.
-2. **Prove the test catches the bug.** Temporarily undo the fix in the working tree, for example
-   `git checkout {{vars.mainBranch}} -- <fixed source file>`, run the reproduction test and
-   confirm it fails with the original symptom. Restore with `git checkout HEAD -- <fixed source file>`
-   and confirm it passes again. A test that passes without the fix proves nothing.
+2. **Prove the test catches the bug.** Temporarily undo the fix in the working tree by restoring
+   the fixed file from the point where the branch started (not from a local
+   `{{vars.mainBranch}}`, which may be out of date):
+   `git fetch origin {{vars.mainBranch}}`, then
+   `git checkout $(git merge-base HEAD origin/{{vars.mainBranch}}) -- <fixed source file>`.
+   Run the reproduction test and confirm it fails with the original symptom. Restore with
+   `git checkout HEAD -- <fixed source file>` and confirm it passes again. A test that passes
+   without the fix proves nothing.
 3. **Run the full suite**: `{{vars.testCommand}}`. Then run the other checks CI runs (type
    checks, lint, build); read the CI configuration to find them.
 4. **Replay the manual reproduction** from the reproduction note in an environment as close to
@@ -25,11 +31,16 @@ to shipping (`NEXT`) or back to fixing (`FAILED`).
 5. **Check the blast radius** from the diagnosis: exercise the other callers and features that
    share the changed code, and the sibling cases the fix step added tests for.
 6. **If there is a data repair**, run its dry-run mode against a safe copy and check the output.
-7. **Inspect the branch diff** (`git diff {{vars.mainBranch}}...HEAD`) for leftovers: debug output,
-   focused or skipped tests, unrelated changes.
-8. **Write the verification report** in the conversation:
+7. **Inspect the branch diff** (`git diff origin/{{vars.mainBranch}}...HEAD`) for leftovers:
+   debug output, focused or skipped tests, unrelated changes.
+8. **Write the verification report** as a `## Verification` section at the end of
+   `{{vars.bugNotesDir}}/<slug>.md` (replace the section of an earlier round), show it to the
+   user and commit it: `git add {{vars.bugNotesDir}}/<slug>.md` and
+   `git commit -m "docs: verification report for <slug>"`. When something failed, include the
+   numbered failure list, so the fix step can find it. This notes commit is not a code fix.
 
    ```markdown
+   ## Verification
    Reproduction test fails without the fix: yes/no
    Reproduction test passes with the fix: yes/no
    Suite: <command> - <n> passed, <n> failed, <n> skipped
@@ -44,14 +55,15 @@ to shipping (`NEXT`) or back to fixing (`FAILED`).
 
 ## Outputs
 
-- The verification report.
-- For failures: the numbered failure list.
+- The `## Verification` section in `{{vars.bugNotesDir}}/<slug>.md`, committed.
+- For failures: the numbered failure list in that section.
 
 ## Exit criteria
 
 - The reproduction test fails without the fix and passes with it.
 - `{{vars.testCommand}}` and the other CI checks pass.
 - The manual reproduction no longer shows the symptom, and no regression was found.
+- The working tree is clean (the fixed file is restored and the report is committed).
 
 ## Pitfalls
 

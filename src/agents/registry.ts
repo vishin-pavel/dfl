@@ -7,8 +7,14 @@ import { exists, removeEmptyDirsUpTo } from '../core/fsx.js';
 import { AGENT_IDS, type AgentId, type McpServerSpec } from '../core/types.js';
 import {
   MCP_SERVER_NAME,
+  hasJsonContainer,
   hasJsonEntry,
   hasTomlServer,
+  jsonFileExists,
+  planJsonUpsert,
+  planTomlUpsert,
+  readJsonEntry,
+  readTomlServer,
   removeJsonEntry,
   removeTomlServer,
   upsertJsonEntry,
@@ -70,6 +76,24 @@ function cleanupDirs(root: string, file: string): void {
   removeEmptyDirsUpTo(path.dirname(absPath(root, file)), root);
 }
 
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+/** `{ command, args }` of a `{ command: string, args: string[] }` entry. */
+function commandOf(value: unknown): { command: string | undefined; args: string[] } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value === undefined ? undefined : { command: undefined, args: [] };
+  const record = value as Record<string, unknown>;
+  return { command: typeof record['command'] === 'string' ? record['command'] : undefined, args: strings(record['args']) };
+}
+
+/** OpenCode keeps the command and its args in one `command` array. */
+function opencodeCommandOf(value: unknown): { command: string | undefined; args: string[] } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value === undefined ? undefined : { command: undefined, args: [] };
+  const [command, ...args] = strings((value as Record<string, unknown>)['command']);
+  return { command, args };
+}
+
 function jsonTarget(
   file: string,
   format: 'json' | 'jsonc',
@@ -80,12 +104,20 @@ function jsonTarget(
     file,
     format,
     upsert: (root, spec) => upsertJsonEntry(absPath(root, file), keyPath, spec.name, toEntry(spec)),
-    remove: (root, name) => {
-      const changed = removeJsonEntry(absPath(root, file), keyPath, name);
-      if (changed) cleanupDirs(root, file);
+    plan: (root, spec) => planJsonUpsert(absPath(root, file), keyPath, spec.name, toEntry(spec)),
+    remove: (root, name, options) => {
+      const abs = absPath(root, file);
+      const changed = removeJsonEntry(abs, keyPath, name, options);
+      if (changed && !exists(abs)) cleanupDirs(root, file);
       return changed;
     },
     has: (root, name) => hasJsonEntry(absPath(root, file), keyPath, name),
+    read: (root, name) => commandOf(readJsonEntry(absPath(root, file), keyPath, name)),
+    inspect: (root) => ({
+      file,
+      exists: jsonFileExists(absPath(root, file)),
+      container: hasJsonContainer(absPath(root, file), keyPath),
+    }),
   };
 }
 
@@ -94,12 +126,19 @@ function tomlTarget(file: string): McpTarget {
     file,
     format: 'toml',
     upsert: (root, spec) => upsertTomlServer(absPath(root, file), spec),
-    remove: (root, name) => {
-      const changed = removeTomlServer(absPath(root, file), name);
-      if (changed) cleanupDirs(root, file);
+    plan: (root, spec) => planTomlUpsert(absPath(root, file), spec),
+    remove: (root, name, options) => {
+      const abs = absPath(root, file);
+      const changed = removeTomlServer(abs, name, { deleteEmptyFile: options?.deleteEmptyFile });
+      if (changed && !exists(abs)) cleanupDirs(root, file);
       return changed;
     },
     has: (root, name) => hasTomlServer(absPath(root, file), name),
+    read: (root, name) => {
+      const server = readTomlServer(absPath(root, file), name);
+      return server === undefined ? undefined : { command: server.command, args: server.args ?? [] };
+    },
+    inspect: (root) => ({ file, exists: jsonFileExists(absPath(root, file)), container: true }),
   };
 }
 
@@ -119,19 +158,48 @@ export function opencodeConfigFile(root: string, name: string = MCP_SERVER_NAME)
   return OPENCODE_JSON;
 }
 
+/** OpenCode files a remove/read may touch: the one asked for, else both. */
+function opencodeFiles(file: string | undefined): string[] {
+  return file === OPENCODE_JSON || file === OPENCODE_JSONC ? [file] : [OPENCODE_JSONC, OPENCODE_JSON];
+}
+
+const opencodeInitial = { initial: { $schema: OPENCODE_SCHEMA } };
+
 const opencodeTarget: McpTarget = {
   file: OPENCODE_JSON,
   format: 'jsonc',
   upsert: (root, spec) =>
-    upsertJsonEntry(absPath(root, opencodeConfigFile(root, spec.name)), ['mcp'], spec.name, opencodeEntry(spec), {
-      initial: { $schema: OPENCODE_SCHEMA },
-    }),
-  remove: (root, name) =>
-    [OPENCODE_JSONC, OPENCODE_JSON]
-      .map((file) => removeJsonEntry(absPath(root, file), ['mcp'], name))
+    upsertJsonEntry(absPath(root, opencodeConfigFile(root, spec.name)), ['mcp'], spec.name, opencodeEntry(spec), opencodeInitial),
+  plan: (root, spec) =>
+    planJsonUpsert(absPath(root, opencodeConfigFile(root, spec.name)), ['mcp'], spec.name, opencodeEntry(spec), opencodeInitial),
+  remove: (root, name, options) =>
+    opencodeFiles(options?.file)
+      .map((file) => removeJsonEntry(absPath(root, file), ['mcp'], name, options))
       .some(Boolean),
   has: (root, name) => [OPENCODE_JSON, OPENCODE_JSONC].some((file) => hasJsonEntry(absPath(root, file), ['mcp'], name)),
+  read: (root, name, file) => {
+    for (const candidate of opencodeFiles(file)) {
+      const found = opencodeCommandOf(readJsonEntry(absPath(root, candidate), ['mcp'], name));
+      if (found) return found;
+    }
+    return undefined;
+  },
+  inspect: (root) => {
+    const file = opencodeConfigFile(root);
+    return { file, exists: jsonFileExists(absPath(root, file)), container: hasJsonContainer(absPath(root, file), ['mcp']) };
+  },
 };
+
+/** True for a project-relative MCP config file some adapter writes (manifest entries must name one of these). */
+export function isKnownMcpFile(file: string): boolean {
+  return mcpTargetForFile(file) !== undefined;
+}
+
+/** The MCP target that writes `file` (OpenCode for both of its files); undefined for unknown files. */
+export function mcpTargetForFile(file: string): McpTarget | undefined {
+  if (file === OPENCODE_JSON || file === OPENCODE_JSONC) return opencodeTarget;
+  return AGENTS.find((adapter) => adapter.mcp?.file === file)?.mcp;
+}
 
 /**
  * Project-relative path of the MCP config file `agent` writes for `root` (OpenCode picks
@@ -194,7 +262,11 @@ const antigravity: AgentAdapter = {
   mcp: jsonTarget('.agents/mcp_config.json', 'json', ['mcpServers'], plainEntry),
   mcpNote:
     'The Antigravity CLI (`agy`) may ignore the workspace .agents/mcp_config.json (google-antigravity/antigravity-cli#60). ' +
-    'If the dfl tools are missing, add the server to the global ~/.gemini/config/mcp_config.json (e.g. `agy mcp add`).',
+    'If the dfl tools are missing, add the server to the global ~/.gemini/config/mcp_config.json (e.g. `agy mcp add`). ' +
+    'The global config starts servers outside the project: use `dfl mcp` from a global install (`npm i -g @vishin-pavel/dfl`) there, ' +
+    'not the per-project `npx --no-install dfl mcp` entry.',
+  // The Desktop app starts stdio servers with the app folder as cwd.
+  mcpCwdOutsideWorkspace: true,
   notes:
     'Run `/skills reload` in the CLI after installing. The CLI may load workspace .agents/ customizations only for registered workspaces (`agy --add-dir .`).',
   docs: 'https://antigravity.google/docs/skills/',

@@ -10,14 +10,16 @@ bug, its root cause and how the fix was verified, so reviewers can check the rea
 
 ## Inputs
 
-- The verified branch `{{vars.branchPrefix}}<slug>`.
-- The reproduction note, the diagnosis summary and the verification report.
+- The verified branch `{{vars.fixBranchPrefix}}<slug>`.
+- The `## Reproduction`, `## Diagnosis` and `## Verification` sections of
+  `{{vars.bugNotesDir}}/<slug>.md`: the source of the pull request description.
 - Any instructions in the text the user typed after the command (issue to close, labels,
   release or backport branches).
 
 ## Procedure
 
-1. **Sync with the base branch.** `git fetch origin`, then rebase onto or merge
+1. **Sync with the base branch.** Run `git status` first; commit or ask about any uncommitted
+   changes before syncing. Then `git fetch origin`, and rebase onto or merge
    `origin/{{vars.mainBranch}}` following the team convention (ask if unsure). Run
    `{{vars.testCommand}}` again after resolving conflicts.
 2. **Tidy the history** if the team expects it: the failing test and the fix may be squashed into
@@ -42,13 +44,16 @@ bug, its root cause and how the fix was verified, so reviewers can check the rea
 
    ## Follow-ups
    - <other occurrences, data repair, monitoring>
+
+   Details: {{vars.bugNotesDir}}/<slug>.md
    ```
 
 5. **Open the pull request** against `{{vars.mainBranch}}`. With the GitHub CLI:
    `gh pr create --base {{vars.mainBranch}} --title "fix: <summary>" --body-file <file>{{#if vars.reviewer}} --reviewer {{vars.reviewer}}{{/if}}`.
    Without it, give the user the compare link printed by `git push` and the description.
 {{#if vars.reviewer}}
-   Review is requested from **{{vars.reviewer}}** (your personal default reviewer).
+   This requests a review from your personal default reviewer (the `reviewer` variable). `gh`
+   expects the login without a leading at-sign; drop it if the value has one.
 {{else}}
    No default reviewer is configured, so ask the user whom to request. They can set a personal
    default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.
@@ -59,7 +64,7 @@ bug, its root cause and how the fix was verified, so reviewers can check the rea
 7. **Merge** when checks are green, the review is approved and the user asks you to, using the
    repository's merge method.
 8. **After the merge**: `git switch {{vars.mainBranch}}`, `git pull`, and
-   `git branch -d {{vars.branchPrefix}}<slug>`. Remind the user about backports, the data
+   `git branch -d {{vars.fixBranchPrefix}}<slug>`. Remind the user about backports, the data
    repair run, closing the issue and informing the reporter, if any apply.
 
 ## Outputs

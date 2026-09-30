@@ -5,7 +5,8 @@ verdict finishes the flow (`NEXT`) or sends the work back (`FAILED`).
 
 ## Inputs
 
-- The plan (goal, files, check) and the summary of the edits from the previous steps.
+- The plan (goal, files, check) and the summary of the edits from the previous steps. If you
+  cannot find them in the conversation, ask the user for the goal and read the diff.
 - The working tree with the change, or the latest commit if the user already committed it.
 - Anything extra to check from the text the user typed after the command.
 
@@ -13,8 +14,16 @@ verdict finishes the flow (`NEXT`) or sends the work back (`FAILED`).
 
 1. **Run the full suite**: `{{vars.testCommand}}`. Also run the type checker, linter and formatter
    check if the project has them (look at the package scripts, Makefile or CI configuration).
-   If something fails, check whether it also fails without the change (for example with
-   `git stash`, run, `git stash pop`) so you report pre-existing failures separately.
+   If something fails, check whether it also fails without the change, so you report
+   pre-existing failures separately:
+   - **Change not committed yet**: `git stash push --include-untracked -m dfl-baseline` (new
+     files must go too), run the failing command, then restore with `git stash pop --index`
+     (it keeps what was staged). Pop only if `git stash list` shows `dfl-baseline` on top: with
+     nothing to stash, no stash is created and popping would apply an unrelated older one.
+   - **Change already committed**: leave the working tree and the stash alone. Check out the
+     previous commit in a separate worktree with
+     `git worktree add ../{{project.name}}-baseline HEAD~1`, run the command there (install
+     dependencies first if it needs them), then `git worktree remove ../{{project.name}}-baseline`.
 2. **Review the diff**: `git diff` (plus `git diff --staged` if anything is staged, or
    `git show HEAD` if the change is already committed). Check that:
    - only the planned files changed, plus the dependent docs or tests;
@@ -57,7 +66,9 @@ verdict finishes the flow (`NEXT`) or sends the work back (`FAILED`).
 - Do not fix problems inside the check; send them back with `FAILED` so they are checked again.
 - Do not declare success on a partial test run; the full suite must pass.
 - Do not commit or push without the user's agreement.
+- Never `git stash pop` a stash you did not create in this step.
 - If the check keeps failing after two rounds, the change is probably not quick: suggest
-  re-planning it or switching to a fuller flow.
+  re-planning it or switching to a fuller flow (`{{dfl.cli}} flow list`, or
+  `{{dfl.cli}} flow create feature --from feature --use` if the project has none).
 
 {{> flow-context}}

@@ -3,7 +3,7 @@
  * interactive viewer, not for `--print` / piped output.
  */
 import { DflError } from '../core/errors.js';
-import type { FlowModel } from '../core/types.js';
+import type { AgentId, FlowModel } from '../core/types.js';
 import { MAX_ZOOM, MIN_ZOOM, createCanvasCache, flowToGraph, isZoomLevel, renderGraph, type ZoomLevel } from './graph/index.js';
 
 export interface FlowViewOptions {
@@ -12,6 +12,11 @@ export interface FlowViewOptions {
   zoom?: number | undefined;
   direction?: 'TB' | 'LR' | undefined;
   ascii?: boolean | undefined;
+  /**
+   * Selected agents (`getSelectedAgents`): zoom-3 cards show how they invoke each step's skill
+   * (`/plan`, or `$plan` for Codex). Default: `/plan`.
+   */
+  agents?: readonly AgentId[] | undefined;
   /** Print the whole canvas and exit (also used automatically when stdin/stdout is not a TTY). */
   print?: boolean | undefined;
 }
@@ -31,7 +36,7 @@ export async function runFlowView(model: FlowModel, options: FlowViewOptions = {
   const zoom = toZoom(options.zoom);
   const direction = options.direction ?? 'TB';
   const current = options.current !== undefined && model.byId.has(options.current) ? options.current : undefined;
-  const graph = flowToGraph(model);
+  const graph = flowToGraph(model, { agents: options.agents });
 
   if (options.print || !process.stdin.isTTY || !process.stdout.isTTY) {
     const canvas = await renderGraph(graph, { zoom: zoom ?? PRINT_ZOOM, direction, ascii: options.ascii, highlight: current });
@@ -41,7 +46,7 @@ export async function runFlowView(model: FlowModel, options: FlowViewOptions = {
 
   const [{ render }, { createElement }, { FlowView }] = await Promise.all([import('ink'), import('react'), import('./FlowView.js')]);
   const cache = createCanvasCache(graph, { ascii: options.ascii, highlight: current });
-  const app = render(createElement(FlowView, { model, current, zoom, direction, ascii: options.ascii, cache }), {
+  const app = render(createElement(FlowView, { model, current, zoom, direction, ascii: options.ascii, agents: options.agents, cache }), {
     alternateScreen: true,
     exitOnCtrlC: true,
   });

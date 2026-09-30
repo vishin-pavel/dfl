@@ -5,11 +5,15 @@ make the reproduction test pass and protect the neighbouring cases with tests.
 
 ## Inputs
 
-- The diagnosis summary and the agreed fix approach from the previous step.
-- The failing reproduction test on `{{vars.branchPrefix}}<slug>`.
+- The `## Diagnosis` section (root cause and agreed fix approach) of
+  `{{vars.bugNotesDir}}/<slug>.md`; the slug is the current branch name without the
+  `{{vars.fixBranchPrefix}}` prefix. If it is missing, ask the user to restate the diagnosis or
+  fire `BACK` to diagnose again.
+- The failing reproduction test on `{{vars.fixBranchPrefix}}<slug>`.
 - If the flow came back here from verification (`FAILED`) or from pull request review
   (`CHANGES_REQUESTED`): the list of failures or requested changes. Look for it in the
-  conversation or the pull request, or ask the user. Address exactly those items first.
+  `## Verification` section of the notes file, the conversation or the pull request, or ask the
+  user. Address exactly those items first.
 - Extra constraints in the text the user typed after the command.
 
 ## Procedure
@@ -26,8 +30,8 @@ make the reproduction test pass and protect the neighbouring cases with tests.
 5. **Data repair**, if the diagnosis said existing data is wrong: write the repair as a separate,
    idempotent script or migration with a dry-run mode, test it on a copy, and ask the user
    before it runs against any shared environment.
-6. **Review your own diff**: `git diff` (and `git diff {{vars.mainBranch}}...HEAD` for the whole
-   branch). Only the fix, its tests and required docs should be there; remove debug code.
+6. **Review your own diff**: `git diff` (and `git diff origin/{{vars.mainBranch}}...HEAD` for
+   the whole branch, after `git fetch origin {{vars.mainBranch}}`). Only the fix, its tests and required docs should be there; remove debug code.
 7. **Commit** with a message that names the defect and explains the cause in the body:
 
    ```text
@@ -43,7 +47,7 @@ make the reproduction test pass and protect the neighbouring cases with tests.
 
 ## Outputs
 
-- A commit (or a few) on `{{vars.branchPrefix}}<slug>` containing the fix and its tests.
+- A commit (or a few) on `{{vars.fixBranchPrefix}}<slug>` containing the fix and its tests.
 - A short summary: what changed, why it fixes the root cause, which tests were added.
 
 ## Exit criteria

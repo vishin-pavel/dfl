@@ -20,7 +20,7 @@
       "default": "npm test",
       "scope": "project"
     },
-    "branchPrefix": {
+    "featureBranchPrefix": {
       "description": "Prefix for your feature branch names",
       "default": "feature/",
       "scope": "personal"

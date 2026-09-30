@@ -10,7 +10,7 @@ export interface GraphNode {
   id: string;
   title: string;
   description?: string | undefined;
-  /** Secondary line at zoom 3, e.g. the slash command. */
+  /** Secondary line at zoom 3: how the selected agents invoke the step skill (`/plan`, `$plan`). */
   detail?: string | undefined;
   final?: boolean | undefined;
 }

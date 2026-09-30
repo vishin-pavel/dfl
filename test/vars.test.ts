@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadLocalConfig, loadProjectConfig, saveLocalConfig, saveProjectConfig } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
-import { envVarName, resolveVars, setVar, unsetVar, varScope } from '../src/core/vars.js';
+import { envVarName, resolveVars, setVar, templateEnv, unsetVar, varScope } from '../src/core/vars.js';
 import { cleanupTempDirs, makeTempProject, sampleFlowDefinition } from './helpers/project.js';
 
 afterEach(cleanupTempDirs);
@@ -95,5 +95,20 @@ describe('setVar / unsetVar', () => {
     const paths = makeTempProject();
     expect(() => setVar(paths, 'a.b', 'x', 'project')).toThrow(DflError);
     expect(() => setVar(paths, '', 'x', 'project')).toThrow(DflError);
+  });
+});
+
+describe('templateEnv (F28)', () => {
+  it('exposes only DFL_ENV_<NAME> variables, without the prefix', () => {
+    const env = {
+      PATH: '/bin',
+      GITHUB_TOKEN: 'secret',
+      DFL_VAR_REVIEWER: 'octocat',
+      DFL_ENV_TEAM: 'core',
+      DFL_ENV_EMPTY: '',
+      DFL_ENV_: 'no name',
+    };
+    expect(templateEnv(env)).toEqual({ TEAM: 'core' });
+    expect(templateEnv({})).toEqual({});
   });
 });

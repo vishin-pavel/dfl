@@ -1,7 +1,9 @@
 {{!--
   Feature flow, first step. Uses the project vars specsDir and mainBranch (shared, stored in
-  .df/config.json) and the personal var branchPrefix (per developer, stored in .df/local.json).
-  Because rendered skills contain personal values, dfl git-ignores them; commit only this template.
+  .df/config.json) and the personal var featureBranchPrefix (per developer, stored in
+  .df/local.json). Var values are shared by all flows of a project, so a flow-specific meaning
+  gets a flow-specific name (the bug fix flow uses fixBranchPrefix). Because rendered skills
+  contain personal values, dfl git-ignores them; commit only this template.
 --}}
 # Write the feature spec
 
@@ -60,7 +62,7 @@ wording here turns into rework later.
 
    ```sh
    git fetch origin {{vars.mainBranch}}
-   git switch -c {{vars.branchPrefix}}<slug> origin/{{vars.mainBranch}}
+   git switch -c {{vars.featureBranchPrefix}}<slug> origin/{{vars.mainBranch}}
    ```
 
    If the working tree has unrelated uncommitted changes, ask the user what to do with them
@@ -73,7 +75,7 @@ wording here turns into rework later.
 ## Outputs
 
 - `{{vars.specsDir}}/<slug>.md` with numbered acceptance criteria and no open questions.
-- Branch `{{vars.branchPrefix}}<slug>` containing the spec commit.
+- Branch `{{vars.featureBranchPrefix}}<slug>` containing the spec commit.
 
 ## Exit criteria
 

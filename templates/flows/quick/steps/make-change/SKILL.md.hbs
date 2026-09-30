@@ -24,7 +24,8 @@ Nothing more than the plan, nothing less.
    `{{vars.testCommand}}` run happens in the check step, but run it now too if it is fast.
 5. **Watch the scope.** If the change turns out bigger than planned (more files, an API change,
    a new dependency, surprising behaviour), stop and tell the user. Fire `BACK` to re-plan, or
-   suggest switching to a fuller flow.
+   suggest switching to a fuller flow (`{{dfl.cli}} flow list`; if the project has none, create
+   one with `{{dfl.cli}} flow create feature --from feature --use`).
 6. **Update what depends on the change**: docs, examples, configuration samples, changelog if the
    project keeps one and the change is user-visible.
 7. **Summarize** the edits for the user: files changed, what changed in each, tests added.
@@ -39,7 +40,8 @@ Nothing more than the plan, nothing less.
 - **Dependency patch bump**: update the lockfile with the package manager (never by hand) and
   read the dependency's changelog for behaviour changes.
 - **Small bug**: add a test that fails without the edit; if the cause is unclear, the bug fix
-  flow is the better fit.
+  flow is the better fit (create it with `{{dfl.cli}} flow create bugfix --from bugfix --use`
+  if `{{dfl.cli}} flow list` does not show one).
 
 ## Outputs
 

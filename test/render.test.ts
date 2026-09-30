@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 import { DflError } from '../src/core/errors.js';
 import { loadFlow } from '../src/core/flow.js';
@@ -10,8 +10,12 @@ import {
   builtinSkillNames,
   createHandlebars,
   dflCliCommand,
+  firstSymlinkBetween,
+  isRenderedOutputPath,
   normalizeSkillMarkdown,
+  readRenderedOutputs,
   renderBuiltinSkills,
+  renderFlow,
   renderFlowSkills,
   renderTemplate,
 } from '../src/core/render.js';
@@ -141,8 +145,30 @@ describe('buildTemplateContext', () => {
     expect(ctx.step?.prev.map((r) => [r.event, r.id, r.final])).toEqual([['NEXT', 'build', false]]);
     expect(ctx.flow.steps[1]?.prev.map((r) => r.id)).toEqual(['plan', 'review']);
     expect(ctx.vars).toEqual({ mainBranch: 'main' });
-    expect(ctx.env['PATH']).toBe(process.env['PATH']);
+    // Only DFL_ENV_* variables reach templates (F28).
+    expect(ctx.env['PATH']).toBeUndefined();
     expect(ctx.dfl).toEqual({ version: packageVersion(), mcpServer: 'dfl', cli: 'dfl' });
+  });
+
+  it('never exposes the process environment to templates (F28)', () => {
+    const paths = sampleProject();
+    process.env['DFL_TEST_SECRET'] = 'sentinel-secret';
+    process.env['DFL_ENV_TEAM'] = 'core';
+    try {
+      fs.writeFileSync(
+        path.join(paths.stepDir('sample', 'plan'), 'SKILL.md.hbs'),
+        '# Plan\n{{json env}} {{env.DFL_TEST_SECRET}} {{#each env}}{{@key}}={{this}};{{/each}} team={{env.TEAM}}\n',
+      );
+      const [plan] = renderFlowSkills(paths, loadFlow(paths, 'sample'), {});
+      const text = skillFile(plan!, 'SKILL.md');
+      expect(text).not.toContain('sentinel-secret');
+      expect(text).not.toContain(process.env['PATH']!);
+      expect(text).toContain('team=core');
+      expect(text).toContain('TEAM=core;');
+    } finally {
+      delete process.env['DFL_TEST_SECRET'];
+      delete process.env['DFL_ENV_TEAM'];
+    }
   });
 
   it('uses the skill prefix and handles a missing flow', () => {
@@ -160,11 +186,48 @@ describe('buildTemplateContext', () => {
     expect(empty.step).toBeUndefined();
   });
 
-  it('uses `npx dfl` when the package is installed in the project', () => {
+  it('uses `npx --no-install dfl` when the project depends on dfl, whichever binary runs (F79, D6)', () => {
     const root = makeTempDir();
-    expect(dflCliCommand(root, path.join(root, 'node_modules', '@vishin-pavel', 'dfl'))).toBe('npx dfl');
-    expect(dflCliCommand(root, path.join(makeTempDir(), 'lib', 'node_modules', '@vishin-pavel', 'dfl'))).toBe('dfl');
-    expect(dflCliCommand(root, root)).toBe('dfl');
+    expect(dflCliCommand(root)).toBe('dfl');
+    expect(dflCliCommand(root, path.join(root, 'node_modules', '@vishin-pavel', 'dfl'))).toBe('dfl');
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ devDependencies: { '@vishin-pavel/dfl': '^0.1.0' } }));
+    expect(dflCliCommand(root)).toBe('npx --no-install dfl');
+    expect(dflCliCommand(root, path.join(makeTempDir(), 'lib', 'node_modules', '@vishin-pavel', 'dfl'))).toBe('npx --no-install dfl');
+  });
+
+  it('renders CLI fallbacks that never resolve `dfl` from the public registry (F79)', () => {
+    const paths = sampleProject();
+    fs.writeFileSync(path.join(paths.root, 'package.json'), JSON.stringify({ devDependencies: { '@vishin-pavel/dfl': '^0.1.0' } }));
+    const model = loadFlow(paths, 'sample');
+    const texts = [
+      ...renderFlowSkills(paths, model, {}).map((skill) => skillFile(skill, 'SKILL.md')),
+      ...renderBuiltinSkills(paths, model, {}).map((skill) => skillFile(skill, 'SKILL.md')),
+    ];
+    expect(texts.join('\n')).toContain('`npx --no-install dfl status`');
+    for (const text of texts) expect(text).not.toMatch(/npx dfl\b/);
+  });
+});
+
+describe('log helper (F33)', () => {
+  it('writes to stderr, never to stdout, and renders nothing', () => {
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(render('a{{log "HELLO" 1 obj}}b', { obj: { x: 1 } })).toBe('ab');
+      expect(render('{{log 1 level="info"}}')).toBe('');
+      expect(stdout).not.toHaveBeenCalled();
+      expect(info).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith('HELLO 1 {"x":1}\n');
+      expect(stderr).toHaveBeenCalledWith('1\n');
+    } finally {
+      stdout.mockRestore();
+      info.mockRestore();
+      log.mockRestore();
+      stderr.mockRestore();
+    }
   });
 });
 
@@ -281,45 +344,125 @@ describe('renderFlowSkills', () => {
       expect(section).toContain('`get_status`');
       expect(section).toContain('`goto_step`');
       expect(section).toContain(`\`{"step": "${skill.stepId}", "event": "<EVENT>"}\``);
-      expect(section).toContain('`dfl next <EVENT>`');
+      expect(section).toContain('`dfl next <EVENT>');
       expectNoSlashCommandTokens(text);
     }
 
     const [plan, build, review] = skills.map((s) => flowContextSection(skillFile(s, 'SKILL.md')));
     expect(plan).toContain('step 1 of 3 (**Plan**) of the flow **Sample flow** (`sample`)');
     expect(plan).toContain('- `NEXT` → Build (`/build`): Build it');
-    expect(build).toContain('Previous: Plan (`/plan`, via `NEXT`); Review (`/review`, via `CHANGES_REQUESTED`).');
+    expect(build).toContain('- Comes after: Plan (`/plan`)');
+    expect(build).toContain('- Also reached from: Review (`/review`) via `CHANGES_REQUESTED`');
     expect(build).toContain('- `NEXT` → Review (`/review`): Review it\n- `BACK` → Plan (`/plan`): Plan the work');
     expect(review).toContain('step 3 of 3');
     expect(review).toContain('- `NEXT` → flow complete: All done');
     expect(review).toContain('- `CHANGES_REQUESTED` → Build (`/build`): Reviewer asked for changes');
   });
 
-  it('renders extra templates, collects static files and deletes stale output', () => {
+  it('renders extra templates, collects static files and deletes only stale output it rendered (F14, D15)', () => {
     const paths = sampleProject();
     const dir = paths.stepDir('sample', 'plan');
     write(path.join(dir, 'SKILL.md.hbs'), '---\nlicense: MIT\n---\n# {{step.title}} on {{vars.mainBranch}}\n');
     write(path.join(dir, 'refs', 'guide.md.hbs'), 'Guide for {{upper project.name}} ({{flow.name}})');
     write(path.join(dir, 'scripts', 'check.sh'), '#!/bin/sh\necho ok\n');
     write(path.join(dir, 'notes.txt.hbs'), 'not a template');
-    write(path.join(dir, 'old', 'stale.md'), 'stale');
+    write(path.join(dir, 'old', 'stale.md'), 'hand-written, never rendered');
     write(path.join(dir, '.DS_Store'), '');
 
-    const [plan] = renderFlowSkills(paths, loadFlow(paths, 'sample'), { mainBranch: 'trunk' });
-    expect(plan!.files.map((f) => f.path)).toEqual(['SKILL.md', 'refs/guide.md', 'scripts/check.sh']);
-    expect(skillFile(plan!, 'SKILL.md')).toBe(
+    const first = renderFlow(paths, loadFlow(paths, 'sample'), { mainBranch: 'trunk' });
+    const plan = first.skills[0]!;
+    expect(plan.files.map((f) => f.path)).toEqual(['SKILL.md', 'refs/guide.md', 'scripts/check.sh']);
+    expect(skillFile(plan, 'SKILL.md')).toBe(
       '---\nname: plan\ndescription: Plan the work\nlicense: MIT\nmetadata:\n  dfl-flow: sample\n  dfl-step: plan\n---\n\n# Plan on trunk\n',
     );
-    expect(skillFile(plan!, 'refs/guide.md')).toBe(`Guide for ${path.basename(paths.root).toUpperCase()} (sample)`);
-    expect(fs.readFileSync(path.join(dir, 'refs', 'guide.md'), 'utf8')).toBe(skillFile(plan!, 'refs/guide.md'));
-    expect(plan!.files.find((f) => f.path === 'scripts/check.sh')?.sourcePath).toBe(path.join(dir, 'scripts', 'check.sh'));
-    expect(fs.existsSync(path.join(dir, 'old'))).toBe(false);
+    expect(first.rendered).toEqual([
+      '.df/sample/steps/build/SKILL.md',
+      '.df/sample/steps/plan/SKILL.md',
+      '.df/sample/steps/plan/refs/guide.md',
+      '.df/sample/steps/review/SKILL.md',
+    ]);
+    expect(fs.readFileSync(path.join(dir, 'refs', 'guide.md'), 'utf8')).toBe(`Guide for ${path.basename(paths.root).toUpperCase()} (sample)`);
+    // A .md file dfl never rendered is kept (and reported), not deleted.
+    expect(first.kept).toEqual(['.df/sample/steps/plan/old/stale.md']);
+    expect(first.removed).toEqual([]);
+    expect(fs.readFileSync(path.join(dir, 'old', 'stale.md'), 'utf8')).toBe('hand-written, never rendered');
 
-    // Removing a template removes its rendered output on the next render.
+    // Removing a template removes its rendered output on the next render (dfl rendered it before).
     fs.rmSync(path.join(dir, 'refs', 'guide.md.hbs'));
-    const [again] = renderFlowSkills(paths, loadFlow(paths, 'sample'), { mainBranch: 'trunk' });
-    expect(again!.files.map((f) => f.path)).toEqual(['SKILL.md', 'scripts/check.sh']);
+    const again = renderFlow(paths, loadFlow(paths, 'sample'), { mainBranch: 'trunk' }, { previouslyRendered: first.rendered });
+    expect(again.skills[0]!.files.map((f) => f.path)).toEqual(['SKILL.md', 'scripts/check.sh']);
+    expect(again.removed).toEqual(['.df/sample/steps/plan/refs/guide.md']);
     expect(fs.existsSync(path.join(dir, 'refs'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'old', 'stale.md'))).toBe(true);
+  });
+
+  it('includes extra rendered .md files in the skill', () => {
+    const paths = sampleProject();
+    write(path.join(paths.stepDir('sample', 'plan'), 'refs', 'guide.md.hbs'), 'Guide ({{flow.name}})');
+    const [plan] = renderFlowSkills(paths, loadFlow(paths, 'sample'), {});
+    expect(plan!.files.map((f) => f.path)).toEqual(['SKILL.md', 'refs/guide.md']);
+    expect(skillFile(plan!, 'refs/guide.md')).toBe('Guide (sample)');
+  });
+
+  it('keeps a hand-written reference .md file by default (manifest without a record)', () => {
+    const paths = sampleProject();
+    const file = path.join(paths.stepDir('sample', 'plan'), 'references', 'checklist.md');
+    write(file, '# checklist');
+    const result = renderFlow(paths, loadFlow(paths, 'sample'), {});
+    expect(fs.readFileSync(file, 'utf8')).toBe('# checklist');
+    expect(result.kept).toEqual(['.df/sample/steps/plan/references/checklist.md']);
+    expect(result.skills[0]!.files.map((f) => f.path)).toEqual(['SKILL.md']);
+  });
+
+  it('reads the previous render record from .df/installed.json', () => {
+    const paths = sampleProject();
+    write(
+      paths.manifestFile,
+      JSON.stringify({ version: 1, rendered: ['.df/sample/steps/plan/old.md', '../outside.md', '.df/sample/steps/x/../../y.md', 42] }),
+    );
+    expect([...readRenderedOutputs(paths)]).toEqual(['.df/sample/steps/plan/old.md']);
+    write(path.join(paths.stepDir('sample', 'plan'), 'old.md'), 'rendered earlier');
+    const result = renderFlow(paths, loadFlow(paths, 'sample'), {});
+    expect(result.removed).toEqual(['.df/sample/steps/plan/old.md']);
+    expect(isRenderedOutputPath('.df/sample/steps/plan/SKILL.md')).toBe(true);
+    expect(isRenderedOutputPath('.df/sample/steps/plan/SKILL.md.hbs')).toBe(false);
+    expect(isRenderedOutputPath('.df/Bad/steps/plan/SKILL.md')).toBe(false);
+    expect(isRenderedOutputPath('.df/sample/partials/x.md')).toBe(false);
+  });
+
+  it('removes orphan step dirs that only hold dfl-rendered files (C2)', () => {
+    const paths = sampleProject();
+    const first = renderFlow(paths, loadFlow(paths, 'sample'), {});
+    // Upstream rename of "build": git moved the template, the ignored rendered SKILL.md stayed.
+    const def = JSON.parse(fs.readFileSync(paths.flowFile('sample'), 'utf8')) as Record<string, any>;
+    const states = def['machine'].states;
+    states['make'] = { ...states['build'] };
+    delete states['build'];
+    states['plan'].on = { NEXT: 'make' };
+    states['review'].on = { NEXT: 'done', CHANGES_REQUESTED: 'make' };
+    fs.writeFileSync(paths.flowFile('sample'), JSON.stringify(def));
+    fs.mkdirSync(paths.stepDir('sample', 'make'));
+    fs.renameSync(path.join(paths.stepDir('sample', 'build'), 'SKILL.md.hbs'), path.join(paths.stepDir('sample', 'make'), 'SKILL.md.hbs'));
+    // An orphan that also holds a hand-written file is kept.
+    write(path.join(paths.stepsDir('sample'), 'mine', 'notes.md'), 'mine');
+
+    const result = renderFlow(paths, loadFlow(paths, 'sample'), {}, { previouslyRendered: first.rendered });
+    expect(result.removed).toEqual(['.df/sample/steps/build']);
+    expect(fs.existsSync(paths.stepDir('sample', 'build'))).toBe(false);
+    expect(fs.readFileSync(path.join(paths.stepsDir('sample'), 'mine', 'notes.md'), 'utf8')).toBe('mine');
+  });
+
+  it.skipIf(process.platform === 'win32')('never deletes stale output through a symlinked step dir', () => {
+    const paths = sampleProject();
+    const outside = makeTempDir();
+    write(path.join(outside, 'SKILL.md.hbs'), '# Outside');
+    write(path.join(outside, 'victim.md'), 'keep me');
+    fs.rmSync(paths.stepDir('sample', 'build'), { recursive: true });
+    fs.symlinkSync(outside, paths.stepDir('sample', 'build'));
+    expect(firstSymlinkBetween(paths.root, path.join(paths.stepDir('sample', 'build'), 'x'))).toBe(paths.stepDir('sample', 'build'));
+    const result = renderFlow(paths, loadFlow(paths, 'sample'), {}, { previouslyRendered: ['.df/sample/steps/build/victim.md'] });
+    expect(result.removed).toEqual([]);
+    expect(fs.readFileSync(path.join(outside, 'victim.md'), 'utf8')).toBe('keep me');
   });
 
   it('uses the default template when SKILL.md.hbs is missing and flow partial overrides', () => {

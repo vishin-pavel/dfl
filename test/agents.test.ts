@@ -3,7 +3,16 @@ import path from 'node:path';
 import { parse as parseJsonc } from 'jsonc-parser';
 import { parse as parseToml } from 'smol-toml';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AGENTS, detectAgents, getAgent, mcpConfigFile, opencodeConfigFile, parseAgentList } from '../src/agents/registry.js';
+import {
+  AGENTS,
+  detectAgents,
+  getAgent,
+  isKnownMcpFile,
+  mcpConfigFile,
+  mcpTargetForFile,
+  opencodeConfigFile,
+  parseAgentList,
+} from '../src/agents/registry.js';
 import { DflError } from '../src/core/errors.js';
 import { AGENT_IDS, type AgentId, type McpServerSpec } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir } from './helpers/project.js';
@@ -168,6 +177,56 @@ describe('agent MCP targets', () => {
     // Everything dfl created is gone, including emptied config dirs.
     expect(fs.readdirSync(root)).toEqual([]);
     expect(target.remove(root, 'dfl')).toBe(false);
+  });
+
+  it.each(AGENT_IDS.map((id) => [id]))('%s: plan / read / inspect never write', (id) => {
+    const root = makeTempDir();
+    const target = getAgent(id).mcp!;
+    expect(target.inspect(root)).toEqual({ file: expected[id].file, exists: false, container: target.format === 'toml' });
+    expect(target.plan(root, spec)).toBe('added');
+    expect(target.read(root, 'dfl')).toBeUndefined();
+    expect(fs.readdirSync(root)).toEqual([]);
+    target.upsert(root, spec);
+    expect(target.inspect(root)).toEqual({ file: expected[id].file, exists: true, container: true });
+    expect(target.plan(root, spec)).toBe('unchanged');
+    expect(target.read(root, 'dfl')).toEqual({ command: 'dfl', args: ['mcp'] });
+    const other: McpServerSpec = { ...spec, command: 'npx', args: ['--no-install', 'dfl', 'mcp'] };
+    expect(target.plan(root, other)).toBe('updated');
+    expect(target.read(root, 'dfl')).toEqual({ command: 'dfl', args: ['mcp'] });
+  });
+
+  it('keeps a pre-existing file and container when asked to (F22)', () => {
+    const root = makeTempDir();
+    touch(root, '.kiro/settings/mcp.json', '{"mcpServers": {}}\n');
+    const kiro = getAgent('kiro').mcp!;
+    expect(kiro.inspect(root)).toMatchObject({ exists: true, container: true });
+    kiro.upsert(root, spec);
+    expect(kiro.remove(root, 'dfl', { deleteEmptyFile: false, dropEmptyContainer: false })).toBe(true);
+    expect(fs.readFileSync(path.join(root, '.kiro', 'settings', 'mcp.json'), 'utf8')).toBe('{"mcpServers": {}}\n');
+  });
+
+  it('maps manifest files to their targets and removes OpenCode entries only from the named file', () => {
+    expect(mcpTargetForFile('.mcp.json')).toBe(getAgent('claude').mcp);
+    expect(mcpTargetForFile('.codex/config.toml')).toBe(getAgent('codex').mcp);
+    expect(mcpTargetForFile('opencode.jsonc')).toBe(getAgent('opencode').mcp);
+    expect(mcpTargetForFile('nothing.json')).toBeUndefined();
+    expect(isKnownMcpFile('.kiro/settings/mcp.json')).toBe(true);
+    expect(isKnownMcpFile('../.mcp.json')).toBe(false);
+
+    const root = makeTempDir();
+    const both = '{ "mcp": { "dfl": { "type": "local", "command": ["dfl", "mcp"] } } }\n';
+    touch(root, 'opencode.json', both);
+    touch(root, 'opencode.jsonc', both);
+    const opencode = getAgent('opencode').mcp!;
+    expect(opencode.read(root, 'dfl', 'opencode.jsonc')).toEqual({ command: 'dfl', args: ['mcp'] });
+    expect(opencode.remove(root, 'dfl', { file: 'opencode.jsonc' })).toBe(true);
+    expect(fs.existsSync(path.join(root, 'opencode.jsonc'))).toBe(false);
+    expect(readConfig(root, 'opencode.json')['mcp'].dfl).toBeDefined();
+  });
+
+  it('flags Antigravity as starting MCP servers outside the workspace', () => {
+    expect(AGENTS.filter((agent) => agent.mcpCwdOutsideWorkspace).map((agent) => agent.id)).toEqual(['antigravity']);
+    expect(getAgent('antigravity').mcpNote).toMatch(/global install/);
   });
 
   it('writes env in each tool’s own shape', () => {

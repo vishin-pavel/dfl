@@ -72,6 +72,11 @@ export interface LocalConfig {
   agents?: AgentId[] | undefined;
   /** Personal template variable values. */
   vars: Record<string, unknown>;
+  /**
+   * Whether this developer registers the dfl MCP server in agent MCP configs (`dfl install --no-mcp`
+   * stores false). Absent means true.
+   */
+  mcp?: boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,14 +320,43 @@ export interface McpServerSpec {
   env?: Record<string, string> | undefined;
 }
 
+/** One MCP config entry dfl registered (`.df/installed.json` → `mcp`). */
+export interface McpManifestEntry {
+  agents: AgentId[];
+  /** Project-relative posix path of the agent MCP config file. */
+  file: string;
+  /** Always `dfl` (other names are ignored when the manifest is read). */
+  server: string;
+  /** dfl created the file (it did not exist before); only then may uninstall delete it once empty. */
+  createdFile?: boolean | undefined;
+  /** dfl created the servers container (e.g. `mcpServers`); only then may uninstall drop it once empty. */
+  createdContainer?: boolean | undefined;
+}
+
+/** One skill directory dfl wrote (`.df/installed.json` → `skills`). */
+export interface SkillManifestEntry {
+  agents: AgentId[];
+  name: string;
+  /** Project-relative posix dir: `<adapter skillsDir>/<skill name>`. */
+  dir: string;
+  /** Files dfl wrote into `dir` (relative posix paths; the `.gitignore` marker is implied). */
+  files: string[];
+}
+
 export interface Manifest {
   version: 1;
   flow?: string | undefined;
   agents: AgentId[];
   /** Skill directories written by dfl (project-relative, posix). */
-  skills: Array<{ agents: AgentId[]; name: string; dir: string; files: string[] }>;
+  skills: SkillManifestEntry[];
   /** MCP config entries written by dfl. */
-  mcp: Array<{ agents: AgentId[]; file: string; server: string }>;
+  mcp: McpManifestEntry[];
+  /** Hash of everything the installed skills were rendered from (see `computeSyncFingerprint`). */
+  fingerprint?: string | undefined;
+  /** dfl version that wrote the manifest. */
+  dflVersion?: string | undefined;
+  /** Project-relative posix paths of the `.md` files dfl rendered under `.df/<flow>/steps/`. */
+  rendered?: string[] | undefined;
 }
 
 export interface SyncReport {
@@ -332,8 +366,12 @@ export interface SyncReport {
   skills: Array<{ name: string; dir: string; agents: AgentId[]; kind: 'step' | 'builtin' }>;
   /** Project-relative dirs removed because they are no longer wanted. */
   removed: string[];
-  mcp: Array<{ file: string; agents: AgentId[]; changed: boolean }>;
-  /** Agents with no project-level MCP support (manual instructions needed). */
+  /**
+   * MCP config files dfl wrote to (or would write to in a dry run). `status` tells a new entry
+   * (`added`) from a rewritten one (`updated`); `changed` is `status !== 'unchanged'`.
+   */
+  mcp: Array<{ file: string; agents: AgentId[]; changed: boolean; status?: 'added' | 'updated' | 'unchanged' | undefined }>;
+  /** Manual MCP steps: agents without a project-level MCP config, or with extra caveats. */
   mcpManual: Array<{ agent: AgentId; instructions: string }>;
   warnings: string[];
 }

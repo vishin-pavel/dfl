@@ -4,7 +4,9 @@ description: Add a new step to the project's active dfl development flow. Interv
 ---
 {{!--
   Built-in dfl skill. This file is itself a Handlebars template: every literal double-brace
-  example meant for the agent is escaped with a backslash so it survives rendering.
+  example meant for the agent is escaped with a backslash so it survives rendering. To show the
+  agent a backslash followed by literal braces, write a double backslash, an empty comment and
+  an escaped mustache: the double backslash renders one backslash and the comment renders nothing.
 --}}
 # Add a step to the development flow
 
@@ -53,6 +55,9 @@ Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with 
      step's `NEXT` goes where the old one went) or before which step.
    - **Extra events**: for example `FAILED` back to an implementation step, `CHANGES_REQUESTED`,
      `BACK`. Events are UPPER_SNAKE_CASE; targets must be existing step ids or the final state.
+     For every event other than `NEXT`, also agree on a one-line condition, the transition's
+     description (for example "Tests or acceptance criteria failed"): the flow context of the
+     step shows it to the agent as the reason to fire the event.
    - **Inputs and outputs**: what the step reads (files from earlier steps, the text the user
      typed after the command) and what it produces (files, commits, reports); how "done" is
      decided.
@@ -71,28 +76,41 @@ Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with 
      the helper `\{{command skillName}}` for another step's slash command.
    - The last line must be exactly `\{{> flow-context}}`. This partial appends the flow position,
      the next steps and the instructions for completing the step; do not write your own.
+   - Literal double braces that are not dfl expressions, such as GitHub Actions
+     `$\{{ secrets.NPM_TOKEN }}` or Vue, Jinja, Helm and Go templates (`\{{ message }}`), must be
+     escaped with a backslash: write `$\\{{!}}\{{ secrets.NPM_TOKEN }}` and `\\{{!}}\{{ message }}`.
+     Unescaped, they render as empty text or break the template.
    - Never write the placeholders that agents expand when a skill runs as a command: a dollar
      sign followed by ARGUMENTS or by a digit, a line that begins with an exclamation mark
      followed by a backtick, or an at-sign directly followed by a word. Refer to arguments as
      "the text the user typed after the command".
    - Aim for 60 to 140 lines of instructions an agent can follow without guessing.
-5. **Show the draft to the user**: id, title, description, position, the transitions before and
-   after the change, new variables, and the full template. Iterate until they approve it.
-6. **Create the step** with `add_step`: `id`, `title`, `description`, `after` or `before`,
+5. **Check the neighbours.** Call `get_step` on the step before the insertion point (its `NEXT`,
+   or the `event` you will pass, then leads to the new step) and on the step after it. Their
+   templates may name the old neighbour or event, for example "fire `NEXT` to move to review"
+   when `NEXT` will lead to the new step. Draft minimal edits as a diff (prefix removed lines
+   with `-` and added lines with `+`).
+6. **Show the draft to the user**: id, title, description, position, the transitions before and
+   after the change (with their conditions), new variables, the full template and the edits to
+   the neighbouring templates. Iterate until they approve it.
+7. **Create the step** with `add_step`: `id`, `title`, `description`, `after` or `before`,
    optionally `event` (the event used to splice the step in, default `NEXT`), `on` for extra
-   transitions (for example `{ "FAILED": "implement-feature" }`) and `template`. dfl writes the
-   files, re-renders and re-installs the skills, and returns the step, a sync summary and
-   warnings.
-7. **Declare new variables**, if any: `add_step` cannot do it. Add them to the `vars` object of
+   transitions and `template`. In `on`, map an event to a target step, or to a target with its
+   condition: `{ "FAILED": { "target": "implement-feature", "description": "QA checklist failed" } }`.
+   dfl writes the files, re-renders and re-installs the skills, and returns the step (with its
+   `rendered` skill text), a sync summary and warnings. Read the rendered text and check that
+   commands and code samples survived rendering, in particular literal braces.
+8. **Update the neighbouring templates** from step 5 with `update_step` (`template`), as approved.
+9. **Declare new variables**, if any: `add_step` cannot do it. Add them to the `vars` object of
    `.df/<flow>/flow.json` (`description`, `default`, `scope`: `project` or `personal`,
    `required`), set values with `{{dfl.cli}} vars set <name> <value>` (add `--personal` for
    personal ones), then call `sync`.
-8. **Validate** with `validate_flow`. Fix every error (usually with `update_step`) and explain the
-   warnings to the user, for example a step that is unreachable from the initial step.
-9. **Report**: the new slash command (from the `skillName` in the result), where the step sits
-   (previous → new → next), and the files to commit (`git add .df/<flow>`) so the team gets the
-   step; teammates run `{{dfl.cli}} flow-update` after pulling. Some agents only discover new
-   skills after a restart or a skills reload; tell the user if the command does not show up.
+10. **Validate** with `validate_flow`. Fix every error (usually with `update_step`) and explain
+    the warnings to the user, for example a step that is unreachable from the initial step.
+11. **Report**: the new slash command (from the `skillName` in the result), where the step sits
+    (previous → new → next), and the files to commit (`git add .df/<flow>`) so the team gets
+    the step; teammates run `{{dfl.cli}} flow-update` after pulling. Some agents only discover
+    new skills after a restart or a skills reload; tell the user if the command does not show up.
 
 Do not fire `transition`, `complete_step` or `goto_step` here: adding a step does not change
 where the user currently is in the flow.
@@ -102,9 +120,10 @@ where the user currently is in the flow.
 | MCP tool | CLI |
 |----------|-----|
 | `get_flow` | `{{dfl.cli}} step list` and read `.df/<flow>/flow.json` |
-| `add_step` | `{{dfl.cli}} step add <id> --after <step> --title "<title>" --description "<description>"` (or `--before <step>`, `--event <EVENT>`) |
-| `on` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` |
-| `template` | write `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` |
+| `add_step` | write the template to a file outside `.df`, then `{{dfl.cli}} step add <id> --after <step> --title "<title>" --description "<description>" --template-file <file>` (or `--before <step>`, `--event <EVENT>`) |
+| `on` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target> --description "<condition>"` |
+| `get_step` | read `.df/<flow>/flow.json` and `.df/<flow>/steps/<id>/SKILL.md.hbs`; the rendered skill is `SKILL.md` next to it |
+| `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` |
 | `validate_flow` | `{{dfl.cli}} flow validate` |
 | `sync` | `{{dfl.cli}} flow-update` |
 

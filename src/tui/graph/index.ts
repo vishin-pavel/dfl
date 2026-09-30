@@ -3,12 +3,14 @@
  * drawn on a canvas with per-cell line directions (ported from the research prototype).
  *
  * Zoom levels: 0 one-line `[Title…]` nodes, 1 boxed titles, 2 cards with a wrapped description
- * (max 3 lines), 3 cards with the full description and the node `detail` (the skill command).
+ * (max 3 lines), 3 cards with the full description and the node `detail` (how the selected agents
+ * invoke the step's skill, e.g. `/plan` or `$plan`).
  * Final nodes are drawn small at every zoom: `(Done)` at zoom 0, a double-bordered box above.
  * The highlighted node gets a heavy border.
  */
 import { NEXT_EVENT } from '../../core/flow.js';
-import type { FlowModel } from '../../core/types.js';
+import type { AgentId, FlowModel } from '../../core/types.js';
+import { skillInvocations } from '../../ui/format.js';
 import { renderGraph } from './render.js';
 import { fitsIn } from './viewport.js';
 import type { Direction, FlowGraph, RenderGraphOptions, RenderedCanvas, ZoomLevel } from './types.js';
@@ -39,16 +41,27 @@ export interface FlowToGraphOptions {
    * unlabelled edge reads as `NEXT` and only the other events (loops, branches) carry labels.
    */
   labelNext?: boolean | undefined;
+  /**
+   * Agents whose invocation syntax the zoom-3 detail line uses (`/plan` for most, `$plan` for Codex;
+   * both when the agents disagree). Default: none, which shows `/plan`.
+   */
+  agents?: readonly AgentId[] | undefined;
 }
 
-/** Nodes in flow order (non-final steps carry their slash command as `detail`), edges per transition. */
+/**
+ * Nodes in flow order (`model.steps`: declaration order, initial first, finals last), edges per
+ * transition in declaration order; non-final steps carry their skill invocation as `detail`.
+ * The layout breaks cycles by the node order (an edge to an earlier step is drawn as a loop), so a
+ * skip or early exit stays a forward edge.
+ */
 export function flowToGraph(model: FlowModel, options: FlowToGraphOptions = {}): FlowGraph {
+  const agents = options.agents ?? [];
   return {
     nodes: model.steps.map((step) => ({
       id: step.id,
       title: step.title,
       description: step.description || undefined,
-      detail: step.final ? undefined : `/${step.skillName}`,
+      detail: step.final ? undefined : skillInvocations(step.skillName, agents).join(' '),
       final: step.final,
     })),
     edges: model.transitions

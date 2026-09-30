@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FlowDefinition, ValidationIssue } from '../src/core/types.js';
-import { assertFlowValid, validateDefinition, validateFlow } from '../src/core/validate.js';
+import { assertFlowValid, diffDefinitionErrors, validateDefinition, validateFlow } from '../src/core/validate.js';
 import { cleanupTempDirs, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
 afterEach(cleanupTempDirs);
@@ -135,6 +135,35 @@ describe('validateDefinition', () => {
     expect(errors(validateDefinition(badPrefix))[0]).toContain('Invalid skill name "DF_plan"');
   });
 
+  it('rejects a final initial state unless the flow has only final states', () => {
+    const def = withStates((_, d) => {
+      d.machine.initial = 'done';
+    });
+    expect(errors(validateDefinition(def))).toEqual([
+      'Initial step "done" is a final state, so the flow would start complete; make a step the initial one.',
+    ]);
+    const empty = sampleFlowDefinition();
+    empty.machine = { id: 'sample', initial: 'done', states: { done: { type: 'final' } } };
+    expect(errors(validateDefinition(empty))).toEqual([]);
+  });
+
+  it('rejects unknown keys in transition objects', () => {
+    const def = withStates((states) => {
+      states['plan']!.on = {
+        NEXT: { 0: { target: 'build', guard: 'g' }, target: 'build' } as unknown as string,
+        SKIP: { target: 'review', description: 'Skip', meta: { note: 'x' } } as unknown as string,
+      };
+    });
+    const issues = validateDefinition(def);
+    expect(issues.filter((i) => i.level === 'error')).toEqual([
+      {
+        level: 'error',
+        message: 'Transition "NEXT" of step "plan" has an unsupported key "0" (only "target" and "description" are supported).',
+        step: 'plan',
+      },
+    ]);
+  });
+
   it('warns about unreachable states, dead ends and missing final states', () => {
     const def = withStates((states) => {
       states['orphan'] = { on: { NEXT: 'done' } };
@@ -221,5 +250,94 @@ describe('validateFlow', () => {
     fs.mkdirSync(paths.flowDir('copy'));
     fs.writeFileSync(paths.flowFile('copy'), JSON.stringify(def));
     expect(errors(validateFlow(paths, 'copy'))).toContain('Flow name "sample" does not match its directory name "copy".');
+  });
+});
+
+describe('diffDefinitionErrors', () => {
+  it('separates new errors from errors the flow already had', () => {
+    const before = withStates((states, d) => {
+      d.machine.initial = 'ghost';
+      states['plan']!.on = { NEXT: 'gone' };
+    });
+    const after = structuredClone(before);
+    after.machine.states['extra'] = { on: { NEXT: 'nowhere' } };
+    const { added, remaining } = diffDefinitionErrors(before, after, 'sample');
+    expect(added.map((i) => i.message)).toEqual(['Transition "NEXT" of step "extra" targets "nowhere", which does not exist.']);
+    // The initial-step message lists the states (it changed), but it is the same error.
+    expect(remaining.map((i) => i.message)).toEqual([
+      expect.stringContaining('Initial step "ghost" does not exist (states: plan, build, review, done, extra)'),
+      'Transition "NEXT" of step "plan" targets "gone", which does not exist.',
+    ]);
+  });
+
+  it('follows a rename', () => {
+    const before = withStates((states) => {
+      states['plan']!.on = { NEXT: 'gone' };
+    });
+    const after = structuredClone(before);
+    after.machine.states = { 'plan-work': after.machine.states['plan']!, ...after.machine.states };
+    delete after.machine.states['plan'];
+    after.machine.initial = 'plan-work';
+    after.machine.states['build']!.on = { NEXT: 'review', BACK: 'plan-work' };
+    expect(diffDefinitionErrors(before, after, 'sample').added).toHaveLength(1);
+    const { added, remaining } = diffDefinitionErrors(before, after, 'sample', { from: 'plan', to: 'plan-work' });
+    expect(added).toEqual([]);
+    expect(remaining).toHaveLength(1);
+  });
+});
+
+describe('validateFlow templates', () => {
+  function project(): { paths: ReturnType<typeof makeTempProject>; steps: string } {
+    const paths = makeTempProject();
+    writeSampleFlow(paths, cleanDefinition());
+    return { paths, steps: paths.stepsDir('sample') };
+  }
+
+  it('reports templates that do not parse, with file and line', () => {
+    const { paths, steps } = project();
+    const skill = path.join(steps, 'build', 'SKILL.md.hbs');
+    fs.writeFileSync(skill, '# Build\n\nThe chart uses `{{ .Values.image.tag }}`.\n');
+    fs.mkdirSync(path.join(steps, 'review', 'ref'));
+    const extra = path.join(steps, 'review', 'ref', 'x.md.hbs');
+    fs.writeFileSync(extra, 'one\ntwo\n{{#if a}}x{{/each}}\n');
+    const issues = validateFlow(paths, 'sample').filter((i) => i.level === 'error');
+    expect(issues).toEqual([
+      expect.objectContaining({ step: 'build', file: skill, message: expect.stringMatching(/^steps\/build\/SKILL\.md\.hbs, line 3: Handlebars syntax error/) }),
+      expect.objectContaining({ step: 'review', file: extra, message: expect.stringContaining("steps/review/ref/x.md.hbs, line 3: Handlebars syntax error: if doesn't match each") }),
+    ]);
+    expect(() => assertFlowValid(paths, 'sample')).toThrow(/steps\/build\/SKILL\.md\.hbs, line 3/);
+  });
+
+  it('reports unknown partials and broken flow partials', () => {
+    const { paths, steps } = project();
+    fs.writeFileSync(path.join(steps, 'plan', 'SKILL.md.hbs'), '# Plan\n{{> no-such-partial}}\n{{> flow-context}}\n');
+    fs.mkdirSync(paths.partialsDir('sample'));
+    fs.writeFileSync(path.join(paths.partialsDir('sample'), 'broken.hbs'), '{{#if}}');
+    fs.writeFileSync(path.join(paths.partialsDir('sample'), 'fine.hbs'), 'fine {{> flow-context}}');
+    // Flow partials, inline partials, partial blocks (with fallback) and @partial-block are fine.
+    fs.writeFileSync(
+      path.join(steps, 'review', 'SKILL.md.hbs'),
+      '{{> fine}}\n{{#*inline "local"}}x{{/inline}}{{> local}}\n{{#> maybe}}fallback{{/maybe}}\n',
+    );
+    const messages = errors(validateFlow(paths, 'sample'));
+    expect(messages).toEqual([
+      expect.stringContaining('steps/plan/SKILL.md.hbs uses the partial {{> no-such-partial}}, which does not exist'),
+      expect.stringMatching(/^partials\/broken\.hbs, line 1: Handlebars syntax error/),
+    ]);
+  });
+
+  it('warns about .hbs files that are neither rendered nor copied', () => {
+    const { paths, steps } = project();
+    fs.mkdirSync(path.join(steps, 'build', 'scripts'));
+    fs.writeFileSync(path.join(steps, 'build', 'scripts', 'check.sh.hbs'), '#!/bin/sh\necho {{vars.testCommand}}\n');
+    fs.writeFileSync(path.join(steps, 'build', 'scripts', 'data.json'), '{}');
+    const issues = validateFlow(paths, 'sample');
+    expect(errors(issues)).toEqual([]);
+    expect(issues.filter((i) => i.level === 'warning')).toEqual([
+      expect.objectContaining({
+        step: 'build',
+        message: expect.stringContaining('steps/build/scripts/check.sh.hbs is ignored: only *.md.hbs templates are rendered'),
+      }),
+    ]);
   });
 });

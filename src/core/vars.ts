@@ -1,6 +1,7 @@
 /**
  * Template variables (OWNER: render agent).
  * Precedence (low → high): def.default < config.json vars < local.json vars < env `DFL_VAR_<UPPER_SNAKE_NAME>`.
+ * Templates see only allow-listed environment variables: `DFL_ENV_<NAME>` as `env.<NAME>`.
  */
 import { loadLocalConfig, loadProjectConfig, saveLocalConfig, saveProjectConfig } from './config.js';
 import { DflError } from './errors.js';
@@ -15,6 +16,9 @@ export interface ResolvedVars {
 
 /** Prefix of environment variables that override template variables. */
 export const ENV_VAR_PREFIX = 'DFL_VAR_';
+
+/** Prefix of environment variables exposed to templates as `env.<NAME>` (the rest of the environment is not). */
+export const TEMPLATE_ENV_PREFIX = 'DFL_ENV_';
 
 /** Variable names usable as `{{vars.<name>}}` in templates. */
 const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
@@ -41,6 +45,21 @@ export function resolveVars(paths: ProjectPaths, def: FlowDefinition | undefined
     .filter(([name, varDef]) => varDef.required === true && isEmptyValue(values[name]))
     .map(([name, varDef]) => ({ name, def: varDef }));
   return { values, missing };
+}
+
+/**
+ * The `env` object templates see: every `DFL_ENV_<NAME>` variable as `<NAME>` (non-empty values only).
+ * The rest of the process environment (tokens, API keys, …) is never exposed, so a template cannot
+ * copy it into a rendered skill or an MCP tool result.
+ */
+export function templateEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(env).sort()) {
+    if (!key.startsWith(TEMPLATE_ENV_PREFIX) || key.length === TEMPLATE_ENV_PREFIX.length) continue;
+    const value = env[key];
+    if (value !== undefined && value !== '') out[key.slice(TEMPLATE_ENV_PREFIX.length)] = value;
+  }
+  return out;
 }
 
 /** Scope of a declared var (`project` when undeclared or unspecified). */

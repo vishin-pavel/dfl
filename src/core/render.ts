@@ -5,11 +5,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Handlebars from 'handlebars';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { dflLauncher } from '../agents/mcp-config.js';
 import { DflError, errorMessage } from './errors.js';
 import { SKILL_TEMPLATE_FILE, defaultStepTemplate, skillNameFor, skillSteps } from './flow.js';
-import { exists, listDirs, readText, relPosix, removeEmptyDirsUpTo, removePath, walkFiles, writeText } from './fsx.js';
-import { titleCase, toId } from './ids.js';
-import { builtinPartialsDir, builtinSkillsDir, packageRoot, packageVersion } from './paths.js';
+import { exists, listDirs, readJsonIfExists, readText, relPosix, removeEmptyDirsUpTo, removePath, walkFiles, writeText } from './fsx.js';
+import { isValidId, titleCase, toId } from './ids.js';
+import { DF_DIR, builtinPartialsDir, builtinSkillsDir, packageVersion } from './paths.js';
 import type {
   FlowModel,
   FlowTransition,
@@ -21,6 +22,7 @@ import type {
   StepRef,
   TemplateContext,
 } from './types.js';
+import { templateEnv } from './vars.js';
 
 export type HandlebarsEnv = typeof Handlebars;
 
@@ -51,6 +53,13 @@ export interface StepRefContext extends StepRef {
 export function createHandlebars(options?: { partialsDirs?: string[] | undefined }): HandlebarsEnv {
   const hb = Handlebars.create();
   registerHelpers(hb);
+  // The built-in `log` helper prints through console.info, i.e. stdout, which carries the MCP
+  // server's JSON-RPC stream. dfl's `log` writes to stderr instead (and renders nothing).
+  hb.registerHelper('log', (...args: HelperArgs) => {
+    const { values } = helperArgs(args);
+    process.stderr.write(`${values.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')}\n`);
+    return '';
+  });
   for (const dir of [builtinPartialsDir(), ...(options?.partialsDirs ?? [])]) registerPartialsFrom(hb, dir);
   return hb;
 }
@@ -150,20 +159,12 @@ function registerHelpers(hb: HandlebarsEnv): void {
 // ---------------------------------------------------------------------------
 
 /**
- * How the CLI is invoked in instructions: `npx dfl` when the running package is installed inside
- * `<root>/node_modules` (a project-local dependency), otherwise `dfl`.
+ * How the CLI is invoked in instructions (`dfl.cli`): `npx --no-install dfl` when `<root>/package.json`
+ * depends on dfl, otherwise `dfl` (see dflLauncher). The second parameter is ignored (kept for
+ * backwards compatibility): the command never depends on which dfl binary runs.
  */
-export function dflCliCommand(root: string, pkgRoot: string = packageRoot()): string {
-  const rel = path.relative(path.join(realpath(root), 'node_modules'), realpath(pkgRoot));
-  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? 'npx dfl' : 'dfl';
-}
-
-function realpath(p: string): string {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return path.resolve(p);
-  }
+export function dflCliCommand(root: string, _pkgRoot?: string): string {
+  return dflLauncher(root);
 }
 
 /** Builds the template context for a flow (and optionally one step of it). */
@@ -216,8 +217,9 @@ export function buildTemplateContext(
       : { name: '', title: '', description: '', skillPrefix: '', initial: '', steps: [], stepCount: 0 },
     step: step ? toStepContext(step) : undefined,
     vars,
-    env: { ...process.env },
-    dfl: { version: packageVersion(), mcpServer: 'dfl', cli: dflCliCommand(paths.root) },
+    // Only DFL_ENV_<NAME> variables: the process environment may hold secrets.
+    env: templateEnv(),
+    dfl: { version: packageVersion(), mcpServer: 'dfl', cli: dflLauncher(paths) },
   };
 }
 
@@ -367,15 +369,142 @@ function isIgnoredFile(rel: string): boolean {
   return IGNORED_FILES.has(rel.slice(rel.lastIndexOf('/') + 1));
 }
 
+// ---------------------------------------------------------------------------
+// Rendered-output bookkeeping (manifest `rendered`) and symlink checks
+// ---------------------------------------------------------------------------
+
+/** True for a manifest `rendered` entry: `.df/<flow>/steps/<…>.md`, relative, without `.`/`..` segments. */
+export function isRenderedOutputPath(rel: string): boolean {
+  if (typeof rel !== 'string' || rel.includes('\\') || !rel.endsWith('.md')) return false;
+  const parts = rel.split('/');
+  if (parts.length < 5 || parts[0] !== DF_DIR || parts[2] !== 'steps' || !isValidId(parts[1]!)) return false;
+  return parts.every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
+/**
+ * The `.md` files dfl rendered earlier (manifest `rendered` in `.df/installed.json`), project-relative
+ * posix paths. Invalid entries and unreadable manifests yield nothing: only files listed here are
+ * ever deleted as stale rendered output.
+ */
+export function readRenderedOutputs(paths: ProjectPaths): Set<string> {
+  let data: unknown;
+  try {
+    data = readJsonIfExists(paths.manifestFile);
+  } catch {
+    return new Set();
+  }
+  const list = isPlainObject(data) && Array.isArray(data['rendered']) ? data['rendered'] : [];
+  return new Set(list.filter((rel): rel is string => typeof rel === 'string' && isRenderedOutputPath(rel)));
+}
+
+/**
+ * The first path below `base` (exclusive) down to `target` (inclusive) that is a symbolic link, as an
+ * absolute path; undefined when there is none (missing components end the walk). `target` must be
+ * inside `base`.
+ */
+export function firstSymlinkBetween(base: string, target: string): string | undefined {
+  const rel = path.relative(base, target);
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  let current = base;
+  for (const part of rel.split(path.sep)) {
+    current = path.join(current, part);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      return undefined;
+    }
+    if (stat.isSymbolicLink()) return current;
+  }
+  return undefined;
+}
+
+interface TreeEntry {
+  /** Posix path relative to the listed dir. */
+  rel: string;
+  kind: 'file' | 'dir' | 'other';
+}
+
+/** Every entry under `dir` (not following symlinks; symlinks are `other`), dirs before their children. */
+export function listTree(dir: string): TreeEntry[] {
+  const out: TreeEntry[] = [];
+  const visit = (abs: string, rel: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        out.push({ rel: childRel, kind: 'dir' });
+        visit(path.join(abs, entry.name), childRel);
+      } else {
+        out.push({ rel: childRel, kind: entry.isFile() ? 'file' : 'other' });
+      }
+    }
+  };
+  visit(dir, '');
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Flow rendering
+// ---------------------------------------------------------------------------
+
+export interface RenderFlowOptions {
+  /**
+   * Project-relative posix paths of the `.md` files dfl rendered before (manifest `rendered`); only
+   * these are deleted when their template is gone. Default: read from `.df/installed.json`.
+   */
+  previouslyRendered?: Iterable<string> | undefined;
+  /** Project-relative posix dir the flow's paths are reported under (default: `model.dir`); dry runs render a copy. */
+  flowRelDir?: string | undefined;
+}
+
+export interface RenderFlowResult {
+  skills: RenderedSkill[];
+  /** Project-relative posix paths of every `.md` file rendered into the step dirs (sorted). */
+  rendered: string[];
+  /** Project-relative posix paths deleted: stale rendered `.md` files and orphan step dirs (sorted). */
+  removed: string[];
+  /** Project-relative posix paths of `.md` files under steps/ dfl did not render: kept, not installed (sorted). */
+  kept: string[];
+  warnings: string[];
+}
+
 /**
  * Renders every `steps/<id>/**\/*.md.hbs` of the flow's non-final steps to the sibling `.md` file
- * inside `.df/` (stale rendered `.md` files without a template are deleted) and returns one
- * RenderedSkill per non-final step (rendered `.md` content + static non-`.hbs` files as sourcePath).
- * A step without SKILL.md.hbs gets a generated SKILL.md from defaultStepTemplate().
+ * inside `.df/` and returns one RenderedSkill per non-final step (rendered `.md` content + static
+ * non-`.hbs` files as sourcePath). A step without SKILL.md.hbs gets a generated SKILL.md from
+ * defaultStepTemplate().
+ *
+ * A `.md` file without a template is deleted only when dfl rendered it before (`previouslyRendered`);
+ * any other `.md` file is hand-written: it is kept (and not installed). Step dirs without a state in
+ * flow.json that hold only such dfl-rendered files (e.g. after a teammate renamed the step) are
+ * removed. Nothing is deleted through a symbolic link.
  */
-export function renderFlowSkills(paths: ProjectPaths, model: FlowModel, vars: Record<string, unknown>): RenderedSkill[] {
+export function renderFlow(
+  paths: ProjectPaths,
+  model: FlowModel,
+  vars: Record<string, unknown>,
+  options: RenderFlowOptions = {},
+): RenderFlowResult {
+  const flowRel = options.flowRelDir ?? relPosix(paths.root, model.dir);
+  const previous = new Set(options.previouslyRendered ?? readRenderedOutputs(paths));
+  const relOf = (abs: string): string => {
+    const inner = relPosix(model.dir, abs);
+    return inner === '' ? flowRel : `${flowRel}/${inner}`;
+  };
+  const base = path.dirname(model.dir);
   const hb = createHandlebars({ partialsDirs: [path.join(model.dir, 'partials')] });
   const skills: RenderedSkill[] = [];
+  const rendered: string[] = [];
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const warnings: string[] = [];
+
   for (const step of skillSteps(model)) {
     const context = buildTemplateContext(paths, model, vars, step);
     const all = walkFiles(step.dir);
@@ -409,18 +538,28 @@ export function renderFlowSkills(paths: ProjectPaths, model: FlowModel, vars: Re
         content = normalized.text;
         description = normalized.description;
       }
-      writeText(path.join(step.dir, ...out.split('/')), content);
+      const outFile = path.join(step.dir, ...out.split('/'));
+      writeText(outFile, content);
+      rendered.push(relOf(outFile));
       files.push({ path: out, content });
     }
 
     const outputs = new Set(sources.map((s) => s.out));
+    const linked = firstSymlinkBetween(base, step.dir);
     for (const rel of all) {
       if (rel.endsWith('.hbs') || outputs.has(rel)) continue;
       const abs = path.join(step.dir, ...rel.split('/'));
       if (rel.endsWith('.md')) {
-        // Every .md under steps/ is generated; this one has no template anymore.
-        removePath(abs);
-        removeEmptyDirsUpTo(path.dirname(abs), step.dir);
+        const relPath = relOf(abs);
+        if (previous.has(relPath) && linked === undefined) {
+          // dfl rendered it before and its template is gone: stale output.
+          removePath(abs);
+          removeEmptyDirsUpTo(path.dirname(abs), step.dir);
+          removed.push(relPath);
+        } else {
+          // Hand-written (or unknown): never deleted, never installed.
+          kept.push(relPath);
+        }
         continue;
       }
       if (!isIgnoredFile(rel)) files.push({ path: rel, sourcePath: abs });
@@ -428,7 +567,34 @@ export function renderFlowSkills(paths: ProjectPaths, model: FlowModel, vars: Re
 
     skills.push({ name: step.skillName, kind: 'step', stepId: step.id, description, files: sortFiles(files) });
   }
-  return skills;
+
+  // Orphan step dirs: no state in flow.json, only files dfl rendered (a step renamed or removed upstream).
+  const stepsDir = path.join(model.dir, 'steps');
+  const states = model.def.machine.states;
+  for (const name of listDirs(stepsDir)) {
+    if (Object.hasOwn(states, name)) continue;
+    const dir = path.join(stepsDir, name);
+    if (firstSymlinkBetween(base, dir) !== undefined) continue;
+    const entries = listTree(dir);
+    const onlyRendered = entries.every(
+      (entry) => entry.kind === 'dir' || (entry.kind === 'file' && previous.has(relOf(path.join(dir, ...entry.rel.split('/'))))),
+    );
+    if (!onlyRendered) continue;
+    removePath(dir);
+    removed.push(relOf(dir));
+  }
+
+  return { skills, rendered: rendered.sort(), removed: removed.sort(), kept: kept.sort(), warnings };
+}
+
+/** renderFlow(...).skills – see renderFlow. */
+export function renderFlowSkills(
+  paths: ProjectPaths,
+  model: FlowModel,
+  vars: Record<string, unknown>,
+  options: RenderFlowOptions = {},
+): RenderedSkill[] {
+  return renderFlow(paths, model, vars, options).skills;
 }
 
 /**

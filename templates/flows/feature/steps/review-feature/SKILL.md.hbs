@@ -6,17 +6,20 @@ problems, scope creep and code that will be hard to maintain.
 
 ## Inputs
 
-- The branch diff: `git diff {{vars.mainBranch}}...HEAD` and the commit list
-  `git log --oneline {{vars.mainBranch}}..HEAD`.
+- The branch diff against the remote base, after the fetch in step 1:
+  `git diff origin/{{vars.mainBranch}}...HEAD` and the commit list
+  `git log --oneline origin/{{vars.mainBranch}}..HEAD` (only this branch's commits, even when
+  the local `{{vars.mainBranch}}` is out of date).
 - The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md` (slug from the branch
-  name `{{vars.branchPrefix}}<slug>`).
+  name `{{vars.featureBranchPrefix}}<slug>`).
 - Any focus areas mentioned in the text the user typed after the command.
 
 ## Procedure
 
-1. **Refresh the base.** Run `git fetch origin {{vars.mainBranch}}` and check how far the branch
-   is behind. If `origin/{{vars.mainBranch}}` changed files this branch touches, tell the user
-   and agree on rebasing or merging before the review, since conflicts can change behaviour.
+1. **Refresh the base.** Run `git status` (commit or ask about uncommitted changes first), then
+   `git fetch origin {{vars.mainBranch}}` and check how far the branch is behind. If
+   `origin/{{vars.mainBranch}}` changed files this branch touches, tell the user and agree on
+   rebasing or merging before the review, since conflicts can change behaviour.
 2. **Read the spec first**, then the diff file by file, tests included. For each file ask:
    - **Correctness**: logic and boundary errors, null or missing values, error paths, resource
      cleanup, time zones and encodings, concurrency and ordering assumptions.
@@ -42,7 +45,7 @@ problems, scope creep and code that will be hard to maintain.
    - otherwise fire `NEXT`. Keep accepted nits and follow-ups; they go into the pull request
      description in the next step.
 {{#if vars.reviewer}}
-6. Human review by **{{vars.reviewer}}** happens on the pull request in the next step. Write
+6. Human review by your default reviewer happens on the pull request in the next step. Write
    down anything they should look at closely, such as risky areas or deliberate trade-offs.
 {{/if}}
 

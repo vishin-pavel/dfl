@@ -19,6 +19,7 @@ export const localConfigSchema = z.object({
   activeFlow: z.string().optional(),
   agents: z.array(agentIdSchema).optional(),
   vars: z.record(z.string(), z.unknown()).default({}),
+  mcp: z.boolean().optional(),
 });
 
 function parseWith<T>(schema: z.ZodType<T>, data: unknown, file: string): T {
@@ -103,6 +104,18 @@ export function setSelectedAgents(paths: ProjectPaths, agents: AgentId[], scope:
   } else {
     saveLocalConfig(paths, { ...loadLocalConfig(paths), agents: unique });
   }
+}
+
+/** Personal MCP preference: `local.mcp`, default true (`dfl install --no-mcp` stores false). */
+export function getMcpEnabled(paths: ProjectPaths): boolean {
+  return loadLocalConfig(paths).mcp ?? true;
+}
+
+/** Stores the personal MCP preference in `.df/local.json` (no write when unchanged). */
+export function setMcpEnabled(paths: ProjectPaths, enabled: boolean): void {
+  const local = loadLocalConfig(paths);
+  if (local.mcp === enabled) return;
+  saveLocalConfig(paths, { ...local, mcp: enabled });
 }
 
 function stripUndefined<T extends object>(value: T): T {

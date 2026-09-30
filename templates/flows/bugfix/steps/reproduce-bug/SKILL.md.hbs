@@ -1,7 +1,9 @@
 {{!--
-  Bug fix flow, first step. Uses the project vars mainBranch and testCommand (shared, stored in
-  .df/config.json) and the personal var branchPrefix (per developer, stored in .df/local.json).
-  Because rendered skills contain personal values, dfl git-ignores them; commit only this template.
+  Bug fix flow, first step. Uses the project vars mainBranch, testCommand and bugNotesDir (shared,
+  stored in .df/config.json) and the personal var fixBranchPrefix (per developer, stored in
+  .df/local.json). Var values are shared by all flows of a project, so a flow-specific meaning
+  gets a flow-specific name (the feature flow uses featureBranchPrefix). Because rendered skills
+  contain personal values, dfl git-ignores them; commit only this template.
 --}}
 # Reproduce the bug
 
@@ -28,7 +30,7 @@ reason. Do not try to fix anything yet.
 
    ```sh
    git fetch origin {{vars.mainBranch}}
-   git switch -c {{vars.branchPrefix}}<slug> origin/{{vars.mainBranch}}
+   git switch -c {{vars.fixBranchPrefix}}<slug> origin/{{vars.mainBranch}}
    ```
 
 3. **Reproduce manually** with the smallest set of steps you can. Record the exact commands,
@@ -46,9 +48,14 @@ reason. Do not try to fix anything yet.
 8. **For regressions**, find the change that introduced the bug if it is cheap:
    `git bisect start`, mark a bad and a good commit, and let the new test decide each step
    (`git bisect run` with the command that runs only that test). Finish with `git bisect reset`.
-9. **Write the reproduction note** in the conversation:
+9. **Write the reproduction note** to `{{vars.bugNotesDir}}/<slug>.md` and show it to the user.
+   Later steps read it from there (they often run in a new session), so record everything they
+   need:
 
    ```markdown
+   # Bug: <short title>
+
+   ## Reproduction
    Symptom: ...
    Environment: ...
    Steps: 1. ... 2. ...
@@ -57,13 +64,15 @@ reason. Do not try to fix anything yet.
    Introduced by: <commit, if known>
    ```
 
-10. **Commit the failing test** on the fix branch, marked in the message (for example
-    `test: reproduce empty cart total bug`). Do not push a failing test to a shared branch.
+10. **Commit the failing test and the note** on the fix branch (ask first if the team does not
+    keep bug notes in git): `git add <test file> {{vars.bugNotesDir}}/<slug>.md`, then
+    `git commit -m "test: reproduce empty cart total bug"` (a message that marks the
+    reproduction). Do not push a failing test to a shared branch.
 
 ## Outputs
 
-- Branch `{{vars.branchPrefix}}<slug>` with a commit containing the failing test.
-- The reproduction note.
+- Branch `{{vars.fixBranchPrefix}}<slug>` with a commit containing the failing test.
+- The reproduction note in `{{vars.bugNotesDir}}/<slug>.md` (section `## Reproduction`).
 
 ## Exit criteria
 

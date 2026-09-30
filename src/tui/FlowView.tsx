@@ -4,7 +4,7 @@
  */
 import { Box, Text, useApp, useInput, useWindowSize } from 'ink';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import type { FlowModel } from '../core/types.js';
+import type { AgentId, FlowModel } from '../core/types.js';
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -21,11 +21,27 @@ import {
   type RenderedCanvas,
   type ZoomLevel,
 } from './graph/index.js';
-import { cellWidth, truncate } from './graph/measure.js';
+import { cellWidth, ellipsisFor, truncate } from './graph/measure.js';
 
-export const FLOW_VIEW_HELP = 'w/a/s/d pan · W/A/S/D page · q zoom in · e zoom out · l layout · c center · x exit';
+const HELP = ['w/a/s/d pan', 'W/A/S/D page', 'q zoom in', 'e zoom out', 'l layout', 'c center', 'x exit'];
+const HELP_SHORT = ['wasd pan', 'WASD page', 'q/e zoom in/out', 'l layout', 'c center', 'x exit'];
+
+/** Separator between header/footer items: `·`, or `|` with `--ascii`. */
+const separator = (ascii: boolean): string => (ascii ? ' | ' : ' · ');
+
+/** Key help in the footer (pure 7-bit with `ascii`). */
+export function flowViewHelp(ascii = false): string {
+  return HELP.join(separator(ascii));
+}
+
+/** Footer for terminals narrower than the full help. */
+export function flowViewHelpShort(ascii = false): string {
+  return HELP_SHORT.join(separator(ascii));
+}
+
+export const FLOW_VIEW_HELP = flowViewHelp();
 /** Footer for terminals narrower than the full help (82 cells). */
-export const FLOW_VIEW_HELP_SHORT = 'wasd pan · WASD page · q/e zoom in/out · l layout · c center · x exit';
+export const FLOW_VIEW_HELP_SHORT = flowViewHelpShort();
 
 export interface FlowViewProps {
   model: FlowModel;
@@ -34,8 +50,11 @@ export interface FlowViewProps {
   /** Initial zoom; default: the highest level whose canvas fits the viewport, min 1. */
   zoom?: ZoomLevel | undefined;
   direction?: Direction | undefined;
+  /** Pure 7-bit output: ASCII box drawing and ASCII header/footer. */
   ascii?: boolean | undefined;
-  /** Canvas cache to reuse; must be built from the same model, `current` and `ascii`. */
+  /** Agents whose skill invocation (`/plan`, `$plan`) the zoom-3 cards show (see `flowToGraph`). */
+  agents?: readonly AgentId[] | undefined;
+  /** Canvas cache to reuse; must be built from the same model, `current`, `ascii` and `agents`. */
   cache?: CanvasCache | undefined;
 }
 
@@ -45,13 +64,13 @@ interface Shown {
   canvas: RenderedCanvas;
 }
 
-/** `s` cut or padded to exactly `width` cells. */
-function fit(s: string, width: number): string {
-  const cut = truncate(s, width);
+/** `s` cut (ending with `ellipsis`) or padded to exactly `width` cells. */
+function fit(s: string, width: number, ellipsis: string): string {
+  const cut = truncate(s, width, ellipsis);
   return cut + ' '.repeat(Math.max(0, width - cellWidth(cut)));
 }
 
-export function FlowView({ model, current, zoom: initialZoom, direction: initialDirection, ascii, cache: givenCache }: FlowViewProps) {
+export function FlowView({ model, current, zoom: initialZoom, direction: initialDirection, ascii, agents, cache: givenCache }: FlowViewProps) {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
   const viewW = Math.max(1, columns);
@@ -59,10 +78,18 @@ export function FlowView({ model, current, zoom: initialZoom, direction: initial
   const size = useRef({ w: viewW, h: viewH });
   size.current = { w: viewW, h: viewH };
 
+  // Keyed by value: an inline `agents={[...]}` must not rebuild (and re-lay out) the canvas every render.
+  const agentsKey = agents?.join(',') ?? '';
   const cache = useMemo(
-    () => givenCache ?? createCanvasCache(flowToGraph(model), { ascii, highlight: current }),
-    [givenCache, model, ascii, current],
+    () => givenCache ?? createCanvasCache(flowToGraph(model, { agents }), { ascii, highlight: current }),
+    [givenCache, model, ascii, current, agentsKey],
   );
+  // With --ascii the header and footer stay 7-bit too (user-written titles are shown as they are).
+  const plain = ascii === true;
+  const sep = separator(plain);
+  const dots = plain ? '...' : '…';
+  const times = plain ? 'x' : '×';
+  const ellipsis = ellipsisFor(plain);
   const [zoom, setZoom] = useState<ZoomLevel | undefined>(initialZoom);
   const [direction, setDirection] = useState<Direction>(initialDirection ?? 'TB');
   const [shown, setShown] = useState<Shown | undefined>();
@@ -141,16 +168,17 @@ export function FlowView({ model, current, zoom: initialZoom, direction: initial
   // Most important first: a narrow terminal cuts the header from the right.
   const header = [
     model.title,
-    zoom === undefined ? 'zoom …' : `zoom ${zoom}/${MAX_ZOOM}`,
+    zoom === undefined ? `zoom ${dots}` : `zoom ${zoom}/${MAX_ZOOM}`,
     direction,
-    ready ? `pos ${Math.max(0, view.x)},${Math.max(0, view.y)} of ${ready.canvas.width}×${ready.canvas.height}` : 'Laying out…',
+    ready ? `pos ${Math.max(0, view.x)},${Math.max(0, view.y)} of ${ready.canvas.width}${times}${ready.canvas.height}` : `Laying out${dots}`,
     step ? `step: ${step.title}` : undefined,
   ]
     .filter(Boolean)
-    .join(' · ');
+    .join(sep);
+  const help = flowViewHelp(plain);
 
   let body: ReactNode;
-  if (!shown) body = <Text>Laying out…</Text>;
+  if (!shown) body = <Text>Laying out{dots}</Text>;
   else {
     const box = current ? shown.canvas.boxes[current] : undefined;
     body = viewport(shown.canvas, view.x, view.y, viewW, viewH).map((line, i) => {
@@ -179,13 +207,13 @@ export function FlowView({ model, current, zoom: initialZoom, direction: initial
   return (
     <Box flexDirection="column" width={viewW} height={rows}>
       <Text inverse wrap="truncate-end">
-        {fit(` ${header}`, viewW)}
+        {fit(` ${header}`, viewW, ellipsis)}
       </Text>
       <Box flexDirection="column" height={viewH} overflow="hidden">
         {body}
       </Box>
       <Text dimColor wrap="truncate-end">
-        {truncate(` ${cellWidth(FLOW_VIEW_HELP) < viewW ? FLOW_VIEW_HELP : FLOW_VIEW_HELP_SHORT}`, viewW)}
+        {truncate(` ${cellWidth(help) < viewW ? help : flowViewHelpShort(plain)}`, viewW, ellipsis)}
       </Text>
     </Box>
   );

@@ -47,13 +47,14 @@ export interface ResolveRootOptions {
 
 /**
  * Project root resolution: `--root` → `DFL_ROOT` env → nearest ancestor with `.df/`
- * → (install only) git root → cwd.
+ * → (install only) git root → cwd. An explicit root (`--root` / `DFL_ROOT`) must be an existing
+ * directory (DflError `BAD_ROOT` otherwise); it is never created.
  */
 export function resolveProjectRoot(options: ResolveRootOptions = {}): string {
   const cwd = path.resolve(options.cwd ?? process.cwd());
-  if (options.root) return path.resolve(cwd, options.root);
+  if (options.root) return explicitRoot(cwd, options.root, '--root');
   const fromEnv = process.env['DFL_ROOT'];
-  if (fromEnv) return path.resolve(cwd, fromEnv);
+  if (fromEnv) return explicitRoot(cwd, fromEnv, 'DFL_ROOT=');
   const found = findProjectRoot(cwd);
   if (found) return found;
   if (options.forInstall) return gitRoot(cwd) ?? cwd;
@@ -61,6 +62,39 @@ export function resolveProjectRoot(options: ResolveRootOptions = {}): string {
     hint: 'Run `dfl install` in your project root first.',
     code: 'NO_PROJECT',
   });
+}
+
+function explicitRoot(cwd: string, raw: string, source: '--root' | 'DFL_ROOT='): string {
+  const abs = path.resolve(cwd, raw);
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.statSync(abs, { throwIfNoEntry: false });
+  } catch {
+    stat = undefined;
+  }
+  const label = source === '--root' ? `--root ${raw}` : `DFL_ROOT=${raw}`;
+  if (!stat) {
+    throw new DflError(`${label} does not exist.`, { hint: 'Check the path, or create the directory first.', code: 'BAD_ROOT' });
+  }
+  if (!stat.isDirectory()) {
+    throw new DflError(`${label} is not a directory.`, { hint: 'Point it at the project directory.', code: 'BAD_ROOT' });
+  }
+  return abs;
+}
+
+/**
+ * A flow or step name used as one path segment under `.df/`: rejects empty names, `.`/`..`,
+ * separators and NUL so that no name can ever resolve outside its parent directory (DflError
+ * `INVALID_NAME`). Full id rules are enforced by `assertValidFlowName` / `assertValidStepId`.
+ */
+export function assertPathSegment(name: string, kind: 'flow' | 'step' = 'flow'): string {
+  if (typeof name !== 'string' || name === '' || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
+    throw new DflError(`Invalid ${kind} name "${String(name)}".`, {
+      hint: 'Use lowercase letters, digits and single hyphens (e.g. "feature"), max 64 characters.',
+      code: 'INVALID_NAME',
+    });
+  }
+  return name;
 }
 
 export function projectPaths(root: string): ProjectPaths {
@@ -75,11 +109,11 @@ export function projectPaths(root: string): ProjectPaths {
     manifestFile: path.join(dfDir, 'installed.json'),
     dfGitignoreFile: path.join(dfDir, '.gitignore'),
     rootGitignoreFile: path.join(abs, '.gitignore'),
-    flowDir: (flow) => path.join(dfDir, flow),
-    flowFile: (flow) => path.join(dfDir, flow, 'flow.json'),
-    partialsDir: (flow) => path.join(dfDir, flow, 'partials'),
-    stepsDir: (flow) => path.join(dfDir, flow, 'steps'),
-    stepDir: (flow, step) => path.join(dfDir, flow, 'steps', step),
+    flowDir: (flow) => path.join(dfDir, assertPathSegment(flow)),
+    flowFile: (flow) => path.join(dfDir, assertPathSegment(flow), 'flow.json'),
+    partialsDir: (flow) => path.join(dfDir, assertPathSegment(flow), 'partials'),
+    stepsDir: (flow) => path.join(dfDir, assertPathSegment(flow), 'steps'),
+    stepDir: (flow, step) => path.join(dfDir, assertPathSegment(flow), 'steps', assertPathSegment(step, 'step')),
   };
 }
 

@@ -6,16 +6,17 @@ pass, a green suite and a commit after every increment. Stay inside the scope of
 ## Inputs
 
 - The spec and its `## Implementation plan` section in `{{vars.specsDir}}/<slug>.md` (derive
-  the slug from the branch name `{{vars.branchPrefix}}<slug>` or from the text the user typed
-  after the command).
+  the slug from the branch name `{{vars.featureBranchPrefix}}<slug>` or from the text the user
+  typed after the command).
 - If the flow came back here from verification (`FAILED`) or review (`CHANGES_REQUESTED`): the
-  list of failures or findings. Look for it earlier in the conversation, in the pull request
-  comments, or ask the user. Fix exactly those items first; do not redo finished increments.
+  list of failures or findings. Look for it in the `## Verification` section of the spec,
+  earlier in the conversation or in the pull request comments, or ask the user. Fix exactly
+  those items first; do not redo finished increments.
 
 ## Procedure
 
-1. **Prepare the workspace.** Check out `{{vars.branchPrefix}}<slug>`, run `git status` and make
-   sure there are no stray changes. Run `{{vars.testCommand}}` once to record the baseline. If it
+1. **Prepare the workspace.** Check out `{{vars.featureBranchPrefix}}<slug>`, run `git status`
+   and make sure there are no stray changes. Run `{{vars.testCommand}}` once to record the baseline. If it
    already fails before you change anything, tell the user and agree on how to proceed.
 2. **Pick the first unchecked increment** in the plan (or the first open finding when you came
    back from verification or review).
@@ -35,12 +36,13 @@ pass, a green suite and a commit after every increment. Stay inside the scope of
    the user and fire `BACK` to revise the plan together.
 9. **Update the surroundings**: user documentation, changelog, configuration examples and
    migration notes affected by the feature.
-10. **Self-check the whole branch** before leaving the step:
-    `git diff {{vars.mainBranch}}...HEAD --stat` for scope, then read the full diff for leftovers.
+10. **Self-check the whole branch** before leaving the step: run
+    `git fetch origin {{vars.mainBranch}}`, then `git diff origin/{{vars.mainBranch}}...HEAD --stat`
+    for scope (only this branch's commits), then read the full diff for leftovers.
 
 ## Outputs
 
-- Commits on `{{vars.branchPrefix}}<slug>`, one or more per increment.
+- Commits on `{{vars.featureBranchPrefix}}<slug>`, one or more per increment.
 - New and updated tests covering every acceptance criterion.
 - The plan in the spec with all increments checked (and deviations noted).
 

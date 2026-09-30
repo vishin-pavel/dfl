@@ -161,6 +161,33 @@ export class Canvas {
     return true;
   }
 
+  /**
+   * Free cells from (x, y) stepping by (dx, dy), up to `max`: how far the nearest line, arrow or label
+   * is. A box border or the canvas edge ends the scan as fully clear (`max`), since only another
+   * edge (or its label) could be mistaken for the owner of a label placed here.
+   */
+  clearance(x: number, y: number, dx: number, dy: number, max: number): number {
+    for (let n = 0; n < max; n++) {
+      const cx = x + n * dx;
+      const cy = y + n * dy;
+      if (!this.inside(cx, cy)) return max;
+      const k = this.kindAt(cx, cy);
+      if (k === K_BOX) return max;
+      if (k !== K_EMPTY) return n;
+    }
+    return max;
+  }
+
+  /** True if a run of cells holds part of an edge (line, arrow) or a label; boxes and blanks do not count. */
+  hasEdgeCells(x: number, y: number, len: number): boolean {
+    for (let j = 0; j < len; j++) {
+      if (!this.inside(x + j, y)) continue;
+      const k = this.kindAt(x + j, y);
+      if (k === K_LINE || k === K_ARROW || k === K_TEXT) return true;
+    }
+    return false;
+  }
+
   /** A run of plain horizontal line cells (no junctions): safe to overwrite with an inline label. */
   isPlainHLine(x: number, y: number, len: number): boolean {
     for (let j = 0; j < len; j++) {
@@ -175,9 +202,10 @@ export class Canvas {
     const g = this.glyphs(heavy ? 'heavy' : node.final ? 'final' : 'light');
     const first = node.rows[0];
     if (node.kind === 'tiny') {
+      // Widened for its edges (one column each): the title is centred between the brackets.
       this.put(r.x, r.y, g.open, K_BOX);
       for (let x = r.x + 1; x < r.x + r.w - 1; x++) this.put(x, r.y, ' ', K_BOX);
-      if (first && first !== 'sep') this.text(r.x + 1, r.y, first.text, K_BOX, [K_BOX]);
+      if (first && first !== 'sep') this.text(r.x + 1 + Math.floor((r.w - 2 - cellWidth(first.text)) / 2), r.y, first.text, K_BOX, [K_BOX]);
       this.put(r.x + r.w - 1, r.y, g.close, K_BOX);
       return;
     }
@@ -208,7 +236,7 @@ export class Canvas {
 
   /** Replaces the border cell next to `p` with a tee where an edge leaves the box. */
   tee(r: Rect, p: Pt, side: Side, node: NodeBox, heavy: boolean): void {
-    if (r.h < 3) return; // one-line nodes have no border
+    if (node.kind === 'tiny' || r.h < 3) return; // one-line nodes have no border
     const bx = p.x - DX[side];
     const by = p.y - DY[side];
     if (!this.inside(bx, by) || this.kindAt(bx, by) !== K_BOX) return;

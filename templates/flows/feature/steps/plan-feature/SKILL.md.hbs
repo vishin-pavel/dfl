@@ -8,7 +8,7 @@ and, if needed, stopped at any point.
 
 - The spec at `{{vars.specsDir}}/<slug>.md`. Find the slug in the text the user typed after the
   command, or derive it from the current branch (`git branch --show-current`, then strip the
-  `{{vars.branchPrefix}}` prefix), or ask the user.
+  `{{vars.featureBranchPrefix}}` prefix), or ask the user.
 - The code base, in particular the modules the spec touches and their tests.
 
 If there is no approved spec, stop and tell the user; send the flow back to the spec step
@@ -62,7 +62,7 @@ instead of planning from a guess.
 
 - An `## Implementation plan` section in `{{vars.specsDir}}/<slug>.md` with checkbox increments
   and a traceability table.
-- A commit with the plan on `{{vars.branchPrefix}}<slug>`.
+- A commit with the plan on `{{vars.featureBranchPrefix}}<slug>`.
 
 ## Exit criteria
 

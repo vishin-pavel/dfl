@@ -10,7 +10,7 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
 
 ## Inputs
 
-- The reviewed branch `{{vars.branchPrefix}}<slug>`.
+- The reviewed branch `{{vars.featureBranchPrefix}}<slug>`.
 - The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md`.
 - Accepted nits and follow-ups from the review step.
 - Any instructions in the text the user typed after the command (draft pull request, target
@@ -18,7 +18,8 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
 
 ## Procedure
 
-1. **Sync with the base branch.** `git fetch origin`, then rebase onto or merge
+1. **Sync with the base branch.** Run `git status` first; commit or ask about any uncommitted
+   changes before syncing. Then `git fetch origin`, and rebase onto or merge
    `origin/{{vars.mainBranch}}`, whichever the team uses (ask if unsure). Resolve conflicts
    carefully and run `{{vars.testCommand}}` again afterwards.
 2. **Tidy the history** if the team squashes or expects clean commits: fold fixup commits and
@@ -48,7 +49,8 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
    `gh pr create --base {{vars.mainBranch}} --title "<title>" --body-file <file>{{#if vars.reviewer}} --reviewer {{vars.reviewer}}{{/if}}`.
    Without it, give the user the compare link printed by `git push` and the description to paste.
 {{#if vars.reviewer}}
-   Review is requested from **{{vars.reviewer}}** (your personal default reviewer).
+   This requests a review from your personal default reviewer (the `reviewer` variable). `gh`
+   expects the login without a leading at-sign; drop it if the value has one.
 {{else}}
    No default reviewer is configured, so ask the user whom to request. They can set a personal
    default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.
@@ -62,7 +64,7 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
 8. **Merge** only when checks are green, reviews are approved and the user tells you to, using
    the repository's merge method (`gh pr merge` or the web UI).
 9. **Clean up** after the merge: `git switch {{vars.mainBranch}}`, `git pull`, then
-   `git branch -d {{vars.branchPrefix}}<slug>`. Mention follow-ups the user may want to file.
+   `git branch -d {{vars.featureBranchPrefix}}<slug>`. Mention follow-ups the user may want to file.
 
 ## Outputs
 

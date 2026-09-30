@@ -20,7 +20,7 @@ import { builtinSkillsDir, flowTemplatesDir } from '../src/core/paths.js';
 import { renderBuiltinSkills, renderFlowSkills } from '../src/core/render.js';
 import { validateFlow } from '../src/core/validate.js';
 import { resolveVars } from '../src/core/vars.js';
-import type { FlowDefinition, FlowModel, StepContext, StepInfo, TemplateContext } from '../src/core/types.js';
+import type { FlowDefinition, FlowModel, RenderedSkill, StepContext, StepInfo, TemplateContext } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempProject } from './helpers/project.js';
 
 afterEach(cleanupTempDirs);
@@ -411,5 +411,242 @@ describe('built-in skills', () => {
     expect(out).toContain('`{{> flow-context}}`');
     expect(out).toContain('`{{vars.');
     expect(out).not.toContain(PARTIAL_MARKER);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content regressions
+// ---------------------------------------------------------------------------
+
+function skillText(skill: RenderedSkill): string {
+  return skill.files.find((f) => f.path === 'SKILL.md')?.content ?? '';
+}
+
+/** Renders a shipped flow with the real renderer: default vars, overridden by `extra`. */
+function renderShipped(name: string, extra: Record<string, unknown> = {}): Map<string, string> {
+  const paths = makeTempProject();
+  const model = createFlow(paths, name, { from: name });
+  const vars = { ...resolveVars(paths, model.def, {}).values, ...extra };
+  return new Map(renderFlowSkills(paths, model, vars).map((skill) => [skill.name, skillText(skill)]));
+}
+
+/** Renders a built-in skill with the test renderer for the feature flow (default vars). */
+function renderBuiltin(name: string): string {
+  const feature = loadTemplate('feature');
+  const source = fs.readFileSync(path.join(builtinSkillsDir(), name, SKILL_TEMPLATE_FILE), 'utf8');
+  return render(source, templateContext(feature.model, defaultVars(feature.def)));
+}
+
+function section(text: string, heading: string): string {
+  const start = text.indexOf(`\n## ${heading}\n`);
+  expect(start, `section ${heading}`).toBeGreaterThanOrEqual(0);
+  const end = text.indexOf('\n## ', start + 1);
+  return text.slice(start, end < 0 ? undefined : end);
+}
+
+function flowContext(text: string): string {
+  return text.slice(text.indexOf('## Flow context'));
+}
+
+/** Every `*.hbs` source shipped in templates/, with its path relative to templates/. */
+function allTemplateSources(): Array<[string, string]> {
+  const root = path.dirname(builtinSkillsDir());
+  return walkFiles(root)
+    .filter((rel) => rel.endsWith('.hbs'))
+    .map((rel) => [rel, fs.readFileSync(path.join(root, rel), 'utf8')]);
+}
+
+describe('content regressions', () => {
+  it('diffs, logs and undoes against the remote base, never a possibly stale local main branch', () => {
+    for (const name of flowNames) {
+      for (const [skill, text] of renderShipped(name)) {
+        const where = `${name}/${skill}`;
+        expect(text, where).not.toMatch(/git (?:diff|log)\b[^`\n]*?(?<![\w/])main\.\.\.?HEAD/);
+        expect(text, where).not.toMatch(/git checkout main --/);
+        for (const match of text.matchAll(/git (?:diff|log)\b[^`\n]*?(\S+?)\.\.\.?HEAD/g)) {
+          expect(match[1], `${where}: ${match[0]}`).toBe('origin/main');
+        }
+      }
+    }
+    const verifyFix = renderShipped('bugfix').get('verify-fix')!;
+    expect(verifyFix).toContain('`git checkout $(git merge-base HEAD origin/main) -- <fixed source file>`');
+    expect(verifyFix).toContain('`git checkout HEAD -- <fixed source file>`');
+  });
+
+  it('gives a variable name one meaning across all shipped flows (stored values are shared)', () => {
+    const seen = new Map<string, { flow: string; spec: unknown }>();
+    for (const name of flowNames) {
+      for (const [varName, v] of Object.entries(loadTemplate(name).def.vars ?? {})) {
+        const spec = { default: v.default, scope: v.scope, required: v.required };
+        const other = seen.get(varName);
+        if (other) expect(spec, `${varName}: ${name} vs ${other.flow}`).toEqual(other.spec);
+        else seen.set(varName, { flow: name, spec });
+      }
+    }
+    expect(loadTemplate('feature').def.vars?.['featureBranchPrefix']?.default).toBe('feature/');
+    expect(loadTemplate('bugfix').def.vars?.['fixBranchPrefix']?.default).toBe('fix/');
+    const bugfix = renderShipped('bugfix', { featureBranchPrefix: 'pv/feat-' });
+    expect(bugfix.get('reproduce-bug')).toContain('git switch -c fix/<slug> origin/main');
+  });
+
+  it('bugfix hands the reproduction, diagnosis and verification over in a committed notes file', () => {
+    const bugfix = loadTemplate('bugfix');
+    expect(bugfix.def.vars?.['bugNotesDir']).toMatchObject({ default: 'docs/bugs', scope: 'project' });
+    const skills = renderShipped('bugfix');
+    const notes = 'docs/bugs/<slug>.md';
+    for (const [step, heading] of [
+      ['reproduce-bug', '## Reproduction'],
+      ['diagnose-bug', '## Diagnosis'],
+      ['verify-fix', '## Verification'],
+    ] as const) {
+      const procedure = section(skills.get(step)!, 'Procedure');
+      expect(procedure, step).toContain(notes);
+      expect(procedure, step).toContain(heading);
+      expect(procedure, step).toMatch(/git commit/);
+      expect(section(skills.get(step)!, 'Outputs'), step).toContain(notes);
+    }
+    for (const step of ['diagnose-bug', 'fix-bug', 'verify-fix', 'ship-fix']) {
+      expect(section(skills.get(step)!, 'Inputs'), step).toContain(notes);
+    }
+    expect(section(skills.get('fix-bug')!, 'Inputs')).toMatch(/ask the user to restate[\s\S]*`BACK`/);
+    for (const [step, text] of skills) expect(text, step).not.toMatch(/in the conversation:\n/);
+  });
+
+  it('commits every document a step writes into the spec or the bug notes', () => {
+    for (const name of flowNames) {
+      const { dir, model } = loadTemplate(name);
+      for (const step of model.steps.filter((s) => !s.final)) {
+        const source = fs.readFileSync(path.join(dir, 'steps', step.id, SKILL_TEMPLATE_FILE), 'utf8');
+        const writesDoc =
+          /\{\{vars\.(specsDir|bugNotesDir)\}\}\/<slug>\.md/.test(source) &&
+          /\b(append|at the end of|Write the [\w ]+ to)\b/i.test(source);
+        if (writesDoc) expect(source, `${name}/${step.id}`).toMatch(/git commit/);
+      }
+    }
+    const verify = renderShipped('feature').get('verify-feature')!;
+    expect(verify).toContain('`git commit -m "docs: verification report for <slug>"`');
+    expect(section(verify, 'Exit criteria')).toContain('The working tree is clean');
+    for (const [name, step] of [
+      ['feature', 'review-feature'],
+      ['feature', 'ship-feature'],
+      ['bugfix', 'ship-fix'],
+    ] as const) {
+      expect(section(renderShipped(name).get(step)!, 'Procedure'), step).toMatch(/^1\. .*`git status`/m);
+    }
+  });
+
+  it('check-change measures the baseline without popping foreign stashes or keeping new files', () => {
+    const check = renderShipped('quick').get('check-change')!;
+    expect(check).not.toMatch(/`git stash`, run, `git stash pop`/);
+    expect(check).toContain('`git stash push --include-untracked -m dfl-baseline`');
+    expect(check).toMatch(/Pop only if `git stash list` shows `dfl-baseline` on top/);
+    expect(check).toMatch(/`git worktree add \.\.\/[\w-]+-baseline HEAD~1`/);
+    expect(check).toContain('Never `git stash pop` a stash you did not create in this step.');
+  });
+
+  it('quick flow points to creating a fuller flow from a template, not only to switching', () => {
+    const { dir, model } = loadTemplate('quick');
+    let checked = 0;
+    for (const step of model.steps.filter((s) => !s.final)) {
+      const source = fs.readFileSync(path.join(dir, 'steps', step.id, SKILL_TEMPLATE_FILE), 'utf8');
+      if (!/flow use|fuller flow|better fit|switch flows/.test(source)) continue;
+      checked++;
+      expect(source, step.id).toMatch(/flow create [^`\n]*--from/);
+    }
+    expect(checked).toBe(3);
+    expect(renderShipped('quick').get('plan-change')).toContain('`dfl flow create <name> --from <template> --use`');
+  });
+
+  it('passes --yes to every destructive CLI command it tells an agent to run', () => {
+    let checked = 0;
+    for (const [file, source] of allTemplateSources()) {
+      for (const match of source.matchAll(/`\{\{dfl\.cli\}\} ((?:step (?:remove|rm)|flow delete|uninstall)\b[^`]*)`/g)) {
+        checked++;
+        expect(match[1], `${file}: ${match[0]}`).toMatch(/--yes\b/);
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(2);
+  });
+
+  it('delete-flow-step predicts the rewiring dfl applies: loops back from the NEXT target are removed', () => {
+    const out = renderBuiltin('delete-flow-step');
+    const rewiring = out.slice(out.indexOf('3. **Work out the rewiring**'), out.indexOf('4. **Check'));
+    expect(rewiring).toMatch(/source is that `NEXT` target itself[\s\S]*dfl \*\*removes\*\* it/);
+    expect(rewiring).toMatch(/first\s+remaining step/);
+    expect(out).not.toMatch(/CHANGES_REQUESTED--> review/);
+    expect(out).not.toContain('self-loop above');
+    expect(out).toMatch(/after: {2}plan --NEXT--> review; {2}review --CHANGES_REQUESTED--> \(removed/);
+  });
+
+  it('add-flow-step and edit-flow-step teach escaping literal braces', () => {
+    for (const name of ['add-flow-step', 'edit-flow-step']) {
+      const out = renderBuiltin(name);
+      expect(out, name).toContain('`${{ secrets.NPM_TOKEN }}`');
+      expect(out, name).toContain('`$\\{{ secrets.NPM_TOKEN }}`');
+      expect(out, name).toContain('`\\{{ message }}`');
+      expect(out, name).toMatch(/`rendered` skill text/);
+    }
+  });
+
+  it('the step management skills make the agent review neighbouring step templates', () => {
+    expect(renderBuiltin('add-flow-step')).toMatch(/\*\*Check the neighbours\.\*\* Call `get_step` on the step before[\s\S]*templates/);
+    expect(renderBuiltin('add-flow-step')).toMatch(/\*\*Update the neighbouring templates\*\*[^\n]*`update_step`/);
+    expect(renderBuiltin('delete-flow-step')).toMatch(/\*\*Check the neighbouring templates\.\*\*[\s\S]*Call `get_step`/);
+    expect(renderBuiltin('delete-flow-step')).toMatch(/\*\*Update the neighbouring templates\*\*[^\n]*`update_step`/);
+    expect(renderBuiltin('edit-flow-step')).toMatch(
+      /When transitions, the id or the position change, templates can go stale[\s\S]*with `get_step`, the templates of\s+the steps in its incoming and outgoing transitions/,
+    );
+  });
+
+  it('the step management skills set transition conditions (descriptions) through the tools and the CLI', () => {
+    const add = renderBuiltin('add-flow-step');
+    expect(add).toContain('`{ "FAILED": { "target": "implement-feature", "description": "QA checklist failed" } }`');
+    expect(add).toContain('`dfl step transition <id> <EVENT> <target> --description "<condition>"`');
+    expect(add).toMatch(/For every event other than `NEXT`, also agree on a one-line condition/);
+    const edit = renderBuiltin('edit-flow-step');
+    expect(edit).toContain('`{ "target": "implement-feature", "description": "Tests failed" }`');
+    expect(edit).toContain('add `--description "<condition>"`');
+  });
+
+  it('flow context: CLI fallbacks keep the current-step check and offer goto', () => {
+    const skills = renderShipped('feature');
+    for (const [step, text] of skills) {
+      const context = flowContext(text);
+      expect(context, step).toContain(`\`dfl next <EVENT> --from ${step}\``);
+      expect(context, step).toContain(`\`dfl goto ${step}\``);
+      expect(context, step).toContain(`\`goto_step\` with \`{"step": "${step}"}\``);
+      expect(context, step).not.toContain('or continue with the current one');
+      expect(context, step).not.toMatch(/\n{3,}/);
+    }
+  });
+
+  it('flow context separates the forward predecessor from the steps that send work back', () => {
+    const feature = renderShipped('feature');
+    const spec = flowContext(feature.get('spec-feature')!);
+    expect(spec).not.toMatch(/Previous|Comes after/);
+    expect(spec).toContain('- Also reached from: Plan (`/plan-feature`) via `BACK` (The spec is missing information needed to plan)');
+    const implement = flowContext(feature.get('implement-feature')!);
+    expect(implement.match(/Comes after: .*/g)).toEqual(['Comes after: Plan (`/plan-feature`)']);
+    expect(implement).toContain('- Also reached from: Verify (`/verify-feature`) via `FAILED` (Tests or acceptance criteria failed)');
+    expect(implement).toContain('- Also reached from: Ship (`/ship-feature`) via `CHANGES_REQUESTED` (Pull request reviewers or CI require code changes)');
+    for (const name of flowNames) {
+      const first = renderShipped(name).get(loadTemplate(name).def.machine.initial)!;
+      expect(flowContext(first), name).toMatch(/This is step 1 of \d+[^\n]*\n\n- Also reached from: /);
+      expect(flowContext(first), name).not.toContain('Comes after');
+    }
+  });
+
+  it('keeps personal reviewer handles out of prose; only the gh command carries one', () => {
+    for (const [name, step, ship] of [
+      ['feature', 'review-feature', 'ship-feature'],
+      ['bugfix', undefined, 'ship-fix'],
+    ] as const) {
+      const skills = renderShipped(name, { reviewer: 'octocat' });
+      if (step) expect(skills.get(step), step).not.toContain('octocat');
+      const text = skills.get(ship)!;
+      expect(text.match(/octocat/g), ship).toHaveLength(1);
+      expect(text, ship).toContain(' --reviewer octocat`');
+      expect(text, ship).toMatch(/login without a leading at-sign/);
+    }
   });
 });

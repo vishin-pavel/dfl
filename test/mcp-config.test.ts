@@ -5,8 +5,17 @@ import { parse as parseToml } from 'smol-toml';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   TOML_MANAGED_COMMENT,
+  dflLauncher,
   hasJsonEntry,
   hasTomlServer,
+  isCommandOnPath,
+  isDflLauncher,
+  localInstallPrefix,
+  planJsonUpsert,
+  planTomlUpsert,
+  projectDependsOnDfl,
+  readJsonEntry,
+  readTomlServer,
   removeJsonEntry,
   removeTomlServer,
   resolveMcpServerSpec,
@@ -266,25 +275,158 @@ describe('TOML server table', () => {
   });
 });
 
-describe('resolveMcpServerSpec', () => {
-  it('uses `dfl mcp` for a package outside the project', () => {
-    const paths = makeTempProject();
-    expect(resolveMcpServerSpec(paths, makeTempDir())).toEqual({ name: 'dfl', command: 'dfl', args: ['mcp'] });
-    // Default argument: the running package (this repo) is not inside the temp project.
-    expect(resolveMcpServerSpec(paths).command).toBe('dfl');
-  });
+describe('resolveMcpServerSpec / dflLauncher (depends on the project, never on the running binary)', () => {
+  const npx = { name: 'dfl', command: 'npx', args: ['--no-install', 'dfl', 'mcp'] };
+  const global = { name: 'dfl', command: 'dfl', args: ['mcp'] };
 
-  it('uses npx when the running package lives in <root>/node_modules', () => {
+  it('uses `dfl mcp` when the project does not depend on dfl, wherever the running package lives', () => {
     const paths = makeTempProject();
+    expect(resolveMcpServerSpec(paths, makeTempDir())).toEqual(global);
+    expect(resolveMcpServerSpec(paths).command).toBe('dfl');
+    // Installed in node_modules without a package.json dependency: still the global form.
     const pkg = path.join(paths.root, 'node_modules', '@vishin-pavel', 'dfl');
     fs.mkdirSync(pkg, { recursive: true });
-    expect(resolveMcpServerSpec(paths, pkg)).toEqual({ name: 'dfl', command: 'npx', args: ['--no-install', 'dfl', 'mcp'] });
+    expect(resolveMcpServerSpec(paths, pkg)).toEqual(global);
+    expect(dflLauncher(paths)).toBe('dfl');
+    fs.writeFileSync(path.join(paths.root, 'package.json'), '{ "devDependencies": { "other": "1" } }');
+    expect(resolveMcpServerSpec(paths, pkg)).toEqual(global);
+    fs.writeFileSync(path.join(paths.root, 'package.json'), '{ not json');
+    expect(projectDependsOnDfl(paths.root)).toBe(false);
   });
+
+  it.each(['dependencies', 'devDependencies', 'optionalDependencies'])(
+    'uses `npx --no-install dfl mcp` when package.json lists dfl in %s (running binary irrelevant)',
+    (key) => {
+      const paths = makeTempProject();
+      fs.writeFileSync(path.join(paths.root, 'package.json'), JSON.stringify({ [key]: { '@vishin-pavel/dfl': '^0.1.0' } }));
+      expect(projectDependsOnDfl(paths.root)).toBe(true);
+      // Global binary, local binary, default: always the same committed entry.
+      expect(resolveMcpServerSpec(paths, makeTempDir())).toEqual(npx);
+      expect(resolveMcpServerSpec(paths, path.join(paths.root, 'node_modules', '@vishin-pavel', 'dfl'))).toEqual(npx);
+      expect(resolveMcpServerSpec(paths)).toEqual(npx);
+      expect(dflLauncher(paths)).toBe('npx --no-install dfl');
+      expect(dflLauncher(paths.root)).toBe('npx --no-install dfl');
+    },
+  );
 
   it('prefers the config.json override', () => {
     const paths = makeTempProject();
+    fs.writeFileSync(path.join(paths.root, 'package.json'), JSON.stringify({ devDependencies: { '@vishin-pavel/dfl': '1' } }));
     saveProjectConfig(paths, { version: 1, vars: {}, mcp: { command: 'node', args: ['bin/dfl.js', 'mcp'] } });
     const pkg = path.join(paths.root, 'node_modules', 'dfl');
     expect(resolveMcpServerSpec(paths, pkg)).toEqual({ name: 'dfl', command: 'node', args: ['bin/dfl.js', 'mcp'] });
+    // The CLI launcher (dfl.cli) ignores the MCP override.
+    expect(dflLauncher(paths)).toBe('npx --no-install dfl');
+  });
+});
+
+describe('isDflLauncher', () => {
+  it('accepts dfl, npx/pnpm/yarn running dfl and the config override; rejects anything else', () => {
+    expect(isDflLauncher({ command: 'dfl', args: ['mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: '/usr/local/bin/dfl', args: ['mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: 'C:\\tools\\dfl.cmd', args: ['mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: 'npx', args: ['--no-install', 'dfl', 'mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: 'pnpm', args: ['exec', 'dfl', 'mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: 'yarn', args: ['@vishin-pavel/dfl@1.0.0', 'mcp'] })).toBe(true);
+    expect(isDflLauncher({ command: 'npx', args: ['-y', 'some-server'] })).toBe(false);
+    expect(isDflLauncher({ command: 'gh', args: ['mcp'] })).toBe(false);
+    expect(isDflLauncher({ command: 42, args: [] })).toBe(false);
+    const override = { command: 'node', args: ['bin/dfl.js', 'mcp'] };
+    expect(isDflLauncher({ command: 'node', args: ['bin/dfl.js', 'mcp'] }, override)).toBe(true);
+    expect(isDflLauncher({ command: 'node', args: ['other.js'] }, override)).toBe(false);
+  });
+});
+
+describe('dry-run planning (F83)', () => {
+  it('JSON: added for a missing file, unchanged for an equal entry, updated for different args', () => {
+    const file = tempFile('.mcp.json');
+    expect(planJsonUpsert(file, ['mcpServers'], 'dfl', entry)).toBe('added');
+    expect(fs.existsSync(file)).toBe(false);
+    upsertJsonEntry(file, ['mcpServers'], 'dfl', entry);
+    const before = read(file);
+    expect(planJsonUpsert(file, ['mcpServers'], 'dfl', entry)).toBe('unchanged');
+    expect(planJsonUpsert(file, ['mcpServers'], 'dfl', { ...entry, args: ['x'] })).toBe('updated');
+    expect(read(file)).toBe(before);
+    expect(() => planJsonUpsert(tempFile('bad.json', '{ ,'), ['mcpServers'], 'dfl', entry)).toThrow(DflError);
+  });
+
+  it('TOML: added, unchanged and updated (different command)', () => {
+    const file = tempFile('.codex/config.toml');
+    expect(planTomlUpsert(file, spec)).toBe('added');
+    upsertTomlServer(file, spec);
+    expect(planTomlUpsert(file, spec)).toBe('unchanged');
+    const before = read(file);
+    expect(planTomlUpsert(file, { ...spec, command: 'npx', args: ['--no-install', 'dfl', 'mcp'] })).toBe('updated');
+    expect(read(file)).toBe(before);
+  });
+});
+
+describe('reading entries', () => {
+  it('reads JSON entries and TOML server tables', () => {
+    const json = tempFile('.mcp.json', '{ "mcpServers": { "dfl": { "command": "npx", "args": ["dfl", "mcp"] } } }');
+    expect(readJsonEntry(json, ['mcpServers'], 'dfl')).toEqual({ command: 'npx', args: ['dfl', 'mcp'] });
+    expect(readJsonEntry(json, ['mcpServers'], 'x')).toBeUndefined();
+    expect(readJsonEntry(tempFile('none.json'), ['mcpServers'], 'dfl')).toBeUndefined();
+    expect(() => readJsonEntry(tempFile('bad.json', '{ ,'), ['mcpServers'], 'dfl')).toThrow(DflError);
+
+    const toml = tempFile('config.toml', '[mcp_servers.dfl]\ncommand = "pnpm"\nargs = [\n  "exec",\n  \'dfl\',\n  "mcp",\n]\n\n[other]\nx = 1\n');
+    expect(readTomlServer(toml, 'dfl')).toEqual({ command: 'pnpm', args: ['exec', 'dfl', 'mcp'] });
+    expect(readTomlServer(toml, 'nope')).toBeUndefined();
+    const escaped = tempFile('esc.toml', '[mcp_servers.dfl]\ncommand = "C:\\\\bin\\\\dfl"\nargs = ["mcp"]\n');
+    expect(readTomlServer(escaped, 'dfl')).toEqual({ command: 'C:\\bin\\dfl', args: ['mcp'] });
+  });
+});
+
+describe('removing without deleting what dfl did not create (F22)', () => {
+  it.each([
+    ['{"mcpServers": {}}\n', ['mcpServers']],
+    ['{}\n', ['mcpServers']],
+    ['{\n  "$schema": "https://opencode.ai/config.json"\n}\n', ['mcp']],
+    ['{"$schema": "x", "mcp": {}}\n', ['mcp']],
+  ])('keeps %j', (original, keyPath) => {
+    const file = tempFile('.kiro/settings/mcp.json', original);
+    upsertJsonEntry(file, keyPath, 'dfl', entry);
+    expect(removeJsonEntry(file, keyPath, 'dfl', { deleteEmptyFile: false, dropEmptyContainer: original.includes(`"${keyPath[0]}"`) ? false : true })).toBe(true);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(parseJsonc(read(file))).toEqual(parseJsonc(original));
+  });
+
+  it('restores an empty container byte for byte', () => {
+    const original = '{"mcpServers": {}}\n';
+    const file = tempFile('.mcp.json', original);
+    upsertJsonEntry(file, ['mcpServers'], 'dfl', entry);
+    removeJsonEntry(file, ['mcpServers'], 'dfl', { deleteEmptyFile: false, dropEmptyContainer: false });
+    expect(read(file)).toBe(original);
+  });
+
+  it('keeps an emptied TOML file dfl did not create', () => {
+    const file = tempFile('.codex/config.toml', '\n');
+    upsertTomlServer(file, spec);
+    expect(removeTomlServer(file, 'dfl', { deleteEmptyFile: false })).toBe(true);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(read(file).trim()).toBe('');
+  });
+});
+
+describe('localInstallPrefix / isCommandOnPath (F81)', () => {
+  it('names the directory whose node_modules holds the package', () => {
+    const root = makeTempDir();
+    const nested = path.join(root, 'frontend', 'node_modules', '@vishin-pavel', 'dfl');
+    const top = path.join(root, 'node_modules', '@vishin-pavel', 'dfl');
+    const pnpm = path.join(root, 'node_modules', '.pnpm', 'dfl@1', 'node_modules', '@vishin-pavel', 'dfl');
+    for (const dir of [nested, top, pnpm]) fs.mkdirSync(dir, { recursive: true });
+    expect(localInstallPrefix(root, nested)).toBe('frontend');
+    expect(localInstallPrefix(root, top)).toBe('');
+    expect(localInstallPrefix(root, pnpm)).toBe('');
+    expect(localInstallPrefix(root, makeTempDir())).toBeUndefined();
+    expect(localInstallPrefix(root, root)).toBeUndefined();
+  });
+
+  it('finds executables on PATH only', () => {
+    const bin = makeTempDir();
+    expect(isCommandOnPath('dfl', { PATH: bin })).toBe(false);
+    fs.writeFileSync(path.join(bin, 'dfl'), '#!/bin/sh\n', { mode: 0o755 });
+    expect(isCommandOnPath('dfl', { PATH: bin })).toBe(true);
+    expect(isCommandOnPath('dfl', { PATH: '' })).toBe(false);
   });
 });

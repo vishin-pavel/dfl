@@ -6,7 +6,8 @@ import { cleanup, render } from 'ink-testing-library';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isDflError } from '../src/core/errors.js';
 import { buildFlowModel } from '../src/core/flow.js';
-import { FLOW_VIEW_HELP, FLOW_VIEW_HELP_SHORT, FlowView } from '../src/tui/FlowView.js';
+import type { AgentId } from '../src/core/types.js';
+import { FLOW_VIEW_HELP, FLOW_VIEW_HELP_SHORT, FlowView, flowViewHelp, flowViewHelpShort } from '../src/tui/FlowView.js';
 import { centerOn, clampView, flowToGraph, renderGraph, type Direction, type ViewOrigin, type ZoomLevel } from '../src/tui/graph/index.js';
 import { runFlowView } from '../src/tui/run-flow-view.js';
 import { sampleFlowDefinition } from './helpers/project.js';
@@ -53,7 +54,7 @@ async function canvasFor(zoom: ZoomLevel, direction: Direction) {
 }
 
 /** Renders the viewer at `columns`×`rows` and waits until the first layout is on screen. */
-async function mount(props: { zoom?: ZoomLevel; direction?: Direction }, columns: number, rows: number) {
+async function mount(props: { zoom?: ZoomLevel; direction?: Direction; ascii?: boolean; agents?: AgentId[] }, columns: number, rows: number) {
   size.columns = columns;
   size.rows = rows;
   const app = render(<FlowView model={model} current="build" {...props} />);
@@ -172,6 +173,49 @@ describe('FlowView', () => {
   }
 });
 
+describe('FlowView --ascii', () => {
+  it('keeps the help texts 7-bit in ASCII mode and unchanged otherwise', () => {
+    expect(flowViewHelp()).toBe(FLOW_VIEW_HELP);
+    expect(flowViewHelpShort()).toBe(FLOW_VIEW_HELP_SHORT);
+    expect(FLOW_VIEW_HELP).toBe('w/a/s/d pan · W/A/S/D page · q zoom in · e zoom out · l layout · c center · x exit');
+    expect(flowViewHelp(true)).toBe('w/a/s/d pan | W/A/S/D page | q zoom in | e zoom out | l layout | c center | x exit');
+    expect(flowViewHelpShort(true)).toMatch(/^[\x20-\x7e]*$/);
+  });
+
+  for (const columns of [50, 160]) {
+    it(`draws every frame, header and footer included, in 7-bit ASCII at ${columns} columns`, async () => {
+      const { app } = await mount({ zoom: 1, ascii: true }, columns, 16);
+      expect(stripVTControlCharacters(app.frames[0]!)).toContain('Laying out...');
+      for (const frame of app.frames) expect(stripVTControlCharacters(frame)).toMatch(/^[\x00-\x7e]*$/);
+      const lines = stripVTControlCharacters(app.lastFrame()!).split('\n');
+      expect(lines[0]).toContain('Sample flow | zoom 1/3 | TB | pos ');
+      if (columns === 160) {
+        expect(lines[0]).toMatch(/of \d+x\d+ \| step: Build/);
+        expect(lines.at(-1)).toBe(` ${flowViewHelp(true)}`);
+      } else {
+        // Both header and footer are cut, with `~` instead of `…`.
+        expect(lines[0]!.trimEnd().endsWith('~')).toBe(true);
+        expect(lines.at(-1)!.trimEnd().endsWith('~')).toBe(true);
+      }
+    });
+  }
+
+  it('keeps the Unicode header and footer without --ascii', async () => {
+    const { app } = await mount({ zoom: 1 }, 160, 16);
+    const lines = stripVTControlCharacters(app.lastFrame()!).split('\n');
+    expect(lines[0]).toMatch(/Sample flow · zoom 1\/3 · TB · pos \d+,\d+ of \d+×\d+ · step: Build/);
+    expect(lines.at(-1)).toBe(` ${FLOW_VIEW_HELP}`);
+  });
+});
+
+describe('FlowView agents', () => {
+  it('shows the skill invocation of the selected agents on zoom-3 cards', async () => {
+    const { app } = await mount({ zoom: 3, agents: ['codex'] }, 80, 16);
+    expect(app.lastFrame()).toContain('$build');
+    expect(app.lastFrame()).not.toContain('/build');
+  });
+});
+
 describe('runFlowView (print mode)', () => {
   function capture(): { text: () => string } {
     const chunks: string[] = [];
@@ -199,6 +243,17 @@ describe('runFlowView (print mode)', () => {
     expect(text).toContain('/plan');
     expect(text).toContain('>');
     expect(text).toMatch(/^[\x20-\x7e\n]*$/);
+  });
+
+  it('shows how the selected agents invoke each skill at zoom 3', async () => {
+    const codex = capture();
+    await runFlowView(model, { print: true, zoom: 3, agents: ['codex'] });
+    expect(codex.text()).toContain('$plan');
+    expect(codex.text()).not.toContain('/plan');
+    vi.restoreAllMocks();
+    const none = capture();
+    await runFlowView(model, { print: true, zoom: 3 });
+    expect(none.text()).toContain('/plan');
   });
 
   it('rejects invalid zoom levels', async () => {
