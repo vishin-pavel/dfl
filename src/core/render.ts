@@ -138,6 +138,8 @@ function registerHelpers(hb: HandlebarsEnv): void {
     json: (value, spaces) => JSON.stringify(value ?? null, null, typeof spaces === 'number' ? spaces : 2),
     join: (list, sep) => (Array.isArray(list) ? list.map(toText).join(typeof sep === 'string' ? sep : ', ') : toText(list)),
     command: (skillName) => `/${toText(skillName)}`,
+    // A user/team handle as CLIs expect it: `@octocat ` → `octocat` (leading at-signs and whitespace dropped).
+    handle: (value) => toText(value).trim().replace(/^@+/, '').trim(),
   };
   for (const [name, fn] of Object.entries(helpers)) hb.registerHelper(name, valueHelper(name, fn));
 
@@ -541,6 +543,10 @@ export function renderFlow(
       const outFile = path.join(step.dir, ...out.split('/'));
       writeText(outFile, content);
       rendered.push(relOf(outFile));
+      if (out === SKILL_FILE) {
+        const warning = slashCommandTokenWarning(content, relOf(outFile));
+        if (warning) warnings.push(warning);
+      }
       files.push({ path: out, content });
     }
 
@@ -585,6 +591,35 @@ export function renderFlow(
   }
 
   return { skills, rendered: rendered.sort(), removed: removed.sort(), kept: kept.sort(), warnings };
+}
+
+/**
+ * Tokens that Claude Code / OpenCode expand when a skill runs as a slash command, so they corrupt the
+ * rendered text: `$ARGUMENTS`, `$0`…`$9`, a line starting with an exclamation mark and a backtick
+ * (runs a shell command) and, outside fenced code blocks, `@word` (a file mention).
+ */
+export function slashCommandTokens(markdown: string): string[] {
+  const body = markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+  const found = new Set<string>();
+  if (/\$ARGUMENTS/.test(body)) found.add('$ARGUMENTS');
+  if (/\$[0-9]/.test(body)) found.add('$<digit>');
+  if (/^[ \t]*!`/m.test(body)) found.add('a line starting with !`');
+  let fenced = false;
+  for (const line of body.split(/\r?\n/)) {
+    if (/^[ \t]*(```|~~~)/.test(line)) fenced = !fenced;
+    else if (!fenced && /(^|\s)@[A-Za-z]/.test(line)) found.add('@word');
+  }
+  return [...found];
+}
+
+/** A sync warning for a rendered SKILL.md that contains slashCommandTokens, or undefined. */
+function slashCommandTokenWarning(markdown: string, rel: string): string | undefined {
+  const tokens = slashCommandTokens(markdown);
+  if (tokens.length === 0) return undefined;
+  return (
+    `${rel} contains ${tokens.join(', ')}: Claude Code and OpenCode expand these when the skill runs as a slash command. ` +
+    'Rephrase the template, or check the variable values it renders (e.g. a handle stored with a leading @; use {{handle …}}).'
+  );
 }
 
 /** renderFlow(...).skills – see renderFlow. */

@@ -341,3 +341,61 @@ describe('validateFlow templates', () => {
     ]);
   });
 });
+
+describe('rendered output warnings (G8)', () => {
+  it('tells stale dfl output (deleted template) from a hand-written .md file', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths, cleanDefinition());
+    const steps = paths.stepsDir('sample');
+    fs.writeFileSync(path.join(steps, 'plan', 'old.md'), '# rendered by dfl earlier');
+    fs.writeFileSync(path.join(steps, 'plan', 'notes.md'), '# my notes');
+    fs.writeFileSync(
+      paths.manifestFile,
+      JSON.stringify({ version: 1, agents: [], skills: [], mcp: [], rendered: ['.df/sample/steps/plan/old.md'] }),
+    );
+    const warned = warnings(validateFlow(paths, 'sample')).join('\n');
+    expect(warned).toContain('steps/plan/old.md was rendered from a old.md.hbs template that no longer exists; the next sync deletes it.');
+    expect(warned).toContain('steps/plan/notes.md has no notes.md.hbs template: .md files under steps/ are git-ignored');
+    expect(warned).toContain('Rename it to notes.md.hbs to commit and install it.');
+    expect(warned).not.toContain('overwritten');
+  });
+});
+
+describe('template context references (G8, F65)', () => {
+  it('warns about expressions outside the template context, e.g. an unescaped GitHub Actions expression', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths, cleanDefinition());
+    const file = path.join(paths.stepsDir('sample'), 'build', 'SKILL.md.hbs');
+    fs.writeFileSync(
+      file,
+      [
+        '# Build',
+        'token: ${{ secrets.NPM_TOKEN }}',
+        'escaped: $\\{{ secrets.OTHER }}',
+        '{{vars.mainBranch}} {{upper vars.mainBranch}} {{json vars 2}} {{default vars.x "y"}} {{dfl.cli}} {{env.HOME}}',
+        '{{#if (eq vars.mainBranch "main")}}{{project.name}}{{/if}}',
+        '{{#each step.next}}{{title}} {{event}} {{whatever}}{{else}}{{nothing.here}}{{/each}}',
+        '{{#with flow}}{{title}}{{/with}} {{this.vars.x}} {{@root.vars}}',
+        '{{github.sha}}',
+        '{{> flow-context}}',
+      ].join('\n'),
+    );
+    const warned = warnings(validateFlow(paths, 'sample')).filter((message) => message.includes('template context'));
+    expect(warned).toEqual([
+      expect.stringContaining('steps/build/SKILL.md.hbs, line 2: {{secrets.NPM_TOKEN}} refers to "secrets"'),
+      expect.stringContaining('line 6: {{nothing.here}} refers to "nothing"'),
+      expect.stringContaining('line 8: {{github.sha}} refers to "github"'),
+    ]);
+    expect(warned[0]).toContain('Write \\{{ to output literal braces');
+    expect(errors(validateFlow(paths, 'sample'))).toEqual([]);
+  });
+
+  it('the prebuilt flow templates reference only the template context', async () => {
+    const { createFlow } = await import('../src/core/flow.js');
+    const paths = makeTempProject();
+    for (const name of ['feature', 'bugfix', 'quick']) {
+      createFlow(paths, name, { from: name });
+      expect(warnings(validateFlow(paths, name)).filter((message) => message.includes('template context')), name).toEqual([]);
+    }
+  });
+});

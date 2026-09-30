@@ -1,10 +1,24 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { switchActiveFlow } from '../src/commands/shared.js';
 import { createFlow } from '../src/core/flow.js';
 import { packageVersion, projectPaths } from '../src/core/paths.js';
 import { runCli } from '../src/run.js';
-import { cleanupTempDirs, makeTempDir, makeTempProject, writeSampleFlow } from './helpers/project.js';
+import { CancelledError } from '../src/ui/exit.js';
+import { nodeVersionError } from '../src/ui/node-version.js';
+import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
+
+/** Lets a test replace the clack text prompt (the rest of the prompt module stays real). */
+const promptControl = vi.hoisted(() => ({ text: undefined as undefined | (() => Promise<string>) }));
+vi.mock('../src/ui/prompts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/ui/prompts.js')>();
+  return {
+    ...actual,
+    text: (options: Parameters<typeof actual.text>[0]) => (promptControl.text ? promptControl.text() : actual.text(options)),
+  };
+});
 
 interface RunResult {
   code: number;
@@ -66,8 +80,39 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+  promptControl.text = undefined;
   cleanupTempDirs();
 });
+
+/** Runs `dfl --no-color ...args` without --root, as if started in `cwd`. */
+async function dflIn(cwd: string, ...args: string[]): Promise<RunResult> {
+  const spy = vi.spyOn(process, 'cwd').mockReturnValue(cwd);
+  try {
+    let stdout = '';
+    let stderr = '';
+    const capture = (sink: (text: string) => void) => (chunk: unknown): boolean => {
+      sink(String(chunk));
+      return true;
+    };
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(capture((text) => (stdout += text)) as never);
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(capture((text) => (stderr += text)) as never);
+    try {
+      const code = await runCli(['node', 'dfl', '--no-color', ...args]);
+      return { code, stdout: stdout.replace(ANSI_RE, ''), stderr: stderr.replace(ANSI_RE, '') };
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+const read = (root: string, rel: string): string => fs.readFileSync(path.join(root, ...rel.split('/')), 'utf8');
+const gitInit = (dir: string): void => {
+  execFileSync('git', ['init', '-q'], { cwd: dir, stdio: 'ignore' });
+};
 
 describe('dfl install', () => {
   it('installs the feature flow for several agents non-interactively', async () => {
@@ -296,7 +341,8 @@ describe('dfl flow', () => {
     const { stdout } = await ok(paths.root, 'flow', 'delete', 'sample', '--yes');
     expect(stdout).toContain('Removed');
     expect(has(paths.root, '.claude/skills/plan')).toBe(false);
-    expect(has(paths.root, '.mcp.json')).toBe(false);
+    // D5: the MCP entry is committed team config; only `dfl uninstall` removes it.
+    expect(has(paths.root, '.mcp.json')).toBe(true);
   });
 
   it('lists templates', async () => {
@@ -328,7 +374,7 @@ describe('dfl flow', () => {
     const root = await installedProject();
     const valid = await ok(root, 'flow', 'validate');
     expect(valid.stdout).toContain('✔ Flow feature is valid');
-    expect((await json(root, 'flow', 'validate', 'feature')).valid).toBe(true);
+    expect(await json(root, 'flow', 'validate', 'feature')).toMatchObject({ valid: true, flows: [{ flow: 'feature', valid: true }] });
 
     fs.rmSync(path.join(root, '.df/feature/steps/plan-feature/SKILL.md.hbs'));
     const invalid = await dfl(root, 'flow', 'validate');
@@ -340,7 +386,11 @@ describe('dfl flow', () => {
     expect(asJson.code).toBe(1);
     const parsed = JSON.parse(asJson.stdout);
     expect(parsed.valid).toBe(false);
-    expect(parsed.issues[0]).toMatchObject({ level: 'error', step: 'plan-feature', file: '.df/feature/steps/plan-feature/SKILL.md.hbs' });
+    expect(parsed.flows[0].issues[0]).toMatchObject({
+      level: 'error',
+      step: 'plan-feature',
+      file: '.df/feature/steps/plan-feature/SKILL.md.hbs',
+    });
   });
 
   it('prints the flow graph with --print', async () => {
@@ -428,7 +478,9 @@ describe('dfl agents, flow-update, uninstall', () => {
     expect(claude).toMatchObject({ selected: true, detected: true, skillsDir: '.claude/skills', mcpFile: '.mcp.json' });
     expect(agents.find((a) => a.id === 'cursor')).toMatchObject({ selected: false, detected: false });
     const table = await ok(root, 'agents');
-    expect(table.stdout).toMatch(/●\s+claude\s+Claude Code\s+\.claude\/skills\//);
+    expect(table.stdout).toMatch(/●\s+✔\s+claude\s+Claude Code\s+\.claude\/skills\//);
+    expect(table.stdout).toMatch(/○\s+cursor\s+Cursor\s+\.cursor\/skills\//);
+    expect(table.stdout).toContain('✔ detected in this project');
     expect(table.stdout).toContain('Notes');
   });
 
@@ -545,5 +597,571 @@ describe('runCli', () => {
     writeSampleFlow(paths);
     const { steps } = await json(paths.root, 'step', 'list');
     expect(steps.map((s: { id: string }) => s.id)).toEqual(['plan', 'build', 'review', 'done']);
+  });
+});
+
+describe('MCP preference (install --no-mcp / --mcp)', () => {
+  it('remembers --no-mcp: later syncs leave MCP configs alone until install --mcp', async () => {
+    const root = makeTempDir();
+    const original = '{"mcpServers":{"github":{"command":"gh"}}}\n';
+    fs.writeFileSync(path.join(root, '.mcp.json'), original);
+    const install = await ok(root, 'install', '--yes', '--agents', 'claude,codex', '--no-mcp');
+    expect(install.stdout).toContain('MCP server not registered (run `dfl install --mcp` to add it)');
+    expect(readJsonFile(root, '.df/local.json').mcp).toBe(false);
+
+    await ok(root, 'vars', 'set', 'mainBranch', 'main');
+    await ok(root, 'step', 'add', 'extra');
+    await ok(root, 'flow-update');
+    await ok(root, 'update', '--yes');
+    await ok(root, 'flow', 'create', 'other', '--steps', 'a,b');
+    await ok(root, 'flow', 'use', 'other');
+    await ok(root, 'install', '--yes');
+    expect(read(root, '.mcp.json')).toBe(original);
+    expect(has(root, '.codex')).toBe(false);
+    expect(readJsonFile(root, '.df/local.json').mcp).toBe(false);
+    // The installed skills are current (the preference is part of the fingerprint).
+    expect((await ok(root, 'status')).stderr).not.toContain('out of date');
+
+    // --mcp turns it on again and is remembered as well.
+    await ok(root, 'install', '--yes', '--mcp');
+    expect(readJsonFile(root, '.mcp.json').mcpServers.dfl).toBeDefined();
+    expect(readJsonFile(root, '.mcp.json').mcpServers.github).toEqual({ command: 'gh' });
+    expect(read(root, '.codex/config.toml')).toContain('[mcp_servers.dfl]');
+    expect(readJsonFile(root, '.df/local.json').mcp).toBe(true);
+
+    // flow-update --no-mcp is a one-off: it neither removes the entry nor changes the preference.
+    await ok(root, 'flow-update', '--no-mcp');
+    expect(readJsonFile(root, '.mcp.json').mcpServers.dfl).toBeDefined();
+    expect(readJsonFile(root, '.df/local.json').mcp).toBe(true);
+
+    // An auto-sync that (re)writes a committed MCP config says so.
+    fs.writeFileSync(path.join(root, '.mcp.json'), original);
+    const resync = await ok(root, 'vars', 'set', 'mainBranch', 'trunk');
+    expect(resync.stdout).toContain('+ dfl MCP server in .mcp.json');
+    expect(readJsonFile(root, '.mcp.json').mcpServers.dfl).toBeDefined();
+  });
+
+  it('says the entry was left in place when MCP is turned off after it was registered', async () => {
+    const root = await installedProject();
+    const { stdout } = await ok(root, 'install', '--yes', '--no-mcp');
+    expect(stdout).not.toContain('MCP server not registered');
+    expect(stdout).toContain('left unchanged in .mcp.json, .codex/config.toml');
+    expect(readJsonFile(root, '.mcp.json').mcpServers.dfl).toBeDefined();
+    // uninstall still removes the tracked entry.
+    await ok(root, 'uninstall', '--yes');
+    expect(has(root, '.mcp.json')).toBe(false);
+  });
+});
+
+describe('uninstall sticks until dfl install', () => {
+  const nothingInstalled = (root: string): void => {
+    expect(has(root, '.claude/skills')).toBe(false);
+    expect(has(root, '.agents/skills')).toBe(false);
+    expect(has(root, '.mcp.json')).toBe(false);
+    expect(has(root, '.codex/config.toml')).toBe(false);
+    expect(has(root, '.df/installed.json')).toBe(false);
+    expect(has(root, '.gitignore') && read(root, '.gitignore').includes('dfl (managed)')).toBe(false);
+  };
+
+  it('mutating commands after uninstall only change .df/ and say how to reinstall', async () => {
+    const root = await installedProject();
+    await ok(root, 'uninstall', '--yes');
+    nothingInstalled(root);
+    for (const args of [
+      ['step', 'add', 'extra', '--after', 'plan-feature'],
+      ['vars', 'set', 'foo', 'bar'],
+      ['flow', 'use', 'feature'],
+      ['flow', 'create', 'other', '--steps', 'a,b', '--use'],
+    ]) {
+      const result = await ok(root, ...args);
+      expect(result.stdout, args.join(' ')).not.toContain('Synced');
+      expect(result.stdout, args.join(' ')).toContain('Skills not installed for you yet; run `dfl install`.');
+      nothingInstalled(root);
+    }
+    expect((await ok(root, 'status')).stdout).toContain('Skills not installed for you yet');
+    expect((await json(root, 'status')).skills).toMatchObject({ installed: false, upToDate: false, hint: 'dfl install' });
+
+    // install brings everything back with the remembered agents.
+    await ok(root, 'install', '--yes');
+    expect(has(root, '.claude/skills/a/SKILL.md')).toBe(true);
+    expect(has(root, '.agents/skills/a/SKILL.md')).toBe(true);
+    expect(readJsonFile(root, '.mcp.json').mcpServers.dfl).toBeDefined();
+  });
+
+  it('also sticks with team-default agents after uninstall --purge', async () => {
+    const root = makeTempDir();
+    await ok(root, 'install', '--yes', '--project-agents');
+    await ok(root, 'uninstall', '--purge', '--yes');
+    const add = await ok(root, 'step', 'add', 'x');
+    expect(add.stdout).not.toContain('Synced');
+    expect(has(root, '.claude/skills')).toBe(false);
+    expect(has(root, '.mcp.json')).toBe(false);
+  });
+
+  it('flow-update after uninstall installs again (explicit request)', async () => {
+    const root = await installedProject();
+    await ok(root, 'uninstall', '--yes');
+    const update = await ok(root, 'flow-update');
+    expect(update.stdout).toContain('Synced');
+    expect(has(root, '.claude/skills/spec-feature/SKILL.md')).toBe(true);
+  });
+
+  it('stays installed when the last active flow is deleted, so the next flow gets its skills', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    await ok(paths.root, 'flow', 'delete', 'sample', '--yes');
+    expect(has(paths.root, '.claude/skills/plan')).toBe(false);
+    const created = await ok(paths.root, 'flow', 'create', 'next-one', '--steps', 'a,b', '--use');
+    expect(created.stdout).toContain('Synced');
+    expect(has(paths.root, '.claude/skills/a/SKILL.md')).toBe(true);
+  });
+
+  it('keeps the committed MCP entry when the last active flow is deleted (only uninstall removes it)', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--mcp');
+    const before = fs.readFileSync(path.join(paths.root, '.mcp.json'), 'utf8');
+    await ok(paths.root, 'flow', 'delete', 'sample', '--yes');
+    expect(has(paths.root, '.claude/skills/plan')).toBe(false);
+    expect(fs.readFileSync(path.join(paths.root, '.mcp.json'), 'utf8')).toBe(before);
+    expect(readJsonFile(paths.root, '.df/installed.json').mcp).toMatchObject([{ file: '.mcp.json', server: 'dfl' }]);
+    await ok(paths.root, 'uninstall', '--yes');
+    expect(has(paths.root, '.mcp.json')).toBe(false);
+  });
+
+  it('asks for --yes without a terminal, like the other destructive commands', async () => {
+    const root = await installedProject();
+    await ok(root, 'vars', 'set', 'reviewer', 'octocat');
+    for (const args of [['uninstall', '--purge'], ['uninstall']]) {
+      const refused = await dfl(root, ...args);
+      expect(refused.code, args.join(' ')).toBe(1);
+      expect(refused.stderr).toContain('confirmation required');
+      expect(refused.stderr).toContain('--yes');
+      expect(has(root, '.df/local.json')).toBe(true);
+      expect(has(root, '.claude/skills/spec-feature')).toBe(true);
+    }
+    await ok(root, 'uninstall', '--purge', '--yes');
+    expect(has(root, '.df/local.json')).toBe(false);
+    expect(has(root, '.df/feature/flow.json')).toBe(true);
+  });
+});
+
+describe('switching the active flow is all or nothing', () => {
+  async function withBrokenFlow(): Promise<string> {
+    const root = await installedProject();
+    await ok(root, 'flow', 'create', 'broken', '--from', 'bugfix');
+    fs.rmSync(path.join(root, '.df/broken/steps/diagnose-bug/SKILL.md.hbs'));
+    return root;
+  }
+
+  it('flow use <invalid flow> changes nothing', async () => {
+    const root = await withBrokenFlow();
+    await ok(root, 'flow', 'use', 'feature');
+    for (const scope of [[], ['--project']]) {
+      const before = { config: read(root, '.df/config.json'), local: read(root, '.df/local.json'), manifest: read(root, '.df/installed.json') };
+      const result = await dfl(root, 'flow', 'use', 'broken', ...scope);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain('Flow "broken" is invalid');
+      expect(result.stdout).not.toContain('Active flow: broken');
+      expect(read(root, '.df/config.json')).toBe(before.config);
+      expect(read(root, '.df/local.json')).toBe(before.local);
+      expect(read(root, '.df/installed.json')).toBe(before.manifest);
+    }
+    expect((await json(root, 'status')).flow).toBe('feature');
+    // --no-sync does not make an invalid flow active either.
+    expect((await dfl(root, 'flow', 'use', 'broken', '--no-sync')).code).toBe(1);
+  });
+
+  it('flow import --use keeps an invalid flow but does not activate it', async () => {
+    const root = await withBrokenFlow();
+    const result = await dfl(root, 'flow', 'import', path.join(root, '.df/broken'), '--name', 'copy', '--use');
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('Imported flow copy');
+    expect(result.stderr).toContain('imported but not activated');
+    expect(result.stderr).toContain('dfl flow use copy');
+    expect(has(root, '.df/copy/flow.json')).toBe(true);
+    expect(readJsonFile(root, '.df/local.json').activeFlow).toBeUndefined();
+    expect(readJsonFile(root, '.df/installed.json').flow).toBe('feature');
+  });
+
+  it('restores the previous active flow when the sync fails (cancelled variable prompt)', async () => {
+    const root = await installedProject();
+    const paths = projectPaths(root);
+    writeSampleFlow(paths); // requires "reviewer", which has no value
+    const before = { config: read(root, '.df/config.json'), local: read(root, '.df/local.json') };
+    promptControl.text = () => Promise.reject(new CancelledError());
+    await expect(switchActiveFlow(paths, 'sample', 'local', { sync: true, interactive: true })).rejects.toBeInstanceOf(CancelledError);
+    expect(read(root, '.df/config.json')).toBe(before.config);
+    expect(read(root, '.df/local.json')).toBe(before.local);
+    await expect(switchActiveFlow(paths, 'sample', 'project', { sync: true, interactive: true })).rejects.toBeInstanceOf(CancelledError);
+    expect(read(root, '.df/config.json')).toBe(before.config);
+    expect(read(root, '.df/local.json')).toBe(before.local);
+    expect(readJsonFile(root, '.df/installed.json').flow).toBe('feature');
+  });
+});
+
+describe('a stored step that no longer exists', () => {
+  const staleState = (root: string): void =>
+    fs.writeFileSync(
+      path.join(root, '.df/state.json'),
+      JSON.stringify({ version: 1, flows: { feature: { current: 'implement-feature-old', history: [], updatedAt: new Date().toISOString() } } }),
+    );
+
+  it('is reported by next, goto, reset and flow-update', async () => {
+    const root = await installedProject();
+    staleState(root);
+    const next = await ok(root, 'next');
+    expect(next.stderr).toContain('"implement-feature-old" no longer exists');
+    expect(next.stdout).toContain('Spec → Plan');
+    // The repaired state was saved: the next command has nothing to report.
+    expect((await ok(root, 'next')).stderr).not.toContain('no longer exists');
+
+    staleState(root);
+    const asJson = JSON.parse((await ok(root, 'next', '--json')).stdout);
+    expect(asJson.repaired).toMatch(/no longer exists/);
+
+    staleState(root);
+    expect((await ok(root, 'goto', 'plan-feature')).stderr).toContain('no longer exists');
+    staleState(root);
+    expect(JSON.parse((await ok(root, 'goto', 'plan-feature', '--json')).stdout).repaired).toMatch(/no longer exists/);
+    staleState(root);
+    expect((await ok(root, 'reset', '--yes')).stderr).toContain('no longer exists');
+    staleState(root);
+    expect((await ok(root, 'flow-update')).stderr).toContain('no longer exists');
+  });
+});
+
+describe('project root resolution', () => {
+  it('install in a git repository nested in a dfl project sets up the nested repository', async () => {
+    const outer = makeTempDir();
+    gitInit(outer);
+    await ok(outer, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    const before = { local: read(outer, '.df/local.json'), config: read(outer, '.df/config.json'), skills: fs.readdirSync(path.join(outer, '.claude/skills')) };
+    const inner = path.join(outer, 'vendor', 'inner');
+    fs.mkdirSync(inner, { recursive: true });
+    gitInit(inner);
+
+    const install = await dflIn(inner, 'install', '--yes', '--flow', 'bugfix', '--agents', 'claude', '--no-mcp');
+    expect(install.code, install.stderr).toBe(0);
+    expect(install.stdout).toContain(inner);
+    expect(has(inner, '.df/bugfix/flow.json')).toBe(true);
+    expect(has(inner, '.claude/skills/reproduce-bug/SKILL.md')).toBe(true);
+    expect(read(outer, '.df/local.json')).toBe(before.local);
+    expect(read(outer, '.df/config.json')).toBe(before.config);
+    expect(has(outer, '.df/bugfix')).toBe(false);
+    expect(fs.readdirSync(path.join(outer, '.claude/skills'))).toEqual(before.skills);
+
+    // Other commands never cross into the enclosing repository's project.
+    const other = path.join(outer, 'libs', 'other');
+    fs.mkdirSync(other, { recursive: true });
+    gitInit(other);
+    const status = await dflIn(other, 'status');
+    expect(status.code).toBe(1);
+    expect(status.stderr).toContain('No dfl project in this git repository');
+    expect(status.stderr).toContain(`--root ${outer}`);
+    // A plain subdirectory of the project still finds it.
+    fs.mkdirSync(path.join(outer, 'src'));
+    expect((await dflIn(path.join(outer, 'src'), 'status', '--json')).code).toBe(0);
+  });
+
+  it('rejects a --root that does not exist or is a file, without creating anything', async () => {
+    const missing = path.join(makeTempDir(), 'typo');
+    for (const args of [['status'], ['flow', 'list'], ['install', '--yes'], ['flow', 'create', 'x', '--steps', 'a']]) {
+      const result = await dfl(missing, ...args);
+      expect(result.code, args.join(' ')).toBe(1);
+      expect(result.stderr).toContain('does not exist');
+      expect(fs.existsSync(missing)).toBe(false);
+    }
+    const file = path.join(makeTempDir(), 'afile');
+    fs.writeFileSync(file, '');
+    const asFile = await dfl(file, 'install', '--yes');
+    expect(asFile.code).toBe(1);
+    expect(asFile.stderr).toContain('is not a directory');
+    expect(asFile.stderr).not.toContain('Unexpected error');
+  });
+});
+
+describe('install with several flows', () => {
+  function twoFlows() {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    createFlow(paths, 'other', { steps: ['one', 'two'] });
+    return paths;
+  }
+
+  it('refuses to pick an active flow arbitrarily without a terminal', async () => {
+    const paths = twoFlows();
+    const config = read(paths.root, '.df/config.json');
+    const result = await dfl(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Several flows');
+    expect(result.stderr).toContain('--flow');
+    expect(read(paths.root, '.df/config.json')).toBe(config);
+    expect(has(paths.root, '.claude/skills')).toBe(false);
+
+    const chosen = await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp', '--flow', 'other');
+    expect(chosen.stdout).toContain('Saved "other" as the team default flow in .df/config.json');
+    expect(readJsonFile(paths.root, '.df/config.json').activeFlow).toBe('other');
+  });
+
+  it('keeps a personal active flow personal', async () => {
+    const paths = twoFlows();
+    fs.writeFileSync(paths.localFile, JSON.stringify({ version: 1, activeFlow: 'other', vars: {} }));
+    const { stdout } = await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    expect(stdout).toContain('Active flow Other');
+    expect(stdout).not.toContain('team default flow');
+    expect(readJsonFile(paths.root, '.df/config.json').activeFlow).toBeUndefined();
+    expect(has(paths.root, '.claude/skills/one/SKILL.md')).toBe(true);
+  });
+
+  it('warns when the deleted flow was the team default and several flows remain', async () => {
+    const root = await installedProject();
+    await ok(root, 'flow', 'create', 'b', '--from', 'quick');
+    await ok(root, 'flow', 'create', 'd', '--from', 'bugfix');
+    await ok(root, 'flow', 'use', 'b');
+    const { stderr } = await ok(root, 'flow', 'delete', 'feature', '--yes');
+    expect(stderr).toContain('No team default flow is set any more');
+  });
+});
+
+describe('command details', () => {
+  it('step remove checks that the step exists before asking', async () => {
+    const root = await installedProject();
+    const result = await dfl(root, 'step', 'remove', 'nope');
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('Step "nope" does not exist in flow "feature"');
+    expect(result.stderr).toContain('spec-feature');
+    expect(result.stderr).not.toContain('confirmation required');
+  });
+
+  it('--template-file must be a file', async () => {
+    const root = await installedProject();
+    const dir = makeTempDir();
+    const add = await dfl(root, 'step', 'add', 'extra', '--template-file', dir);
+    expect(add.code).toBe(1);
+    expect(add.stderr).toContain('is not a regular file');
+    expect(add.stderr).not.toContain('Unexpected error');
+    expect(has(root, '.df/feature/steps/extra')).toBe(false);
+
+    const template = read(root, '.df/feature/steps/plan-feature/SKILL.md.hbs');
+    const edit = await dfl(root, 'step', 'edit', 'plan-feature', '--template-file', dir);
+    expect(edit.code).toBe(1);
+    expect(edit.stderr).toContain('is not a regular file');
+    expect(read(root, '.df/feature/steps/plan-feature/SKILL.md.hbs')).toBe(template);
+  });
+
+  it('step transition --description sets the condition shown in the skill', async () => {
+    const root = await installedProject();
+    const { stdout } = await ok(root, 'step', 'transition', 'verify-feature', 'QA_FAILED', 'implement-feature', '--description', 'QA checklist failed');
+    expect(stdout).toContain('When: QA checklist failed');
+    expect(readJsonFile(root, '.df/feature/flow.json').machine.states['verify-feature'].on.QA_FAILED).toEqual({
+      target: 'implement-feature',
+      description: 'QA checklist failed',
+    });
+    expect(read(root, '.claude/skills/verify-feature/SKILL.md')).toContain('QA checklist failed');
+
+    const tip = await ok(root, 'step', 'transition', 'verify-feature', 'BLOCKED', 'plan-feature');
+    expect(tip.stdout).toContain('--description');
+    const both = await dfl(root, 'step', 'transition', 'verify-feature', 'BLOCKED', '--remove', '--description', 'x');
+    expect(both.code).toBe(1);
+    expect(both.stderr).toContain('--description cannot be combined with --remove');
+  });
+
+  it('flow validate --json has one shape whatever the project state', async () => {
+    const single = await installedProject();
+    const one = await json(single, 'flow', 'validate');
+    expect(one).toEqual({ valid: true, flows: [expect.objectContaining({ flow: 'feature', valid: true })] });
+
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    writeSampleFlow(paths, sampleFlowDefinition('second'));
+    const all = await json(paths.root, 'flow', 'validate');
+    expect(Object.keys(all).sort()).toEqual(['flows', 'valid']);
+    expect(all.flows.map((f: { flow: string }) => f.flow)).toEqual(['sample', 'second']);
+    const named = await json(paths.root, 'flow', 'validate', 'second');
+    expect(Object.keys(named).sort()).toEqual(['flows', 'valid']);
+
+    fs.rmSync(path.join(paths.stepDir('second', 'plan'), 'SKILL.md.hbs'));
+    const invalid = await dfl(paths.root, 'flow', 'validate', '--json');
+    expect(invalid.code).toBe(1);
+    expect(JSON.parse(invalid.stdout)).toMatchObject({ valid: false, flows: [{ valid: true }, { valid: false }] });
+  });
+
+  it('fits the agents table into an 80-column terminal', async () => {
+    const root = makeTempDir();
+    for (const dir of ['.claude', '.cursor', '.codex', '.devin', '.kiro']) fs.mkdirSync(path.join(root, dir));
+    vi.stubEnv('COLUMNS', '80');
+    const { stdout } = await ok(root, 'agents');
+    const lines = stdout.split('\n');
+    const tooWide = lines.filter((line) => [...line].length > 80);
+    expect(tooWide).toEqual([]);
+    expect(stdout).toMatch(/○\s+✔\s+claude\s+\.claude\/skills\/\s+\/<skill>\s+\.mcp\.json/);
+    expect(stdout).toMatch(/kiro\s+\.kiro\/skills\/\s+\/<skill>\s+\.kiro\/settings\/mcp\.json/);
+  });
+});
+
+describe('installed skills freshness (dfl status)', () => {
+  it('warns when the installed skills are out of date and recovers after flow-update', async () => {
+    const root = await installedProject();
+    const fresh = await ok(root, 'status');
+    expect(fresh.stderr).not.toContain('out of date');
+    expect((await json(root, 'status')).skills).toEqual({ installed: true, upToDate: true });
+
+    fs.appendFileSync(path.join(root, '.df/feature/steps/spec-feature/SKILL.md.hbs'), '\nMore.\n');
+    const stale = await ok(root, 'status');
+    expect(stale.stderr).toContain('Installed skills are out of date');
+    expect(stale.stderr).toContain('`dfl flow-update`');
+    expect((await json(root, 'status')).skills).toMatchObject({ installed: true, upToDate: false, hint: 'dfl flow-update' });
+
+    await ok(root, 'flow-update');
+    expect((await ok(root, 'status')).stderr).not.toContain('out of date');
+
+    // Another flow is not what the installed skills are for: no freshness report for it.
+    await ok(root, 'flow', 'create', 'other', '--steps', 'a');
+    expect((await json(root, 'status', '--flow', 'other')).skills).toBeUndefined();
+  });
+
+  it('reports a team switch of the active flow after a pull', async () => {
+    const root = await installedProject();
+    await ok(root, 'flow', 'create', 'fixes', '--from', 'bugfix');
+    const config = readJsonFile(root, '.df/config.json');
+    fs.writeFileSync(path.join(root, '.df/config.json'), JSON.stringify({ ...config, activeFlow: 'fixes' }));
+    const { stderr } = await ok(root, 'status');
+    expect(stderr).toContain('for flow "feature" but the active flow is "fixes"');
+  });
+});
+
+describe('dfl flow pull', () => {
+  it('updates a template-based flow from the dfl templates', async () => {
+    const root = await installedProject();
+    await ok(root, 'flow', 'create', 'fixes', '--from', 'bugfix', '--use');
+    const file = path.join(root, '.df/fixes/steps/fix-bug/SKILL.md.hbs');
+    const pristine = fs.readFileSync(file, 'utf8');
+    fs.writeFileSync(file, `${pristine}\nLocal edit.\n`);
+    await ok(root, 'next');
+
+    const dry = await ok(root, 'flow', 'pull', '--dry-run');
+    expect(dry.stdout).toContain('Changes to flow fixes from template "bugfix"');
+    expect(dry.stdout).toContain('~ steps/fix-bug/SKILL.md.hbs');
+    expect(fs.readFileSync(file, 'utf8')).toContain('Local edit.');
+
+    const refused = await dfl(root, 'flow', 'pull');
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('confirmation required');
+
+    const pulled = await ok(root, 'flow', 'pull', 'fixes', '--yes');
+    expect(pulled.stdout).toContain('Pulled flow fixes from template "bugfix" (1 file changed)');
+    expect(pulled.stdout).toContain('Synced');
+    expect(fs.readFileSync(file, 'utf8')).toBe(pristine);
+    expect(read(root, '.claude/skills/fix-bug/SKILL.md')).not.toContain('Local edit.');
+    expect((await json(root, 'status')).current).toBe('diagnose-bug'); // runtime state is kept
+
+    expect((await ok(root, 'flow', 'pull')).stdout).toContain('Flow fixes is up to date with template "bugfix"');
+  });
+
+  it('updates a flow imported from a local directory and refuses flows without a source', async () => {
+    const root = await installedProject();
+    const source = makeTempProject();
+    writeSampleFlow(source);
+    await ok(root, 'flow', 'import', source.flowDir('sample'), '--name', 'imported');
+    fs.appendFileSync(path.join(source.stepDir('sample', 'plan'), 'SKILL.md.hbs'), '\nUpstream change.\n');
+    await ok(root, 'flow', 'pull', 'imported', '--yes');
+    expect(read(root, '.df/imported/steps/plan/SKILL.md.hbs')).toContain('Upstream change.');
+
+    await ok(root, 'flow', 'create', 'mine', '--steps', 'a');
+    const none = await dfl(root, 'flow', 'pull', 'mine', '--yes');
+    expect(none.code).toBe(1);
+    expect(none.stderr).toContain('has no source to pull from');
+    expect((await dfl(root, 'flow', 'pull', 'nope')).stderr).toContain('Flow "nope" not found');
+  });
+});
+
+describe('Node.js version guard', () => {
+  it('accepts 22.12 and newer and explains older versions', () => {
+    for (const version of ['20.11.1', '22.11.0', '21.7.3', 'v18.0.0']) {
+      expect(nodeVersionError(version), version).toMatch(/needs Node\.js 22\.12 or newer \(found /);
+    }
+    expect(nodeVersionError('20.11.1')).toContain('found 20.11.1');
+    for (const version of ['22.12.0', '22.22.3', '23.0.0', '24.16.0']) expect(nodeVersionError(version), version).toBeNull();
+  });
+
+  it('runs before anything else is loaded', () => {
+    const cli = fs.readFileSync(path.join(import.meta.dirname, '../src/cli.ts'), 'utf8');
+    const staticImports = [...cli.matchAll(/^import .* from '([^']+)';$/gm)].map((match) => match[1]);
+    expect(staticImports).toEqual(['./ui/node-version.js']);
+    expect(cli.indexOf('nodeVersionError(process.versions.node)')).toBeLessThan(cli.indexOf("await import('./run.js')"));
+    const guard = fs.readFileSync(path.join(import.meta.dirname, '../src/ui/node-version.ts'), 'utf8');
+    expect(guard).not.toMatch(/^\s*import\s/m);
+  });
+});
+
+describe('integration fixes (G8)', () => {
+  it('step add says where an auto-placed step went', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    const { stdout } = await ok(paths.root, 'step', 'add', 'qa', '--no-sync');
+    expect(stdout).toContain('Added step qa (Qa) to flow "sample" after "review" (end of the NEXT path)');
+  });
+
+  it('step remove reports a refusal before asking, and lists rerouted and removed transitions', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    await ok(paths.root, 'flow', 'create', 'solo', '--steps', 'only');
+    const last = await dfl(paths.root, 'step', 'remove', 'only', '--flow', 'solo');
+    expect(last.code).toBe(1);
+    expect(last.stderr).toContain('it is the last step');
+    expect(last.stderr).not.toContain('confirmation required');
+
+    const refused = await dfl(paths.root, 'step', 'remove', 'build', '--flow', 'sample');
+    expect(refused.stderr).toContain('and 1 transition leading to it: confirmation required');
+    const removed = await ok(paths.root, 'step', 'remove', 'build', '--flow', 'sample', '--yes', '--no-sync');
+    expect(removed.stdout).toContain('~ plan NEXT → review');
+    expect(removed.stdout).toMatch(/review CHANGES_REQUESTED → build \(removed: it would point "review" at itself\)/);
+  });
+
+  it('warns about errors a flow already had when an edit leaves them in place', async () => {
+    const paths = makeTempProject();
+    const def = sampleFlowDefinition();
+    def.machine.states['plan']!.on = { NEXT: 'build', OOPS: 'missing' };
+    writeSampleFlow(paths, def);
+    const edited = await ok(paths.root, 'step', 'edit', 'build', '--title', 'Make', '--no-sync');
+    expect(edited.stderr).toContain('Flow "sample" still has 1 validation error');
+    expect(edited.stderr).toContain('missing');
+  });
+
+  it('flow view --zoom 3 shows the selected agents\' skill commands', async () => {
+    const root = makeTempDir();
+    await ok(root, 'install', '--agents', 'codex', '--flow', 'quick', '--yes', '--no-mcp');
+    const { stdout } = await ok(root, 'flow', 'view', '--print', '--zoom', '3');
+    expect(stdout).toContain('$plan-change');
+    expect(stdout).not.toContain('/plan-change');
+  });
+
+  it('flow use <template> suggests creating the flow from the template', async () => {
+    const root = await installedProject();
+    const result = await dfl(root, 'flow', 'use', 'bugfix');
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain('`dfl flow create bugfix --from bugfix --use`');
+  });
+
+  it('mutating commands wait for the project lock held by another dfl process (e.g. the MCP server)', async () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    const { acquireProjectLock } = await import('../src/core/lock.js');
+    const release = await acquireProjectLock(paths);
+    let finished = false;
+    const pending = dfl(paths.root, 'next').then((result) => {
+      finished = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(finished).toBe(false);
+    expect(has(paths.root, '.df/state.json')).toBe(false);
+    release();
+    const result = await pending;
+    expect(result.code).toBe(0);
+    expect(readJsonFile(paths.root, '.df/state.json').flows.sample.current).toBe('build');
+    expect(has(paths.root, '.df/.lock')).toBe(false);
   });
 });

@@ -2,6 +2,8 @@ name: Publish
 
 # Publishes @vishin-pavel/dfl to GitHub Packages for a published release or a pushed v* tag.
 # Both usually fire for one release; the second run sees the version already published and skips.
+# Prereleases (v1.2.0-rc.1, or a GitHub release marked as prerelease) go to the `next` dist-tag,
+# everything else to `latest` (see scripts/publish-tag.mjs).
 on:
   release:
     types: [published]
@@ -21,10 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.release.tag_name || github.ref_name }}
+      # The .npmrc written by setup-node reads the token from NODE_AUTH_TOKEN. setup-node v7 no longer
+      # exports a placeholder value, so it is set for the whole job (npm ci needs it too).
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22.x
           registry-url: https://npm.pkg.github.com
@@ -40,6 +45,20 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      - name: Choose the dist-tag
+        id: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+            tag="$(node scripts/publish-tag.mjs "${VERSION}" --prerelease)"
+          else
+            tag="$(node scripts/publish-tag.mjs "${VERSION}")"
+          fi
+          echo "Publishing ${VERSION} with dist-tag ${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
       - run: npm ci
 
       - run: npm run typecheck
@@ -48,8 +67,6 @@ jobs:
 
       - name: Skip if this version is already published
         id: published
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           name="$(node -p "require('./package.json').name")"
           if npm view "${name}@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
@@ -59,6 +76,6 @@ jobs:
 
       - name: Publish
         if: steps.published.outputs.exists != 'true'
-        run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIST_TAG: ${{ steps.dist.outputs.tag }}
+        run: npm publish --tag "${DIST_TAG}"

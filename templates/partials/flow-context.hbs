@@ -16,7 +16,7 @@ This is step {{step.number}} of {{flow.stepCount}} (**{{step.title}}**) of the f
 {{/each}}
 {{/if}}
 
-**Before you start:** call the `get_status` tool of the `{{dfl.mcpServer}}` MCP server (CLI fallback: `{{dfl.cli}} status`). If the current step is not `{{step.id}}`, tell the user and ask whether to switch to this step (`goto_step` with `{"step": "{{step.id}}"}`, CLI fallback: `{{dfl.cli}} goto {{step.id}}`) or to stop here and run the current step's slash command instead. Completing this step while another one is current is refused.
+**Before you start:** call the `get_status` tool of the `{{dfl.mcpServer}}` MCP server with `{"flow": "{{flow.name}}"}` (CLI fallback: `{{dfl.cli}} status --flow {{flow.name}}`). If the current step is not `{{step.id}}`, tell the user and ask whether to switch to this step (`goto_step` with `{"step": "{{step.id}}", "flow": "{{flow.name}}"}`, CLI fallback: `{{dfl.cli}} goto {{step.id}} --flow {{flow.name}}`) or to stop here and run the current step's slash command instead. Completing this step while another one is current is refused. If `get_status` reports that the installed skills are out of date, tell the user to run `{{dfl.cli}} flow-update`.
 
 {{#if step.next.length}}
 **When done:** pick the event that matches the outcome:
@@ -24,7 +24,7 @@ This is step {{step.number}} of {{flow.stepCount}} (**{{step.title}}**) of the f
 - `{{event}}` → {{#if final}}flow complete{{else}}{{title}} (`{{command skillName}}`){{/if}}{{#if description}}: {{description}}{{/if}}
 {{/each}}
 
-Call the `complete_step` tool with `{"step": "{{step.id}}", "event": "<EVENT>"}` (CLI fallback: `{{dfl.cli}} next <EVENT> --from {{step.id}}`), then tell the user the slash command of the next step, or that the flow is complete.
+Call the `complete_step` tool with `{"step": "{{step.id}}", "event": "<EVENT>", "flow": "{{flow.name}}"}` (CLI fallback: `{{dfl.cli}} next <EVENT> --from {{step.id}} --flow {{flow.name}}`), then tell the user the slash command of the next step, or that the flow is complete.
 {{else}}
 **When done:** this step has no outgoing events, so the flow ends here; tell the user.
 {{/if}}

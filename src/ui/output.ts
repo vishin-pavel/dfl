@@ -67,10 +67,12 @@ export function truncate(text: string, max: number): string {
   return `${out.trimEnd()}…`;
 }
 
-/** Terminal width for layout decisions (120 when stdout is not a terminal). */
+/** Terminal width for layout decisions: the terminal's columns, else `$COLUMNS`, else 120. */
 export function terminalWidth(): number {
   const columns = process.stdout.columns;
-  return typeof columns === 'number' && columns > 20 ? columns : 120;
+  if (typeof columns === 'number' && columns > 20) return columns;
+  const fromEnv = Number(process.env['COLUMNS']);
+  return Number.isInteger(fromEnv) && fromEnv > 20 ? fromEnv : 120;
 }
 
 /**

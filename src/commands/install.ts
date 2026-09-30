@@ -5,16 +5,18 @@ import type { CommandUnknownOpts } from '@commander-js/extra-typings';
 import { AGENTS, detectAgents, getAgent, parseAgentList } from '../agents/registry.js';
 import {
   getActiveFlowName,
+  getMcpEnabled,
   initProject,
   loadLocalConfig,
   loadProjectConfig,
   setActiveFlow,
+  setMcpEnabled,
   setSelectedAgents,
 } from '../core/config.js';
 import { DflError } from '../core/errors.js';
 import { createFlow, flowExists, listFlowTemplates, listFlows, loadFlow } from '../core/flow.js';
 import { loadRuntimeState } from '../core/machine.js';
-import { uninstallProject } from '../core/sync.js';
+import { readManifest, uninstallProject } from '../core/sync.js';
 import { AGENT_IDS, type AgentId, type FlowModel, type ProjectPaths } from '../core/types.js';
 import { assertFlowValid } from '../core/validate.js';
 import { resolveVars, setVar, varScope } from '../core/vars.js';
@@ -34,9 +36,12 @@ import {
 } from '../ui/prompts.js';
 import {
   confirmDestructive,
+  locked,
+  mcpChangeLine,
   projectFor,
   promptVarInteractive,
   syncWithDiff,
+  warnRepairedState,
   type CliContext,
   type SyncRun,
 } from './shared.js';
@@ -51,36 +56,39 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
     .option('-a, --agents <list>', `agents to install for, comma-separated (${AGENT_IDS.join(', ')})`)
     .option('-f, --flow <name>', 'flow template to create, or existing flow to activate')
     .option('-y, --yes', 'accept the defaults, never prompt')
-    .option('--no-mcp', 'do not register the dfl MCP server')
+    .option('--mcp', 'register the dfl MCP server in the agents\' project MCP configs (remembered)')
+    .option('--no-mcp', 'do not register the dfl MCP server (remembered for later syncs)')
     .option('--project-agents', 'save the agent selection as the team default in .df/config.json')
-    .action(async (opts, cmd) => {
-      await install(ctx, { ...opts, mcpExplicit: cmd.getOptionValueSource('mcp') === 'cli' });
+    .action(async (opts) => {
+      await install(ctx, opts);
     });
 
   program
     .command('uninstall')
-    .description('Remove installed skills, MCP entries and the managed .gitignore block (flows in .df/ are kept)')
+    .description('Remove the installed skills and the dfl MCP entries (flows in .df/ are kept)')
     .option('--purge', 'also delete .df/local.json, .df/state.json and rendered skill files')
     .option('-y, --yes', 'do not ask for confirmation')
     .action(async (opts) => {
       const paths = projectFor(ctx);
-      if (isInteractive(opts)) {
-        const ok = await confirmDestructive(
-          opts.purge
-            ? 'Remove installed skills and MCP entries, and delete personal config, state and rendered files?'
-            : 'Remove installed skills and MCP entries?',
-          opts,
-        );
-        if (!ok) {
-          print(c.dim('Nothing changed.'));
-          return;
-        }
+      // Like `flow delete` and `step remove`: without a terminal to ask, --yes is required.
+      const ok = await confirmDestructive(
+        opts.purge
+          ? 'Remove installed skills and MCP entries, and delete personal config, state and rendered files?'
+          : 'Remove installed skills and MCP entries?',
+        opts,
+      );
+      if (!ok) {
+        print(c.dim('Nothing changed.'));
+        return;
       }
-      const report = uninstallProject(paths, { purge: opts.purge });
+      const report = await locked(paths, () => uninstallProject(paths, { purge: opts.purge }));
       success(`Uninstalled dfl from ${paths.root} ${c.dim(`(${plural(report.removed.length, 'path')} removed)`)}`);
       for (const rel of report.removed) print(`  ${c.red(sym.removed)} ${rel}`);
       for (const entry of report.mcp) if (entry.changed) print(`  ${c.red(sym.removed)} dfl MCP server in ${entry.file}`);
       for (const message of report.warnings) warning(message);
+      if (report.manifestKept) {
+        print(c.dim('.df/installed.json still lists the MCP entries that could not be removed; run `dfl uninstall` again after fixing them.'));
+      }
       print(c.dim('Flows in .df/ were kept. Run `dfl install` to install again.'));
     });
 
@@ -88,18 +96,23 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
     .command('flow-update')
     .alias('update')
     .description('Re-render and re-install the active flow skills (after git pull or edits)')
-    .option('--no-mcp', 'do not touch MCP configs')
+    .option('--mcp', 'register the dfl MCP server this time, whatever your saved preference')
+    .option('--no-mcp', 'do not touch MCP configs this time')
     .option('--dry-run', 'show what would change without writing')
     .option('-y, --yes', 'never prompt for missing variables')
     .action(async (opts) => {
       const paths = projectFor(ctx);
-      const run = await syncWithDiff(paths, {
-        mcp: opts.mcp,
-        dryRun: opts.dryRun,
-        promptVar: isInteractive(opts) ? promptVarInteractive : undefined,
-      });
+      // Without --mcp/--no-mcp the saved preference (`dfl install --no-mcp`) applies.
+      const run = await locked(paths, () =>
+        syncWithDiff(paths, {
+          mcp: opts.mcp,
+          dryRun: opts.dryRun,
+          promptVar: isInteractive(opts) ? promptVarInteractive : undefined,
+        }),
+      );
       printLines(compactSyncLines(run, opts.dryRun === true));
       for (const message of run.report.warnings) warning(message);
+      warnRepairedState(paths, run.report.flow);
     });
 }
 
@@ -107,8 +120,8 @@ interface InstallOptions {
   agents?: string | undefined;
   flow?: string | undefined;
   yes?: boolean | undefined;
-  mcp: boolean;
-  mcpExplicit: boolean;
+  /** `--mcp` (true) / `--no-mcp` (false); undefined: ask, or use the saved preference. */
+  mcp?: boolean | undefined;
   projectAgents?: boolean | undefined;
 }
 
@@ -120,8 +133,12 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
     throw new DflError('No agents given to --agents.', { hint: `Valid agents: ${AGENT_IDS.join(', ')}.`, code: 'UNKNOWN_AGENT' });
   }
 
-  if (interactive) intro(c.inverse(' dfl install '));
-  else print(`${c.bold('dfl install')} ${c.dim(paths.root)}`);
+  if (interactive) {
+    intro(c.inverse(' dfl install '));
+    logMessage([`Project: ${c.bold(paths.root)}`]);
+  } else {
+    print(`${c.bold('dfl install')} ${c.dim(paths.root)}`);
+  }
 
   // Every question is asked before anything is written, so cancelling leaves the project untouched.
   // Flows: --flow, or templates when the project has none yet.
@@ -133,7 +150,14 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
   } else if (listFlows(paths).length === 0) {
     toCreate = await chooseTemplates(interactive);
   }
-  const active = preferred ?? getActiveFlowName(paths) ?? (await chooseActiveFlow(paths, toCreate, interactive));
+  const current = getActiveFlowName(paths);
+  const active = preferred ?? current ?? (await chooseActiveFlow(paths, toCreate, interactive));
+  // The committed team default is only set when it is missing and the choice is not arbitrary: flows
+  // created now, --flow, a flow picked in the wizard or the project's only flow. A personal choice
+  // (local.json) never becomes the team default.
+  const teamFlow =
+    loadProjectConfig(paths).activeFlow === undefined &&
+    (preferred !== undefined || current === undefined || loadLocalConfig(paths).activeFlow !== current);
 
   // Agents.
   const detected = detectAgents(paths.root);
@@ -154,10 +178,15 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
         })
       : initialAgents;
 
+  // Remembered per developer (local.json `mcp`): later syncs follow it until the next `dfl install --mcp`.
   const mcp =
-    interactive && !opts.mcpExplicit
-      ? await confirm({ message: 'Register the dfl MCP server in the project MCP config of these agents?', initialValue: true })
-      : opts.mcp;
+    opts.mcp ??
+    (interactive
+      ? await confirm({
+          message: 'Register the dfl MCP server in the project MCP config of these agents?',
+          initialValue: getMcpEnabled(paths),
+        })
+      : getMcpEnabled(paths));
 
   // Team default.
   let saveTeam = opts.projectAgents === true;
@@ -168,7 +197,7 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
   // Writes start here.
   initProject(paths);
   for (const name of toCreate) createFlow(paths, name, { from: name });
-  if (loadProjectConfig(paths).activeFlow === undefined) setActiveFlow(paths, active, 'project');
+  if (teamFlow) setActiveFlow(paths, active, 'project');
   else if (getActiveFlowName(paths) !== active) setActiveFlow(paths, active, 'local');
   const model = loadFlow(paths, active);
 
@@ -181,11 +210,13 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
     }
   }
 
+  // Saved before the sync: the install fingerprint covers the MCP preference.
+  setMcpEnabled(paths, mcp);
   const spin = interactive ? spinner() : undefined;
   spin?.start(`Installing the "${model.name}" flow for ${agentNames(agents)}`);
   let run: SyncRun;
   try {
-    run = await syncWithDiff(paths, { agents, mcp });
+    run = await locked(paths, () => syncWithDiff(paths, { agents, mcp }));
   } catch (error) {
     spin?.error('Install failed');
     throw error;
@@ -195,15 +226,23 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
 
   if (saveTeam) setSelectedAgents(paths, agents, 'project');
 
-  const lines = installSummary(model, run, { created: toCreate, saveTeam, mcp });
+  const lines = installSummary(model, run, {
+    created: toCreate,
+    saveTeam,
+    teamFlow,
+    mcp,
+    mcpKept: mcp ? [] : readManifest(paths).mcp.map((entry) => entry.file),
+  });
   const next = nextLine(paths, model, agents);
+  const repaired = loadRuntimeState(paths, model).repaired;
+  const warnings = [...run.report.warnings, ...(repaired ? [repaired] : [])];
   if (interactive) {
     logMessage(lines);
-    for (const message of run.report.warnings) logWarning(message);
+    for (const message of warnings) logWarning(message);
     outro(next);
   } else {
     printLines(lines);
-    for (const message of run.report.warnings) warning(message);
+    for (const message of warnings) warning(message);
     print(next);
   }
 }
@@ -242,16 +281,26 @@ async function chooseTemplates(interactive: boolean): Promise<string[]> {
   });
 }
 
-/** Active flow when none is set: among the flows about to be created (else the existing ones). */
+/**
+ * Active flow when none is set: among the flows about to be created (else the existing ones). Without
+ * a terminal, several candidates are an error (nothing is written): the choice would be arbitrary and
+ * would become the committed team default.
+ */
 async function chooseActiveFlow(paths: ProjectPaths, toCreate: string[], interactive: boolean): Promise<string> {
   const candidates = toCreate.length > 0 ? toCreate : listFlows(paths);
   if (candidates.length === 0) {
     throw new DflError('This project has no flows.', { hint: 'Run `dfl flow create <name>` first.', code: 'NO_ACTIVE_FLOW' });
   }
-  if (candidates.length === 1 || !interactive) return candidates[0]!;
+  if (candidates.length === 1) return candidates[0]!;
+  if (!interactive) {
+    throw new DflError('Several flows and no active flow is selected.', {
+      hint: `Pass --flow <name> (flows: ${candidates.join(', ')}), or set the team default with \`dfl flow use <name> --project\`.`,
+      code: 'NO_ACTIVE_FLOW',
+    });
+  }
   const templates = new Map(listFlowTemplates().map((t) => [t.name, t.title]));
   return select({
-    message: 'Which flow should be active?',
+    message: `Which flow should be active? ${c.dim('(saved as the team default in .df/config.json)')}`,
     options: candidates.map((name) => {
       const title = toCreate.includes(name) ? (templates.get(name) ?? name) : safeTitle(paths, name);
       return { value: name, label: title === name ? name : `${title} ${c.dim(`(${name})`)}` };
@@ -263,7 +312,7 @@ async function chooseActiveFlow(paths: ProjectPaths, toCreate: string[], interac
 function installSummary(
   model: FlowModel,
   run: SyncRun,
-  info: { created: string[]; saveTeam: boolean; mcp: boolean },
+  info: { created: string[]; saveTeam: boolean; teamFlow: boolean; mcp: boolean; mcpKept: string[] },
 ): string[] {
   const { report } = run;
   const width = terminalWidth() - 6;
@@ -274,6 +323,7 @@ function installSummary(
     `${c.green(sym.ok)} Active flow ${c.bold(model.title)} ${c.dim(`(${model.name}, ${plural(stepCount, 'step')})`)}` +
       (info.created.includes(model.name) ? c.dim(' – created from template') : ''),
   );
+  if (info.teamFlow) lines.push(`${c.green(sym.ok)} Saved "${model.name}" as the team default flow in .df/config.json`);
 
   const order = new Map(model.steps.map((step) => [step.skillName, step.index]));
   for (const id of report.agents) {
@@ -293,7 +343,8 @@ function installSummary(
   if (report.mcp.length > 0 || report.mcpManual.length > 0) {
     lines.push('', c.bold('MCP server "dfl"'));
     for (const entry of report.mcp) {
-      lines.push(`  ${c.green(sym.ok)} ${entry.file} ${c.dim(`(${agentNames(entry.agents)}${entry.changed ? '' : ', unchanged'})`)}`);
+      const status = entry.status ?? (entry.changed ? 'added' : 'unchanged');
+      lines.push(`  ${c.green(sym.ok)} ${entry.file} ${c.dim(`(${agentNames(entry.agents)}${status === 'added' ? '' : `, ${status}`})`)}`);
     }
     const notes = [
       ...report.mcpManual.map((m) => ({ agent: m.agent, text: m.instructions })),
@@ -306,8 +357,16 @@ function installSummary(
       const name = getAgent(note.agent).name;
       lines.push(`  ${c.yellow(sym.warn)} ${c.dim(note.text.startsWith(name) ? note.text : `${name}: ${note.text}`)}`);
     }
+  } else if (!info.mcp && info.mcpKept.length > 0) {
+    lines.push(
+      '',
+      c.dim(
+        `MCP server "dfl" left unchanged in ${[...new Set(info.mcpKept)].join(', ')}: registration is off for you ` +
+          '(`dfl install --mcp` turns it on; `dfl uninstall` removes the entry).',
+      ),
+    );
   } else if (!info.mcp && report.agents.length > 0) {
-    lines.push('', c.dim('MCP server not registered (run `dfl install` again to add it).'));
+    lines.push('', c.dim('MCP server not registered (run `dfl install --mcp` to add it).'));
   }
   if (run.report.removed.length > 0) {
     lines.push('', c.bold('Removed'));
@@ -329,7 +388,7 @@ function compactSyncLines(run: SyncRun, dryRun: boolean): string[] {
   const lines = [syncSummaryLine(run.report, run.added, dryRun)];
   for (const dir of run.added) lines.push(`  ${c.green(sym.added)} ${dir}/`);
   for (const dir of run.report.removed) lines.push(`  ${c.red(sym.removed)} ${dir}/`);
-  for (const entry of run.report.mcp) if (entry.changed) lines.push(`  ${c.green(sym.added)} dfl MCP server in ${entry.file}`);
+  for (const entry of run.report.mcp) if (entry.changed) lines.push(mcpChangeLine(entry));
   return lines;
 }
 

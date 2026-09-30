@@ -24,7 +24,9 @@ Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`):
 (no steps yet)
 {{/each}}
 
-This is a snapshot; always read the live flow with `get_flow` before changing anything.
+This is a snapshot; always read the live flow with `get_flow` before changing anything. If
+`get_flow` returns `current: null` with a `problem`, the flow is broken (for example after a
+merge): call `validate_flow`, show the user the errors and repair them with `update_step` first.
 {{else}}
 No flow was active at the last sync. Call `list_flows` and ask the user which flow to change
 (every tool accepts a `flow` argument).
@@ -51,8 +53,9 @@ fallbacks at the end.
      retarget an event, check that its condition still fits.
    - **Id**: a rename changes the slash command, the directory and every transition that
      targets the step; the current position in the flow is kept.
-   - **Position**: steps are ordered by their `NEXT` transitions, so moving a step means
-     rewiring (see below).
+   - **Position**: when a step runs is set by the `NEXT` transitions, so moving a step means
+     rewiring (see below); where it is listed and numbered ("step 3 of 6") is the order of the
+     states in flow.json.
    - **Initial step**: make this the step the flow starts with.
 3. **Check the templates.** For template changes, call `get_authoring_guide` first. Edit the
    current template from `get_step` minimally; keep its structure unless the user asks for a
@@ -107,6 +110,11 @@ Check the other events that pointed to or from the moved step (`FAILED`, `BACK`,
 the user whether they should change too. Then check the templates of the moved step and of its
 old and new neighbours for text that describes the old order (step 3), and update them in the
 same change.
+
+Step lists and numbers follow the order of the states in `.df/<flow>/flow.json` (the initial step
+first, final states last), not the transitions. After the rewiring, move the step's entry in
+`machine.states` to its new place in that file (change nothing else), then call `validate_flow`
+and `sync`.
 
 ## CLI fallbacks
 

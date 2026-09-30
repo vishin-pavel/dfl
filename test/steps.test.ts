@@ -3,7 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SKILL_TEMPLATE_FILE, defaultStepTemplate, loadFlow, writeFlowDefinition } from '../src/core/flow.js';
 import { gotoStep, loadRuntimeState } from '../src/core/machine.js';
-import { addStep, readStepTemplate, removeStep, setTransition, updateStep } from '../src/core/steps.js';
+import { addStep, planRemoveStep, readStepTemplate, removeStep, setTransition, updateStep } from '../src/core/steps.js';
 import type { FlowDefinition, FlowModel, FlowStateNodeConfig, ProjectPaths, StateFile } from '../src/core/types.js';
 import { validateDefinition } from '../src/core/validate.js';
 import { cleanupTempDirs, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
@@ -603,5 +603,45 @@ describe('transition descriptions', () => {
     model = setTransition(paths, 'sample', 'review', 'CHANGES_REQUESTED', 'build', '');
     expect(on(model, 'review')).toMatchObject({ CHANGES_REQUESTED: 'build' });
     expectDflError(() => setTransition(paths, 'sample', 'review', 'CHANGES_REQUESTED', null, 'x'), 'INVALID_OPTIONS');
+  });
+});
+
+describe('integration fixes (G8)', () => {
+  it('planRemoveStep reports the removal without writing anything', () => {
+    const paths = setup();
+    const before = fs.readFileSync(paths.flowFile('sample'), 'utf8');
+    const plan = planRemoveStep(paths, 'sample', 'build');
+    expect(plan.rewired).toEqual([{ source: 'plan', event: 'NEXT', from: 'build', to: 'review' }]);
+    expect(plan.dropped).toEqual([
+      { source: 'review', event: 'CHANGES_REQUESTED', target: 'build', description: 'Reviewer asked for changes', reason: 'self-loop' },
+    ]);
+    expect(plan.moveCurrentTo).toBe('review');
+    expect(fs.readFileSync(paths.flowFile('sample'), 'utf8')).toBe(before);
+    expect(fs.existsSync(paths.stepDir('sample', 'build'))).toBe(true);
+    // Same refusals as removeStep.
+    expectDflError(() => planRemoveStep(paths, 'sample', 'nope'), 'STEP_NOT_FOUND');
+    const solo = sampleFlowDefinition('solo');
+    solo.machine.states = { only: { meta: { title: 'Only' }, on: { NEXT: 'done' } }, done: { type: 'final' } };
+    solo.machine.initial = 'only';
+    writeSampleFlow(paths, solo);
+    expectDflError(() => planRemoveStep(paths, 'solo', 'only'), 'LAST_STEP');
+    // And removeStep applies exactly the plan.
+    const removed = removeStep(paths, 'sample', 'build');
+    expect(removed.rewired).toEqual(plan.rewired);
+    expect(removed.dropped).toEqual(plan.dropped);
+  });
+
+  it.skipIf(process.getuid?.() === 0)('addStep leaves no step directory behind when flow.json cannot be written', () => {
+    const paths = setup();
+    const flowDir = paths.flowDir('sample');
+    const before = fs.readFileSync(paths.flowFile('sample'), 'utf8');
+    fs.chmodSync(flowDir, 0o555);
+    try {
+      expect(() => addStep(paths, 'sample', { id: 'qa' })).toThrow();
+    } finally {
+      fs.chmodSync(flowDir, 0o755);
+    }
+    expect(fs.existsSync(paths.stepDir('sample', 'qa'))).toBe(false);
+    expect(fs.readFileSync(paths.flowFile('sample'), 'utf8')).toBe(before);
   });
 });

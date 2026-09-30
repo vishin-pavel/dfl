@@ -360,6 +360,11 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
 export interface UninstallOptions {
   /** Also delete `.df/local.json`, `.df/state.json` and rendered `.md` files under `.df`. */
   purge?: boolean | undefined;
+  /**
+   * Leave the `dfl` MCP entries alone (they are committed team config), e.g. when the last active flow
+   * is deleted: only the installed skills go. The caller keeps tracking them in its new manifest.
+   */
+  keepMcp?: boolean | undefined;
 }
 
 export interface UninstallReport {
@@ -407,7 +412,7 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
   const mcp: UninstallReport['mcp'] = [];
   const failed: McpManifestEntry[] = [];
   const seen = new Set<string>();
-  for (const entry of manifest.mcp) {
+  for (const entry of options.keepMcp ? [] : manifest.mcp) {
     if (seen.has(entry.file)) continue;
     seen.add(entry.file);
     const target = mcpTargetForFile(entry.file);
@@ -451,7 +456,15 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
   if (failed.length === 0) {
     removePath(paths.manifestFile);
   } else {
-    writeManifest(paths, { version: 1, agents: [], skills: [], mcp: failed, rendered: options.purge ? [] : [...rendered] });
+    // Kept only so a later `dfl uninstall` retries these entries; `uninstalled` stops auto-syncs.
+    writeManifest(paths, {
+      version: 1,
+      agents: [],
+      skills: [],
+      mcp: failed,
+      rendered: options.purge ? [] : [...rendered],
+      uninstalled: true,
+    });
   }
 
   if (options.purge) {
@@ -479,9 +492,19 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
   return { removed: removed.sort(compare), mcp, warnings: warnings.list(), ...(failed.length > 0 ? { manifestKept: true } : {}) };
 }
 
-/** True once this developer ran `dfl install` (`.df/installed.json` exists): mutations may auto-sync. */
+/**
+ * True once this developer ran `dfl install` (`.df/installed.json` exists and is not the leftover of
+ * an incomplete `dfl uninstall`): mutations may auto-sync.
+ */
 export function isInstalledForUser(paths: ProjectPaths): boolean {
-  return exists(paths.manifestFile);
+  if (!exists(paths.manifestFile)) return false;
+  try {
+    const data = readJsonIfExists<unknown>(paths.manifestFile);
+    return !(isRecord(data) && data['uninstalled'] === true);
+  } catch {
+    // An unreadable manifest still means dfl was installed; sync reports the problem.
+    return true;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -678,6 +701,7 @@ export function loadManifest(paths: ProjectPaths): { manifest: Manifest; warning
   if (rendered !== undefined) manifest.rendered = rendered;
   if (typeof data['fingerprint'] === 'string') manifest.fingerprint = data['fingerprint'];
   if (typeof data['dflVersion'] === 'string') manifest.dflVersion = data['dflVersion'];
+  if (data['uninstalled'] === true) manifest.uninstalled = true;
   return { manifest, warnings };
 }
 
@@ -691,6 +715,7 @@ export function writeManifest(paths: ProjectPaths, manifest: Manifest): void {
     ...(manifest.rendered !== undefined ? { rendered: manifest.rendered } : {}),
     ...(manifest.dflVersion !== undefined ? { dflVersion: manifest.dflVersion } : {}),
     ...(manifest.fingerprint !== undefined ? { fingerprint: manifest.fingerprint } : {}),
+    ...(manifest.uninstalled === true ? { uninstalled: true } : {}),
   });
 }
 

@@ -5,7 +5,7 @@ import type { CommandUnknownOpts } from '@commander-js/extra-typings';
 import { AGENTS, mcpConfigFile } from '../agents/registry.js';
 import { getSelectedAgents, isInitialized } from '../core/config.js';
 import { c } from '../ui/colors.js';
-import { print, printJson, printLines, sym, terminalWidth, wrapItems } from '../ui/output.js';
+import { print, printJson, printLines, sym, terminalWidth, width as textWidth, wrapItems } from '../ui/output.js';
 import { table } from '../ui/table.js';
 import { projectFor, type CliContext } from './shared.js';
 
@@ -34,25 +34,40 @@ export function registerAgentsCommand(program: CommandUnknownOpts, ctx: CliConte
         printJson({ root: paths.root, agents: rows });
         return;
       }
-      printLines(
+      // Fits the terminal: the detected mark shares the leading status cell, the AGENT column is dropped
+      // when the table would not fit, and the last column (MCP CONFIG) is truncated as a last resort.
+      const width = terminalWidth();
+      const cells = rows.map((row) => ({
+        status: `${row.selected ? c.cyan(sym.current) : c.dim(sym.pending)} ${row.detected ? c.green(sym.ok) : ' '}`,
+        id: row.selected ? c.bold(row.id) : row.id,
+        name: row.name,
+        skillsDir: `${row.skillsDir}/`,
+        invocation: row.invocation,
+        mcp: row.mcpFile !== undefined ? { text: row.mcpFile } : { text: 'manual', style: c.dim },
+      }));
+      const build = (withName: boolean, maxWidth?: number): string[] =>
         table(
-          rows.map((row) => [
-            row.selected ? c.cyan(sym.current) : c.dim(sym.pending),
-            row.selected ? c.bold(row.id) : row.id,
-            row.name,
-            `${row.skillsDir}/`,
-            row.invocation,
-            row.mcpFile ?? c.dim('manual'),
-            row.detected ? c.green(`${sym.ok} detected`) : '',
+          cells.map((cell) => [
+            cell.status,
+            cell.id,
+            ...(withName ? [cell.name] : []),
+            cell.skillsDir,
+            cell.invocation,
+            cell.mcp,
           ]),
-          { head: ['', 'ID', 'AGENT', 'SKILLS DIR', 'INVOKE', 'MCP CONFIG', ''] },
-        ),
-      );
+          {
+            head: ['', 'ID', ...(withName ? ['AGENT'] : []), 'SKILLS DIR', 'INVOKE', 'MCP CONFIG'],
+            maxWidth,
+          },
+        );
+      const full = build(true);
+      printLines(full.every((line) => textWidth(line) <= width) ? full : build(false, width));
       print();
-      print(c.dim(`${sym.current} selected for this project${selected.length === 0 ? ' (none yet: run `dfl install`)' : ''}`));
+      print(c.dim(`${sym.current} selected for this project   ${sym.ok} detected in this project`));
+      if (selected.length === 0) print(c.dim('No agents selected yet: run `dfl install`.'));
 
       // Notes for the agents that matter here (selected or detected); all of them in a fresh project.
-      const width = terminalWidth() - 4;
+      const notesWidth = width - 4;
       const relevant = rows.filter((row) => row.selected || row.detected);
       const noted = (relevant.length > 0 ? relevant : rows).filter((row) => row.notes || row.mcpNote);
       if (noted.length > 0) {
@@ -60,7 +75,7 @@ export function registerAgentsCommand(program: CommandUnknownOpts, ctx: CliConte
         print(c.bold('Notes'));
         for (const row of noted) {
           const text = [row.notes, row.mcpNote].filter(Boolean).join(' ');
-          const lines = wrapItems(text.split(/\s+/), ' ', width, '    ');
+          const lines = wrapItems(text.split(/\s+/), ' ', notesWidth, '    ');
           print(`  ${c.bold(row.name)}`);
           printLines(lines.map((line) => c.dim(line)));
         }

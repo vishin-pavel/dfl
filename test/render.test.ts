@@ -18,6 +18,7 @@ import {
   renderFlow,
   renderFlowSkills,
   renderTemplate,
+  slashCommandTokens,
 } from '../src/core/render.js';
 import type { ProjectPaths, RenderedSkill, TemplateContext } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, writeSampleFlow } from './helpers/project.js';
@@ -86,6 +87,7 @@ describe('helpers', () => {
     expect(render('{{indent 2 text}}', ctx)).toBe('  one\n\n  two');
     expect(render('{{#indent 4}}x\ny{{/indent}}', ctx)).toBe('    x\n    y');
     expect(render('{{command "plan-feature"}}', ctx)).toBe('/plan-feature');
+    expect(render('[{{handle " @@OctoCat "}}][{{handle "octocat"}}][{{handle missing}}]', ctx)).toBe('[OctoCat][octocat][]');
   });
 
   it('keeps bare property references that share a helper name working', () => {
@@ -343,7 +345,8 @@ describe('renderFlowSkills', () => {
       expect(section.split('\n').length).toBeLessThanOrEqual(25);
       expect(section).toContain('`get_status`');
       expect(section).toContain('`goto_step`');
-      expect(section).toContain(`\`{"step": "${skill.stepId}", "event": "<EVENT>"}\``);
+      expect(section).toContain(`\`{"step": "${skill.stepId}", "event": "<EVENT>", "flow": "sample"}\``);
+      expect(section).toContain('`get_status` tool of the `dfl` MCP server with `{"flow": "sample"}`');
       expect(section).toContain('`dfl next <EVENT>');
       expectNoSlashCommandTokens(text);
     }
@@ -568,5 +571,30 @@ describe('renderBuiltinSkills', () => {
 
   it('lists the packaged built-in skills', () => {
     expect(Array.isArray(builtinSkillNames())).toBe(true);
+  });
+});
+
+describe('slash-command tokens in rendered skills (G8, F76)', () => {
+  it('finds the tokens agents expand, outside frontmatter and (for @word) outside code fences', () => {
+    expect(slashCommandTokens('---\nname: x\ndescription: mail @me\n---\nplain text, a@b.c')).toEqual([]);
+    expect(slashCommandTokens('Use $ARGUMENTS and $1\n!`ls`\nask @octocat')).toEqual([
+      '$ARGUMENTS',
+      '$<digit>',
+      'a line starting with !`',
+      '@word',
+    ]);
+    expect(slashCommandTokens('```java\n@Override\n```\n')).toEqual([]);
+  });
+
+  it('warns when a variable value puts one into a rendered SKILL.md', () => {
+    const paths = sampleProject();
+    write(path.join(paths.stepDir('sample', 'review'), 'SKILL.md.hbs'), '# Review\n\nAsk {{vars.reviewer}} for a review.\n');
+    const model = loadFlow(paths, 'sample');
+    const clean = renderFlow(paths, model, { reviewer: 'octocat' });
+    expect(clean.warnings).toEqual([]);
+    const result = renderFlow(paths, model, { reviewer: '@octocat' });
+    expect(result.warnings).toEqual([
+      expect.stringMatching(/^\.df\/sample\/steps\/review\/SKILL\.md contains @word: Claude Code and OpenCode expand/),
+    ]);
   });
 });

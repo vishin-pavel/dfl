@@ -8,31 +8,49 @@
 import path from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { McpServer, ResourceTemplate, type CallToolResult } from '@modelcontextprotocol/server';
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  McpServer,
+  ResourceTemplate,
+  inputRequired,
+  inputResponse,
+  type CallToolResult,
+  type InputRequiredResult,
+  type ReadResourceResult,
+  type ServerContext,
+} from '@modelcontextprotocol/server';
 import { StdioServerTransport, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { DflError } from '../core/errors.js';
 import { getActiveFlowName } from '../core/config.js';
+import { ID_RE, MAX_ID_LENGTH } from '../core/ids.js';
 import { loadActiveFlow, skillSteps } from '../core/flow.js';
 import { isDir, readText } from '../core/fsx.js';
 import { findProjectRoot, packageVersion, projectPaths, resolveProjectRoot } from '../core/paths.js';
 import type { ProjectPaths } from '../core/types.js';
-import { AUTHORING_GUIDE } from './guide.js';
+import { authoringGuide } from './guide.js';
+import { withProjectLock } from '../core/lock.js';
 import {
   addStepTool,
+  cliFor,
+  commandPrefixForClient,
   completeStep,
   deleteStepTool,
   describeFlow,
   describeStatus,
   describeStep,
+  errorHint,
   fireEvent,
   formatError,
   jumpToStep,
   listFlowsInfo,
+  localizeCli,
   stepTemplateText,
   syncTool,
   updateStepTool,
   validateFlowInfo,
+  type ToolContext,
 } from './tools.js';
 
 export const MCP_SERVER_NAME = 'dfl';
@@ -40,11 +58,14 @@ export const MCP_SERVER_NAME = 'dfl';
 /** How long to wait for the client's `roots/list` answer before falling back to the cwd. */
 const ROOTS_TIMEOUT_MS = 5_000;
 
+/** Key of the roots request inside an input_required result (2026-07-28 clients). */
+const ROOTS_INPUT_KEY = 'roots';
+
 export const SERVER_INSTRUCTIONS = [
-  'dfl manages the development flow of this project: an ordered state machine of steps, each installed as an agent skill (slash command).',
-  'At the start of a step skill, call get_status to check that the step is the current one and which events it offers.',
-  'When the step is done, call complete_step with the step id and the event that matches the outcome (NEXT by default), then tell the user the command of the next step.',
-  'Use get_flow and get_step to inspect the flow. To change it, read get_authoring_guide, then use add_step, update_step or delete_step; they re-install the skills.',
+  'dfl manages the development flow of this project: an ordered state machine of steps, each installed as an agent skill.',
+  'At the start of a step skill, call get_status to check that the step is the current one and which events it offers; if its "skills" field has a warning (skills missing or out of date), pass it on to the user.',
+  'When the step is done, call complete_step with the step id and the event that matches the outcome (NEXT by default), then tell the user the "command" of the next step (how to invoke its skill in this agent).',
+  'Use get_flow and get_step to inspect the flow. To change it, read get_authoring_guide, then use add_step, update_step or delete_step; they re-install the skills once the developer ran `dfl install`.',
   'Every tool except list_flows, sync and get_authoring_guide accepts an optional "flow" (default: the active flow).',
 ].join(' ');
 
@@ -63,12 +84,38 @@ export interface RunMcpServerOptions extends DflMcpOptions {
 
 const flowArg = z
   .string()
+  .max(MAX_ID_LENGTH)
+  .regex(ID_RE, 'A flow name: lowercase letters, digits and single hyphens.')
   .optional()
   .describe('Flow name (the directory under .df/). Defaults to the active flow.');
 const stepArg = (what: string): z.ZodString => z.string().describe(what);
 
+/** A transition value: a target step id, or the target plus the condition for firing the event. */
+const transitionValue = z.union([
+  z.string(),
+  z.object({
+    target: z.string().describe('Target step id.'),
+    description: z
+      .string()
+      .optional()
+      .describe('When to fire the event (one short sentence); the flow-context partial shows it to the agent.'),
+  }),
+]);
+
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
+/** Only moves the current step or appends to flow.json (undoable with goto_step / delete_step). */
 const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
+/** Overwrites or deletes: templates, transitions, step directories, installed skill dirs. */
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, openWorldHint: false } as const;
+
+type ToolFn = (paths: ProjectPaths, ctx: ToolContext) => object | Promise<object>;
+
+interface RunOptions {
+  /** Serialize with other mutations (in this process and, via `.df/.lock`, across processes). */
+  mutating?: boolean;
+  /** The dfl://steps resource list may have changed: notify the client after success. */
+  changesResources?: boolean;
+}
 
 /** Creates the server with all tools/resources registered (not connected). */
 export function createDflMcpServer(options?: DflMcpOptions): McpServer {
@@ -86,13 +133,26 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     return next;
   };
 
-  const run = async (fn: (paths: ProjectPaths) => object | Promise<object>, mutating = false): Promise<CallToolResult> => {
+  const notifyResourcesChanged = (): void => {
+    if (!server.isConnected()) return;
+    void server.server.sendResourceListChanged().catch(() => undefined);
+  };
+
+  const run = async (ctx: ServerContext, fn: ToolFn, runOptions: RunOptions = {}): Promise<CallToolResult | InputRequiredResult> => {
+    let cli = 'dfl';
     try {
-      const paths = await resolver.paths();
-      const value = mutating ? await exclusive(async () => fn(paths)) : await fn(paths);
+      const resolved = await resolver.resolve(ctx);
+      if (isInputRequired(resolved)) return resolved;
+      const paths = resolved;
+      cli = cliFor(paths);
+      const toolCtx: ToolContext = { commandPrefix: commandPrefixForClient(clientName(server, ctx)), cli };
+      const value = runOptions.mutating
+        ? await exclusive(() => withProjectLock(paths, () => fn(paths, toolCtx)))
+        : await fn(paths, toolCtx);
+      if (runOptions.changesResources) notifyResourcesChanged();
       return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
     } catch (error) {
-      return errorResult(error);
+      return errorResult(error, cli);
     }
   };
 
@@ -103,11 +163,11 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Get flow',
       description:
-        'The active (or named) flow: steps in flow order with their transitions (event → target), the initial and current step, and the declared template variables.',
+        'The active (or named) flow: steps in flow order with their transitions (event → target), the initial and current step, the declared template variables and whether your installed skills are up to date. Also works on a broken flow (current is then null and "problem" says what to repair).',
       inputSchema: z.object({ flow: flowArg }),
       annotations: READ_ONLY,
     },
-    async ({ flow }) => run((paths) => describeFlow(paths, flow)),
+    async ({ flow }, ctx) => run(ctx, (paths, toolCtx) => describeFlow(paths, flow, toolCtx)),
   );
 
   server.registerTool(
@@ -118,7 +178,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       inputSchema: z.object({}),
       annotations: READ_ONLY,
     },
-    async () => run((paths) => listFlowsInfo(paths)),
+    async (_args, ctx) => run(ctx, (paths) => listFlowsInfo(paths)),
   );
 
   server.registerTool(
@@ -126,11 +186,11 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Get flow status',
       description:
-        'Where the flow is: the current step and its slash command, the events it can fire with their targets, whether the flow is done, and the last history entries. Call at the start of every step.',
+        'Where the flow is: the current step and the command that invokes its skill, the events it can fire with their targets, whether the flow is done, the last history entries and whether your installed skills are up to date ("skills"). Call at the start of every step.',
       inputSchema: z.object({ flow: flowArg }),
       annotations: READ_ONLY,
     },
-    async ({ flow }) => run((paths) => describeStatus(paths, flow)),
+    async ({ flow }, ctx) => run(ctx, (paths, toolCtx) => describeStatus(paths, flow, toolCtx)),
   );
 
   server.registerTool(
@@ -142,7 +202,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       inputSchema: z.object({ step: stepArg('Step id (state key).'), flow: flowArg }),
       annotations: READ_ONLY,
     },
-    async ({ step, flow }) => run((paths) => describeStep(paths, step, flow)),
+    async ({ step, flow }, ctx) => run(ctx, (paths) => describeStep(paths, step, flow)),
   );
 
   server.registerTool(
@@ -153,7 +213,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       inputSchema: z.object({ flow: flowArg }),
       annotations: { ...READ_ONLY, idempotentHint: true },
     },
-    async ({ flow }) => run((paths) => validateFlowInfo(paths, flow)),
+    async ({ flow }, ctx) => run(ctx, (paths) => validateFlowInfo(paths, flow)),
   );
 
   server.registerTool(
@@ -165,7 +225,19 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       inputSchema: z.object({}),
       annotations: READ_ONLY,
     },
-    async () => ({ content: [{ type: 'text', text: AUTHORING_GUIDE }], structuredContent: { guide: AUTHORING_GUIDE } }),
+    async (_args, ctx) => {
+      // The guide names CLI commands the way this project runs dfl; it never fails for lack of a project.
+      let cli = 'dfl';
+      try {
+        const resolved = await resolver.resolve(ctx);
+        if (isInputRequired(resolved)) return resolved;
+        cli = cliFor(resolved);
+      } catch {
+        // No project: plain `dfl`.
+      }
+      const guide = authoringGuide(cli);
+      return { content: [{ type: 'text', text: guide }], structuredContent: { guide } };
+    },
   );
 
   // --- Runtime tools --------------------------------------------------------
@@ -175,7 +247,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Fire flow event',
       description:
-        'Fires an event (default NEXT) from the current step and returns the new current step with its slash command. Pass "from" to fail unless that step is current.',
+        'Fires an event (default NEXT) from the current step and returns the new current step with the command that invokes its skill. Pass "from" to fail unless that step is current.',
       inputSchema: z.object({
         event: z.string().optional().describe('Event to fire, e.g. NEXT, BACK, FAILED, CHANGES_REQUESTED. Default NEXT.'),
         from: z.string().optional().describe('Expected current step id; the call fails if the flow is elsewhere.'),
@@ -183,7 +255,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       }),
       annotations: WRITES,
     },
-    async (args) => run((paths) => fireEvent(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => fireEvent(paths, args, toolCtx), { mutating: true }),
   );
 
   server.registerTool(
@@ -191,7 +263,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Complete step',
       description:
-        'Marks a step as done by firing an event (default NEXT) from it; fails if the step is not the current one. Returns the next step and its slash command.',
+        'Marks a step as done by firing an event (default NEXT) from it; fails if the step is not the current one. Returns the next step and the command that invokes its skill.',
       inputSchema: z.object({
         step: stepArg('Id of the step that was completed (must be the current step).'),
         event: z.string().optional().describe('Event matching the outcome, e.g. NEXT, FAILED, CHANGES_REQUESTED. Default NEXT.'),
@@ -199,7 +271,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       }),
       annotations: WRITES,
     },
-    async (args) => run((paths) => completeStep(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => completeStep(paths, args, toolCtx), { mutating: true }),
   );
 
   server.registerTool(
@@ -210,7 +282,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       inputSchema: z.object({ step: stepArg('Id of the step to make current.'), flow: flowArg }),
       annotations: WRITES,
     },
-    async (args) => run((paths) => jumpToStep(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => jumpToStep(paths, args, toolCtx), { mutating: true }),
   );
 
   // --- Authoring tools ------------------------------------------------------
@@ -220,9 +292,9 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Add step',
       description:
-        'Creates a step: its state in flow.json (wired in after/before another step), its directory and SKILL.md.hbs, then re-installs the skills. Without after/before it goes after the last step. Read get_authoring_guide first.',
+        'Creates a step: its state in flow.json (wired in after/before another step), its directory and SKILL.md.hbs, then re-installs the skills (once you ran `dfl install`). Without after/before it goes after the last step on the NEXT path from the initial step and takes over its NEXT target; `placement` in the result says where it went. Read get_authoring_guide first.',
       inputSchema: z.object({
-        id: stepArg('New step id: kebab-case, max 64 characters; it becomes the skill name and slash command.'),
+        id: stepArg('New step id: kebab-case, max 64 characters; it becomes the skill name (the user invokes it as /<id>, or $<id> in Codex).'),
         title: z.string().optional().describe('Short title (1-3 words). Default: the id in title case.'),
         description: z
           .string()
@@ -232,15 +304,18 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
         before: z.string().optional().describe('Insert before this step: every `event` transition to it (and initial) now leads to the new step.'),
         event: z.string().optional().describe('Event used to splice the step in. Default NEXT.'),
         on: z
-          .record(z.string(), z.string())
+          .record(z.string(), transitionValue)
           .optional()
-          .describe('Extra outgoing transitions of the new step, event → target step id, e.g. {"FAILED": "implement"}.'),
+          .describe(
+            'Extra outgoing transitions of the new step: event → target step id, or → {"target", "description"} where description says when to fire the event (give one for every non-NEXT event), e.g. {"FAILED": {"target": "implement", "description": "Tests failed"}}.',
+          ),
         template: z.string().optional().describe('SKILL.md.hbs content. Default: a skeleton to fill in later.'),
         flow: flowArg,
       }),
+      // Additive: it only overwrites an orphan SKILL.md.hbs left in the new step's directory.
       annotations: WRITES,
     },
-    async (args) => run((paths) => addStepTool(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => addStepTool(paths, args, toolCtx), { mutating: true, changesResources: true }),
   );
 
   server.registerTool(
@@ -248,7 +323,7 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Update step',
       description:
-        'Changes a step (title, description, template, transitions, id, initial step), then re-installs the skills. Read get_authoring_guide before changing a template.',
+        'Changes a step (title, description, template, transitions, id, initial step), then re-installs the skills (once you ran `dfl install`). Replaces the template and removes transitions without a backup. Read get_authoring_guide before changing a template.',
       inputSchema: z.object({
         step: stepArg('Id of the step to change.'),
         title: z.string().optional().describe('New title.'),
@@ -256,15 +331,17 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
         template: z.string().optional().describe('New full SKILL.md.hbs content.'),
         rename: z.string().optional().describe('New step id; transitions, the directory and the flow position follow.'),
         on: z
-          .record(z.string(), z.string().nullable())
+          .record(z.string(), transitionValue.nullable())
           .optional()
-          .describe('Transitions to set (event → target step id) or remove (event → null).'),
+          .describe(
+            'Transitions to set or remove: event → target step id (retargets and keeps the description), → {"target", "description"} (sets both; "description": "" removes it) or → null (removes the event).',
+          ),
         initial: z.boolean().optional().describe('true makes this the initial step of the flow.'),
         flow: flowArg,
       }),
-      annotations: WRITES,
+      annotations: DESTRUCTIVE,
     },
-    async (args) => run((paths) => updateStepTool(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => updateStepTool(paths, args, toolCtx), { mutating: true, changesResources: true }),
   );
 
   server.registerTool(
@@ -272,15 +349,15 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Delete step',
       description:
-        "Deletes a step and its directory, reroutes transitions that led to it to its NEXT target, then re-installs the skills. Fails with CANNOT_REWIRE when it has no NEXT transition unless force is set (those transitions are then dropped).",
+        "Deletes a step and its directory, reroutes transitions that led to it to its NEXT target, then re-installs the skills (once you ran `dfl install`). A transition from the NEXT target back to the deleted step is removed (it would become a self-loop). Fails with CANNOT_REWIRE when it has no NEXT transition unless force is set (those transitions are then dropped). The result lists `rewired` and `dropped` transitions.",
       inputSchema: z.object({
         step: stepArg('Id of the step to delete.'),
         force: z.boolean().optional().describe('Drop incoming transitions that cannot be rerouted. Only after the user agreed.'),
         flow: flowArg,
       }),
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+      annotations: DESTRUCTIVE,
     },
-    async (args) => run((paths) => deleteStepTool(paths, args), true),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => deleteStepTool(paths, args, toolCtx), { mutating: true, changesResources: true }),
   );
 
   server.registerTool(
@@ -288,11 +365,11 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Sync skills',
       description:
-        'Re-renders the active flow and re-installs its skills and the MCP config for every configured agent (same as `dfl flow-update`). Use after editing files under .df/ by hand.',
+        'Re-renders the active flow and re-installs its skills (and, unless you opted out with `dfl install --no-mcp`, the MCP config) for every configured agent, same as `dfl flow-update`. Overwrites the installed skill files and removes skill dirs of steps that no longer exist. Use after editing files under .df/ by hand or after a pull.',
       inputSchema: z.object({}),
-      annotations: { ...WRITES, idempotentHint: true },
+      annotations: { ...DESTRUCTIVE, idempotentHint: true },
     },
-    async () => run((paths) => syncTool(paths), true),
+    async (_args, ctx) => run(ctx, (paths, toolCtx) => syncTool(paths, toolCtx), { mutating: true, changesResources: true }),
   );
 
   // --- Resources ------------------------------------------------------------
@@ -301,9 +378,8 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     'flow',
     'dfl://flow',
     { title: 'Active flow', description: 'flow.json of the active flow.', mimeType: 'application/json' },
-    async (uri) =>
-      readResource(async () => {
-        const paths = await resolver.paths();
+    async (uri, ctx) =>
+      readResource(resolver, ctx, (paths) => {
         const name = getActiveFlowName(paths) ?? loadActiveFlow(paths).name;
         return { contents: [{ uri: uri.href, mimeType: 'application/json', text: readText(paths.flowFile(name)) }] };
       }),
@@ -312,9 +388,11 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
   server.registerResource(
     'step-template',
     new ResourceTemplate('dfl://steps/{id}', {
-      list: async () => {
+      // resources/list and completion/complete cannot return input_required: they use the client roots
+      // already known on this connection, else the working directory.
+      list: async (ctx) => {
         try {
-          const model = loadActiveFlow(await resolver.paths());
+          const model = loadActiveFlow(await resolver.paths(ctx));
           return {
             resources: skillSteps(model).map((step) => ({
               uri: `dfl://steps/${step.id}`,
@@ -341,9 +419,8 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       },
     }),
     { title: 'Step template', description: 'SKILL.md.hbs of a step of the active flow.', mimeType: 'text/markdown' },
-    async (uri, variables) =>
-      readResource(async () => {
-        const paths = await resolver.paths();
+    async (uri, variables, ctx) =>
+      readResource(resolver, ctx, (paths) => {
         const raw = variables['id'];
         const id = decodeURIComponent((Array.isArray(raw) ? raw[0] : raw) ?? '');
         return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text: stepTemplateText(paths, id) }] };
@@ -403,54 +480,128 @@ class ObservedStdioTransport extends StdioServerTransport {
 }
 
 interface RootResolver {
-  /** Resolves the project for one call (no caching of the result). */
-  paths(): Promise<ProjectPaths>;
+  /**
+   * Resolves the project for one request (no caching of the result). On a 2026-07-28 connection
+   * whose client roots are not known yet, returns an input_required result asking for them (the
+   * client answers and retries the request).
+   */
+  resolve(ctx: ServerContext): Promise<ProjectPaths | InputRequiredResult>;
+  /** Like resolve, but never asks the client (for callbacks that cannot return input_required). */
+  paths(ctx?: ServerContext): Promise<ProjectPaths>;
+}
+
+/** What the client roots told us for one request. */
+interface RootsLookup {
+  /** Local directories of the `file://` roots ([] when unknown or none). */
+  roots: string[];
+  /** How they were obtained, for the NO_PROJECT message. */
+  source: 'none' | 'unsupported' | 'listed';
 }
 
 /**
- * Project root per call: `options.root` → `DFL_ROOT` → client roots (first `file://` root that
- * contains `.df/`, then the nearest ancestor with `.df/` of each root) → nearest ancestor with
- * `.df/` of the cwd. The client's root list is fetched once after initialization and again after
- * `notifications/roots/list_changed`.
+ * Project root per request: `options.root` → `DFL_ROOT` → client roots (first `file://` root that
+ * contains `.df/`, then the nearest ancestor with `.df/` of each root) → nearest ancestor with `.df/`
+ * of the cwd.
+ *
+ * Client roots: on a 2025-era connection the server asks with `roots/list` once after initialization
+ * and again after `notifications/roots/list_changed`. A 2026-07-28 connection has no server-to-client
+ * requests: a tool call or resource read returns `input_required` with an embedded `roots/list`
+ * request, the client retries with the answer, and the roots are kept for the connection (until
+ * `notifications/roots/list_changed`). Root URIs come from the client and are untrusted: only
+ * directories that contain `.df/` are used.
  */
 function createRootResolver(server: McpServer, options: DflMcpOptions): RootResolver {
-  let roots: Promise<string[]> | undefined;
+  let legacyRoots: Promise<string[]> | undefined;
+  let modernRoots: string[] | undefined;
 
-  const clientRoots = (): Promise<string[]> => {
-    if (!server.server.getClientCapabilities()?.roots) return Promise.resolve([]);
-    roots ??= server.server
+  const listLegacyRoots = (): Promise<string[]> => {
+    legacyRoots ??= server.server
       .listRoots(undefined, { timeout: ROOTS_TIMEOUT_MS })
-      .then((result) => result.roots.flatMap((root) => fileUriToPath(root.uri)))
+      .then((result) => rootDirs(result.roots))
       .catch(() => []);
-    return roots;
+    return legacyRoots;
   };
 
   server.server.oninitialized = () => {
-    roots = undefined;
-    void clientRoots();
+    legacyRoots = undefined;
+    modernRoots = undefined;
+    if (server.server.getClientCapabilities()?.roots) void listLegacyRoots();
   };
   server.server.setNotificationHandler('notifications/roots/list_changed', () => {
-    roots = undefined;
+    legacyRoots = undefined;
+    modernRoots = undefined;
   });
 
+  /** Client roots, or the input_required result that asks for them (only when `ask`). */
+  const clientRoots = async (ctx: ServerContext | undefined, ask: boolean): Promise<RootsLookup | InputRequiredResult> => {
+    // Roots a 2026-07-28 client already sent on this connection (also for callbacks without a request context).
+    if (modernRoots !== undefined) return { roots: modernRoots, source: 'listed' };
+    const envelope = ctx?.mcpReq.envelope as Record<string, unknown> | undefined;
+    if (envelope === undefined) {
+      // 2025-era connection (or no request context): the initialize handshake declared the capabilities.
+      if (!server.server.getClientCapabilities()?.roots) return { roots: [], source: 'unsupported' };
+      return { roots: await listLegacyRoots(), source: 'listed' };
+    }
+    const capabilities = (server.server.getClientCapabilities() ?? envelope[CLIENT_CAPABILITIES_META_KEY]) as { roots?: unknown } | undefined;
+    if (!capabilities?.roots) return { roots: [], source: 'unsupported' };
+    const answer = inputResponse(ctx?.mcpReq.inputResponses, ROOTS_INPUT_KEY);
+    if (answer.kind === 'roots') {
+      modernRoots = rootDirs(answer.roots);
+      return { roots: modernRoots, source: 'listed' };
+    }
+    // A retry without a usable roots answer: do not ask again within this request.
+    const answered = ctx?.mcpReq.inputResponses !== undefined || (ctx?.mcpReq.droppedInputResponseKeys ?? []).includes(ROOTS_INPUT_KEY);
+    if (!ask || answered) return { roots: [], source: 'none' };
+    return inputRequired({ inputRequests: { [ROOTS_INPUT_KEY]: inputRequired.listRoots() } });
+  };
+
+  const resolveWith = async (ctx: ServerContext | undefined, ask: boolean): Promise<ProjectPaths | InputRequiredResult> => {
+    const cwd = path.resolve(options.cwd ?? process.cwd());
+    if (options.root || process.env['DFL_ROOT']) return existingProject(resolveProjectRoot({ root: options.root, cwd }));
+    const lookup = await clientRoots(ctx, ask);
+    if (isInputRequired(lookup)) return lookup;
+    const found =
+      lookup.roots.find((root) => isDir(path.join(root, '.df'))) ??
+      lookup.roots.map((root) => findProjectRoot(root)).find((root) => root !== undefined) ??
+      findProjectRoot(cwd);
+    if (found === undefined) throw noProjectFound(cwd, lookup);
+    return existingProject(found);
+  };
+
   return {
-    async paths() {
-      const cwd = path.resolve(options.cwd ?? process.cwd());
-      if (options.root || process.env['DFL_ROOT']) return existingProject(resolveProjectRoot({ root: options.root, cwd }));
-      const candidates = await clientRoots();
-      const found =
-        candidates.find((root) => isDir(path.join(root, '.df'))) ??
-        candidates.map((root) => findProjectRoot(root)).find((root) => root !== undefined);
-      return existingProject(found ?? resolveProjectRoot({ cwd }));
+    resolve: (ctx) => resolveWith(ctx, true),
+    async paths(ctx) {
+      const resolved = await resolveWith(ctx, false);
+      if (isInputRequired(resolved)) throw new Error('unreachable: roots are never requested here');
+      return resolved;
     },
   };
+}
+
+/** Hint for every "no project" error: MCP remedies first (the server usually runs with the wrong cwd). */
+const NO_PROJECT_HINT =
+  'Start the agent from the project directory, or set `dfl mcp --root <dir>` or the DFL_ROOT environment variable in the MCP server config. Run `dfl install` there if the project has not been set up.';
+
+function noProjectFound(cwd: string, lookup: RootsLookup): DflError {
+  const roots =
+    lookup.source === 'listed' && lookup.roots.length > 0
+      ? `, nor in or above the client roots ${lookup.roots.join(', ')}`
+      : lookup.source === 'listed'
+        ? ' (the client reported no local roots)'
+        : lookup.source === 'none'
+          ? ' (the client did not report its roots)'
+          : ' (the client does not support roots)';
+  return new DflError(`No dfl project found (no .df/ directory) in or above the server's working directory ${cwd}${roots}.`, {
+    hint: NO_PROJECT_HINT,
+    code: 'NO_PROJECT',
+  });
 }
 
 function existingProject(root: string): ProjectPaths {
   const paths = projectPaths(root);
   if (!isDir(paths.dfDir)) {
     throw new DflError(`No dfl project at ${paths.root} (it has no .df/ directory).`, {
-      hint: 'Run `dfl install` in the project root, or point the server at it with `dfl mcp --root <dir>` or DFL_ROOT.',
+      hint: localizeCli(NO_PROJECT_HINT, cliFor(paths)),
       code: 'NO_PROJECT',
     });
   }
@@ -458,12 +609,41 @@ function existingProject(root: string): ProjectPaths {
 }
 
 /** Resource reads report failures as protocol errors whose message includes the DflError hint. */
-async function readResource<T>(fn: () => Promise<T>): Promise<T> {
+async function readResource(
+  resolver: RootResolver,
+  ctx: ServerContext,
+  fn: (paths: ProjectPaths) => ReadResourceResult,
+): Promise<ReadResourceResult | InputRequiredResult> {
+  let cli = 'dfl';
   try {
-    return await fn();
+    const resolved = await resolver.resolve(ctx);
+    if (isInputRequired(resolved)) return resolved;
+    cli = cliFor(resolved);
+    return fn(resolved);
   } catch (error) {
-    throw new Error(formatError(error));
+    throw new Error(formatError(error, cli));
   }
+}
+
+function isInputRequired(value: unknown): value is InputRequiredResult {
+  return typeof value === 'object' && value !== null && (value as { resultType?: unknown }).resultType === 'input_required';
+}
+
+/** Name of the connected client: the initialize handshake (2025 era) or the request envelope (2026-07-28). */
+function clientName(server: McpServer, ctx: ServerContext): string | undefined {
+  const fromHandshake = server.server.getClientVersion()?.name;
+  if (fromHandshake) return fromHandshake;
+  const info = (ctx.mcpReq.envelope as Record<string, unknown> | undefined)?.[CLIENT_INFO_META_KEY] as { name?: unknown } | undefined;
+  return typeof info?.name === 'string' ? info.name : undefined;
+}
+
+/** Local directories of `file://` roots; anything else (other schemes, malformed entries) is ignored. */
+function rootDirs(roots: unknown): string[] {
+  if (!Array.isArray(roots)) return [];
+  return roots.flatMap((root) => {
+    const uri = typeof root === 'object' && root !== null ? (root as { uri?: unknown }).uri : undefined;
+    return typeof uri === 'string' ? fileUriToPath(uri) : [];
+  });
 }
 
 function fileUriToPath(uri: string): string[] {
@@ -474,11 +654,12 @@ function fileUriToPath(uri: string): string[] {
   }
 }
 
-function errorResult(error: unknown): CallToolResult {
-  const text = formatError(error);
+function errorResult(error: unknown, cli: string): CallToolResult {
+  const text = formatError(error, cli);
+  const hint = errorHint(error, cli);
   const details =
     error instanceof DflError
-      ? { error: error.message, code: error.code, ...(error.hint ? { hint: error.hint } : {}) }
+      ? { error: localizeCli(error.message, cli), code: error.code, ...(hint ? { hint } : {}) }
       : { error: text, code: 'INTERNAL_ERROR' };
   return { isError: true, content: [{ type: 'text', text }], structuredContent: details };
 }

@@ -538,3 +538,23 @@ describe('fsx writes', () => {
     expect(fs.existsSync(path.join(root, '.claude', 'skills', 'spec', 'nested'))).toBe(false);
   });
 });
+
+describe('active flow names (G8)', () => {
+  it('setActiveFlow refuses names that are not flow names', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    for (const name of ['../x', 'Feature', '', 'config']) {
+      expect(() => setActiveFlow(paths, name), name).toThrow(DflError);
+    }
+    expect(loadLocalConfig(paths).activeFlow).toBeUndefined();
+  });
+
+  it('getActiveFlowName ignores directories with invalid flow names', () => {
+    const paths = makeTempProject();
+    writeSampleFlow(paths);
+    fs.mkdirSync(path.join(paths.dfDir, 'Bad Name'), { recursive: true });
+    fs.writeFileSync(path.join(paths.dfDir, 'Bad Name', 'flow.json'), '{}');
+    // Exactly one valid flow: it is active by default.
+    expect(getActiveFlowName(paths)).toBe('sample');
+  });
+});

@@ -22,10 +22,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: [22.x, 24.x]
+        include:
+          # The oldest Node that can build dfl (tsdown 0.23 needs 22.18+).
+          - os: ubuntu-latest
+            node: 22.18.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -48,3 +52,43 @@ jobs:
 
       - name: Package contents
         run: npm pack --dry-run
+
+  runtime-min:
+    # The installed CLI supports Node 22.12+ (package.json engines), older Node gets a clear error.
+    name: built CLI on node 22.12 / 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.12.0
+
+      - name: Run on the minimum Node version
+        run: |
+          node --version
+          node dist/cli.mjs --version
+          node dist/cli.mjs flow templates
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20.x
+
+      - name: Refuse to run on Node 20 with a clear message
+        run: |
+          node --version
+          if node dist/cli.mjs --version 2> err.txt; then
+            echo "::error::dfl ran on $(node --version)"
+            exit 1
+          fi
+          cat err.txt
+          grep -q "22.12" err.txt

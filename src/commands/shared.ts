@@ -1,18 +1,34 @@
 /**
  * Shared plumbing for command modules: project resolution from the global `--root` option,
- * sync with added/removed reporting, confirmations for destructive commands.
+ * sync with added/removed reporting, active-flow switches that roll back on failure,
+ * confirmations for destructive commands.
  */
 import path from 'node:path';
 import { InvalidArgumentError } from '@commander-js/extra-typings';
-import { getActiveFlowName, getSelectedAgents } from '../core/config.js';
-import { DflError } from '../core/errors.js';
-import { exists, readText } from '../core/fsx.js';
-import { projectPaths, resolveProjectRoot } from '../core/paths.js';
-import { readManifest, syncProject, type SyncOptions } from '../core/sync.js';
+import type { z } from 'zod';
+import { dflLauncher } from '../agents/mcp-config.js';
+import {
+  getActiveFlowName,
+  loadLocalConfig,
+  loadProjectConfig,
+  localConfigSchema,
+  projectConfigSchema,
+  saveLocalConfig,
+  saveProjectConfig,
+  setActiveFlow,
+} from '../core/config.js';
+import { DflError, errorMessage } from '../core/errors.js';
+import { loadFlow } from '../core/flow.js';
+import { exists, isFile, readText, readTextIfExists, removePath, writeText } from '../core/fsx.js';
+import { withProjectLock } from '../core/lock.js';
+import { loadRuntimeState } from '../core/machine.js';
+import { findProjectRoot, projectPaths, resolveProjectRoot } from '../core/paths.js';
+import { isInstalledForUser, readManifest, syncProject, type SyncOptions } from '../core/sync.js';
 import type { FlowVarDef, ProjectPaths, SyncReport } from '../core/types.js';
+import { assertFlowValid } from '../core/validate.js';
 import { c } from '../ui/colors.js';
 import { syncSummaryLine } from '../ui/format.js';
-import { print, warning } from '../ui/output.js';
+import { print, sym, warning } from '../ui/output.js';
 import { confirm, isInteractive, text } from '../ui/prompts.js';
 
 /** What command modules need from the program. */
@@ -21,9 +37,56 @@ export interface CliContext {
   rootOption(): string | undefined;
 }
 
-/** Project paths for `--root` / `DFL_ROOT` / the nearest `.df/` (install: git root or cwd). */
+/**
+ * Project paths for `--root` / `DFL_ROOT` / the nearest `.df/` (install: git root or cwd).
+ *
+ * The implicit `.df/` search never crosses into an enclosing git repository: when a separate
+ * repository (a directory with `.git`, e.g. a nested clone or a submodule) lies between the cwd and
+ * the nearest `.df/`, `install` (and `agents`) use that repository's root, and every other command
+ * fails with NO_PROJECT naming the outer project (reachable with `--root`).
+ */
 export function projectFor(ctx: CliContext, options: { forInstall?: boolean } = {}): ProjectPaths {
-  return projectPaths(resolveProjectRoot({ root: ctx.rootOption(), forInstall: options.forInstall }));
+  const root = ctx.rootOption();
+  if (root === undefined && !process.env['DFL_ROOT']) {
+    const cwd = process.cwd();
+    const found = findProjectRoot(cwd);
+    const repo = found === undefined ? undefined : nestedRepoRoot(cwd, found);
+    if (found !== undefined && repo !== undefined) {
+      if (options.forInstall) return projectPaths(repo);
+      throw new DflError(`No dfl project in this git repository (${repo}).`, {
+        hint:
+          `The dfl project at ${found} belongs to an enclosing repository: pass \`--root ${found}\` to use it, ` +
+          'or run `dfl install` to set up dfl in this repository.',
+        code: 'NO_PROJECT',
+      });
+    }
+  }
+  return projectPaths(resolveProjectRoot({ root, forInstall: options.forInstall }));
+}
+
+/**
+ * The nearest directory from `cwd` (inclusive) up to `projectRoot` (exclusive) that holds a `.git`
+ * entry (a directory, or a file for submodules and worktrees): a separate repository nested in the project.
+ */
+function nestedRepoRoot(cwd: string, projectRoot: string): string | undefined {
+  const stop = path.resolve(projectRoot);
+  let current = path.resolve(cwd);
+  while (current !== stop) {
+    if (exists(path.join(current, '.git'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+  return undefined;
+}
+
+/**
+ * Runs a read-modify-write of project files under the cross-process project lock (`.df/.lock`), so
+ * a CLI command and an MCP server (or two CLI runs) never overwrite each other's changes. Keep
+ * confirmations outside: the lock is taken over after a minute. Never nest.
+ */
+export function locked<T>(paths: ProjectPaths, fn: () => T | Promise<T>): Promise<T> {
+  return withProjectLock(paths, fn);
 }
 
 export interface SyncRun {
@@ -40,9 +103,9 @@ export async function syncWithDiff(paths: ProjectPaths, options: SyncOptions = {
   return { report, added };
 }
 
-/** True once `dfl install` ran (a manifest exists or agents are selected). */
-export function isInstalled(paths: ProjectPaths): boolean {
-  return exists(paths.manifestFile) || getSelectedAgents(paths).length > 0;
+/** `Skills not installed for you yet; run `dfl install`` (with the project's dfl launcher). */
+export function notInstalledMessage(paths: ProjectPaths): string {
+  return `Skills not installed for you yet; run \`${dflLauncher(paths)} install\`.`;
 }
 
 /** Interactive prompt for a missing required variable (clack text). */
@@ -55,6 +118,16 @@ export function promptVarInteractive(name: string, def: FlowVarDef): Promise<unk
   });
 }
 
+/** Warns (stderr) when the stored step of the active flow no longer exists and the state fell back. */
+export function warnRepairedState(paths: ProjectPaths, flow: string): void {
+  try {
+    const repaired = loadRuntimeState(paths, loadFlow(paths, flow)).repaired;
+    if (repaired) warning(repaired);
+  } catch {
+    // Reporting only: the command itself already succeeded.
+  }
+}
+
 export interface AfterChangeOptions {
   /** `--no-sync` sets this to false. */
   sync: boolean;
@@ -64,18 +137,119 @@ export interface AfterChangeOptions {
   interactive?: boolean | undefined;
 }
 
+/** What `syncIfInstalled` did. */
+export type AfterChange =
+  | { kind: 'skipped' }
+  /** The change concerns the active flow, but this developer never ran `dfl install` (no manifest). */
+  | { kind: 'not-installed' }
+  | { kind: 'synced'; run: SyncRun };
+
 /**
- * Re-syncs after a mutation when the project is installed and the changed flow is active, then
- * prints a one-line summary (and warnings). Returns the run, or undefined when skipped.
+ * Re-syncs after a mutation when sync is wanted, the changed flow is the active one and this developer
+ * installed the skills (`.df/installed.json` exists: `dfl uninstall` sticks until `dfl install`).
+ * Prints nothing; see printAfterChange.
+ */
+export async function syncIfInstalled(paths: ProjectPaths, options: AfterChangeOptions): Promise<AfterChange> {
+  if (!options.sync) return { kind: 'skipped' };
+  const active = getActiveFlowName(paths);
+  if (!active || (options.flow !== undefined && options.flow !== active)) return { kind: 'skipped' };
+  if (!isInstalledForUser(paths)) return { kind: 'not-installed' };
+  const run = await syncWithDiff(paths, options.interactive ? { promptVar: promptVarInteractive } : {});
+  return { kind: 'synced', run };
+}
+
+/** One-line sync summary plus warnings, or the "not installed" note. */
+export function printAfterChange(paths: ProjectPaths, result: AfterChange): void {
+  if (result.kind === 'not-installed') {
+    print(c.dim(notInstalledMessage(paths)));
+    return;
+  }
+  if (result.kind !== 'synced') return;
+  print(syncSummaryLine(result.run.report, result.run.added));
+  // Committed MCP config files are never changed silently.
+  for (const entry of result.run.report.mcp) if (entry.changed) print(mcpChangeLine(entry));
+  for (const message of result.run.report.warnings) warning(message);
+}
+
+/** `  + dfl MCP server in .mcp.json` (added) or `  ~ dfl MCP server in .mcp.json (updated)`. */
+export function mcpChangeLine(entry: SyncReport['mcp'][number]): string {
+  return entry.status === 'updated'
+    ? `  ${c.yellow('~')} dfl MCP server in ${entry.file} ${c.dim('(updated)')}`
+    : `  ${c.green(sym.added)} dfl MCP server in ${entry.file}`;
+}
+
+/**
+ * syncIfInstalled + printAfterChange. Returns the run, or undefined when no sync ran.
  */
 export async function syncAfterChange(paths: ProjectPaths, options: AfterChangeOptions): Promise<SyncRun | undefined> {
-  if (!options.sync || !isInstalled(paths)) return undefined;
-  const active = getActiveFlowName(paths);
-  if (!active || (options.flow !== undefined && options.flow !== active)) return undefined;
-  const run = await syncWithDiff(paths, options.interactive ? { promptVar: promptVarInteractive } : {});
-  print(syncSummaryLine(run.report, run.added));
-  for (const message of run.report.warnings) warning(message);
-  return run;
+  const result = await syncIfInstalled(paths, options);
+  printAfterChange(paths, result);
+  return result.kind === 'synced' ? result.run : undefined;
+}
+
+/**
+ * Makes `name` the active flow (`scope`) and re-syncs (see syncIfInstalled), all or nothing:
+ * the flow is validated before anything is written (DflError INVALID_FLOW), and when the sync fails
+ * (render or IO error, a cancelled variable prompt) the previous active-flow settings of both
+ * config.json and local.json are restored before the error propagates.
+ */
+export async function switchActiveFlow(
+  paths: ProjectPaths,
+  name: string,
+  scope: 'local' | 'project',
+  options: { sync: boolean; interactive: boolean },
+): Promise<AfterChange> {
+  assertFlowValid(paths, name);
+  const snapshot = [snapshotConfig(paths.configFile, projectConfigSchema), snapshotConfig(paths.localFile, localConfigSchema)];
+  const previous = { project: loadProjectConfig(paths).activeFlow, local: loadLocalConfig(paths).activeFlow };
+  setActiveFlow(paths, name, scope);
+  try {
+    return await syncIfInstalled(paths, { sync: options.sync, interactive: options.interactive });
+  } catch (error) {
+    try {
+      for (const item of snapshot) item.restore();
+      const project = loadProjectConfig(paths);
+      if (project.activeFlow !== previous.project) saveProjectConfig(paths, { ...project, activeFlow: previous.project });
+      const local = loadLocalConfig(paths);
+      if (exists(paths.localFile) && local.activeFlow !== previous.local) saveLocalConfig(paths, { ...local, activeFlow: previous.local });
+    } catch (restoreError) {
+      warning(`Could not restore the previous active flow: ${errorMessage(restoreError)}`);
+    }
+    throw error;
+  }
+}
+
+interface ConfigSnapshot {
+  /** Puts the file back byte for byte when only `activeFlow` changed since the snapshot. */
+  restore(): void;
+}
+
+/**
+ * Raw content of a config file. `restore` rewrites it (or deletes a file that did not exist) only
+ * when nothing but `activeFlow` changed in the meantime, so settings saved during the failed sync
+ * (a variable entered at a prompt) survive; the caller then puts `activeFlow` back field by field.
+ */
+function snapshotConfig(file: string, schema: z.ZodType): ConfigSnapshot {
+  const raw = readTextIfExists(file);
+  const withoutActiveFlow = (text: string | undefined): string | undefined => {
+    try {
+      const parsed = schema.parse(text === undefined ? {} : JSON.parse(text)) as Record<string, unknown>;
+      delete parsed['activeFlow'];
+      return JSON.stringify(parsed);
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    restore(): void {
+      const current = readTextIfExists(file);
+      if (current === raw) return;
+      const before = withoutActiveFlow(raw);
+      if (before === undefined || before !== withoutActiveFlow(current)) return;
+      if (raw === undefined) removePath(file);
+      else writeText(file, raw);
+    },
+  };
 }
 
 /**
@@ -99,7 +273,17 @@ export function readTemplateFile(file: string): string {
   if (!exists(abs)) {
     throw new DflError(`Template file ${file} not found.`, { code: 'FILE_NOT_FOUND' });
   }
-  return readText(abs);
+  if (!isFile(abs)) {
+    throw new DflError(`Template file ${file} is not a regular file.`, {
+      hint: 'Pass the path to a SKILL.md.hbs template file, not a directory.',
+      code: 'INVALID_OPTIONS',
+    });
+  }
+  try {
+    return readText(abs);
+  } catch (error) {
+    throw new DflError(`Cannot read template file ${file}: ${errorMessage(error)}`, { code: 'FILE_READ_ERROR', cause: error });
+  }
 }
 
 /** Commander argument parser for integers. */

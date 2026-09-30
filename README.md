@@ -30,13 +30,15 @@ Linux machine.
 - [Flow viewer](#flow-viewer)
 - [Supported agents](#supported-agents)
 - [Sharing flows over git](#sharing-flows-over-git)
+- [Windows](#windows)
 - [Command reference](#command-reference)
 - [Development](#development)
 
 ## Install
 
-Requires **Node.js 22.12 or newer**. `dfl` is published to GitHub Packages as
-`@vishin-pavel/dfl`. GitHub Packages needs a token even for reading, so set up npm once:
+Requires **Node.js 22.12 or newer** (older versions stop with a clear error). `dfl` is published
+to GitHub Packages as `@vishin-pavel/dfl`. GitHub Packages needs a token even for reading, so set
+up npm once:
 
 1. Create a token with the `read:packages` scope, either a
    [classic personal access token](https://github.com/settings/tokens) or through the GitHub CLI.
@@ -55,6 +57,9 @@ Requires **Node.js 22.12 or newer**. `dfl` is published to GitHub Packages as
    npm config set //npm.pkg.github.com/:_authToken "$(gh auth token)"
    ```
 
+Release candidates are published under the `next` dist-tag (`npm install -g @vishin-pavel/dfl@next`);
+a plain install always gets the latest stable release.
+
 ### Global or per project
 
 | | Global | Per project |
@@ -62,12 +67,17 @@ Requires **Node.js 22.12 or newer**. `dfl` is published to GitHub Packages as
 | Install | `npm install -g @vishin-pavel/dfl` | `npm install -D @vishin-pavel/dfl` |
 | Run | `dfl …` | `npx dfl …` |
 | MCP server entry written for agents | `dfl mcp` (dfl must be on the agent's `PATH`) | `npx --no-install dfl mcp` |
-| Commands in rendered skills | `dfl status`, `dfl next` | `npx dfl status`, `npx dfl next` |
+| Commands in rendered skills (`dfl.cli`) | `dfl status`, `dfl next` | `npx --no-install dfl status`, … |
 
-dfl picks the per-project form automatically when the running `dfl` is installed in
-`<project>/node_modules`. For a per-project install, commit a project `.npmrc` with only the
-registry line (`@vishin-pavel:registry=https://npm.pkg.github.com`); every developer keeps the
-token in `~/.npmrc`. You can override the MCP command in `.df/config.json`:
+The form depends only on the project, never on which `dfl` binary runs: when the project's
+`package.json` lists `@vishin-pavel/dfl` in `dependencies`, `devDependencies` or
+`optionalDependencies`, dfl uses `npx --no-install dfl`, otherwise `dfl`. So every developer
+writes the same committed MCP entry, whether they run a global or a local dfl. `--no-install`
+keeps npx from downloading an unrelated public package called `dfl`.
+
+For a per-project install, commit a project `.npmrc` with only the registry line
+(`@vishin-pavel:registry=https://npm.pkg.github.com`); every developer keeps the token in
+`~/.npmrc`. You can override the MCP command in `.df/config.json`:
 
 ```json
 { "version": 1, "vars": {}, "mcp": { "command": "pnpm", "args": ["exec", "dfl", "mcp"] } }
@@ -87,7 +97,7 @@ Each step skill starts by calling the `get_status` MCP tool and ends by calling 
 with the event that matches the outcome. You can drive the flow from the terminal too:
 
 ```sh
-dfl status                      # where am I, which events can I fire
+dfl status                      # where am I, which events can I fire, are my skills up to date
 dfl next                        # complete the current step (fires NEXT)
 dfl next FAILED                 # fire another event
 dfl goto implement-feature      # jump anywhere
@@ -112,26 +122,37 @@ Commit `.df/` and the MCP config files, and your teammates get the same flow wit
 2. Every step has a template, `.df/<flow>/steps/<step>/SKILL.md.hbs`. `dfl install` and
    `dfl flow-update` render the templates of the **active flow** and copy each step directory
    into the skills folder of every selected agent, plus three [built-in skills](#built-in-skills).
-3. dfl registers its MCP server in each agent's project MCP config.
+   Every installed skill folder gets a `.gitignore` file that ignores the folder itself, because
+   rendered skills can contain personal values.
+3. dfl registers its MCP server in each agent's project MCP config (unless you turned that off).
 4. The current position of each flow is kept in `.df/state.json`, per developer.
 
 Only one flow is active (installed) at a time; switching with `dfl flow use` removes the old
 flow's skills and installs the new ones. dfl records everything it writes outside `.df/` in
-`.df/installed.json`, so updates and `dfl uninstall` remove exactly what dfl created and never
-touch a skill folder you wrote yourself.
+`.df/installed.json`, so updates and `dfl uninstall` remove exactly the files dfl created. A skill
+folder you wrote yourself is never overwritten or deleted: dfl only treats a folder as its own when
+it holds dfl's `.gitignore` marker or its `SKILL.md` carries dfl's `metadata.dfl-*` keys, deletes
+only the files it installed there, and keeps the folder (with a warning) when other files remain.
+dfl never writes or deletes through a symbolic link.
+
+Changes made with `dfl step …`, `dfl vars …`, `dfl flow use` and the MCP editing tools re-install
+the skills automatically, but only once you ran `dfl install` in this clone (until then they print
+"Skills not installed for you yet; run `dfl install`"). `dfl status` (and the MCP `get_status`
+tool) warn when the installed skills are out of date, for example after a `git pull` changed a
+template: run `dfl flow-update`.
 
 ## The `.df/` directory
 
 ```
 <project>/
   .df/
-    config.json            committed   project config: team default flow, project variables
-    local.json             ignored     personal config: your agents, personal variables, flow override
+    config.json            committed   project config: team default flow, project variables, MCP override
+    local.json             ignored     personal config: your agents, personal variables, flow override, MCP preference
     state.json             ignored     current step and history of each flow
-    installed.json         ignored     manifest of the files dfl wrote outside .df/
+    installed.json         ignored     manifest of the files dfl wrote (skills, MCP entries, rendered files)
     .gitignore             committed   generated by dfl, ignores the files above and rendered skills
     <flow>/
-      flow.json            committed   flow definition
+      flow.json            committed   flow definition ("name" must equal the directory name)
       partials/*.hbs       committed   optional Handlebars partials of this flow
       steps/<step>/
         SKILL.md.hbs       committed   template of the step's skill
@@ -140,21 +161,39 @@ touch a skill folder you wrote yourself.
         SKILL.md, **/*.md  ignored     rendered output
 ```
 
+`.df/.gitignore` is rewritten on every sync:
+
+```gitignore
+# generated by dfl – do not edit
+# personal config, runtime state and install manifest
+local.json
+state.json
+installed.json
+# skills rendered from *.md.hbs templates (may contain personal values)
+*/steps/**/*.md
+# temporary dirs of an interrupted flow import
+.dfl-*/
+# held while a dfl process changes the project
+.lock
+```
+
 Outside `.df/`:
 
 | Path | Git | Why |
 |------|-----|-----|
-| `.claude/skills/<skill>/`, `.cursor/skills/<skill>/`, … | ignored (managed block in the root `.gitignore`) | rendered with personal variables, regenerated on every sync |
+| `.claude/skills/<skill>/`, `.cursor/skills/<skill>/`, … | ignored by the `.gitignore` inside each skill folder | rendered with personal variables, regenerated on every sync |
 | `.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`, `.gemini/settings.json`, `opencode.json`, … | committed | shared MCP server registration; dfl edits only its own `dfl` entry and keeps comments and formatting |
 
-The root `.gitignore` block looks like this and is rewritten on every sync:
+The `.gitignore` in each installed skill folder looks like this; git then ignores the whole folder
+(the marker included), so nothing personal is committed and your root `.gitignore` is never touched:
 
 ```gitignore
-# >>> dfl (managed) >>>
-.claude/skills/plan-feature/
-.claude/skills/spec-feature/
-# <<< dfl (managed) <<<
+# generated by dfl – this skill is rendered from .df templates and may contain personal values
+*
 ```
+
+Older dfl versions wrote a `# >>> dfl (managed) >>>` block into the root `.gitignore`; the next sync
+removes it (lines you added are kept).
 
 ## Flows and steps
 
@@ -166,8 +205,17 @@ The root `.gitignore` block looks like this and is rewritten on every sync:
 | `bugfix` | `reproduce-bug` → `diagnose-bug` → `fix-bug` → `verify-fix` → `ship-fix` | `BACK`, `FAILED` (verify → fix), `CHANGES_REQUESTED` (ship → fix) |
 | `quick` | `plan-change` → `make-change` → `check-change` | `BACK`, `FAILED` (check → make) |
 
+Their variables: `mainBranch` and `testCommand` (project); `feature` also has `specsDir` (where
+specs are written) and the personal `featureBranchPrefix` and `reviewer`; `bugfix` has `bugNotesDir`
+(default `docs/bugs`: each bug gets a notes file with its reproduction, diagnosis and verification,
+committed as the flow goes) and the personal `fixBranchPrefix` and `reviewer`. Diffs and logs in the
+steps compare against `origin/<mainBranch>`.
+
 `dfl flow templates` lists them; `dfl flow create <name> --from <template>` copies one into
-`.df/<name>/`, and `dfl flow create <name> --steps a,b,c` creates a blank linear flow.
+`.df/<name>/` (`dfl flow create feature --from feature --use` also activates it), and
+`dfl flow create <name> --steps a,b,c` creates a blank linear flow. `dfl flow pull` later updates a
+flow from the template (or git repository, or directory) it came from, see
+[Sharing flows over git](#sharing-flows-over-git).
 
 ### flow.json
 
@@ -198,34 +246,52 @@ The root `.gitignore` block looks like this and is rewritten on every sync:
 }
 ```
 
-- Step ids (state keys) are kebab-case, at most 64 characters. The skill name and slash command
-  is `skillPrefix + id`.
+- Flow names and step ids (state keys) are kebab-case, at most 64 characters. `name` must equal
+  the flow's directory name. The skill name and slash command is `skillPrefix + id`.
 - The state `description` becomes the skill's `description` (what the agent reads to decide
   when to use it): one sentence that starts with a verb and says when to use the step.
-- Transitions are `"EVENT": "target"` or `{ "target": "…", "description": "…" }`. `NEXT` is the
-  conventional forward event. Only flat machines are supported: no nested or parallel states,
-  guards or actions.
-- Step order (for lists, `step N of M` and the viewer) follows `NEXT` from `initial`, then other
-  events, then unreachable states.
+- Transitions are `"EVENT": "target"` or `{ "target": "…", "description": "…" }`. The description
+  says when to fire the event; the step skills show it to the agent, so give one to every event
+  other than `NEXT`. `NEXT` is the conventional forward event. Only flat machines are supported: no
+  nested or parallel states, guards, actions or arrays of transitions.
+- **Step order** (for lists, `step N of M` and the viewer) is the order of the states in
+  `machine.states`, with the initial step moved first and final states moved last.
 
 ### Editing steps
 
 Use the CLI (or let the agent do it with the built-in skills / MCP tools). Every change is
-validated before it is written and the skills are re-installed when the flow is active.
+validated before it is written: an edit is refused when it introduces a validation error or a
+template that does not parse. Errors the flow already had do not block an edit (so a broken flow
+can be repaired one change at a time); dfl warns about the ones that remain. The skills are
+re-installed when the flow is active and you ran `dfl install`.
 
 ```sh
 dfl step list
 dfl step add qa-check --after verify-feature --title "QA check" --description "Run the QA checklist. Use after verification passes."
 dfl step edit qa-check --rename qa --template-file ./qa.md.hbs
 dfl step edit spec-feature --initial
-dfl step transition qa REJECTED implement-feature
+dfl step transition qa REJECTED implement-feature --description "The QA checklist found problems"
 dfl step transition qa REJECTED --remove
-dfl step remove qa              # incoming transitions are rerouted to its NEXT target
+dfl step remove qa --yes
 dfl flow validate
 ```
 
-`dfl step add` writes a skeleton `SKILL.md.hbs` for you to fill in. After editing templates or
-`flow.json` by hand, run `dfl flow-update`.
+- `step add` without `--after`/`--before` puts the step at the end of the `NEXT` path from the
+  initial step: after the last step before the final state, which then leads to the new step.
+  `--after X` makes `X` lead to the new step (it takes over `X`'s old target); `--before X`
+  redirects the transitions into `X`. Only a `NEXT` insert before the initial step makes the new
+  step the initial step. The new state is declared at its position in `flow.json`, so it shows up
+  in the right place in the step order.
+- `step remove` reroutes the transitions that led to the removed step to its `NEXT` target. A
+  transition from that target back to the removed step (for example `review CHANGES_REQUESTED →
+  build` when `build` is removed and `build NEXT → review`) would point at itself and is removed
+  instead; dfl lists every rerouted and removed transition. A step without `NEXT` cannot be removed
+  while other steps lead to it, unless you pass `--force` (those transitions are dropped). If it was
+  your current step, your position moves to its `NEXT` target.
+- To move a step, rewire the `NEXT` transitions around it with `dfl step transition` and move its
+  entry in `machine.states` of `flow.json`, so the numbering follows (there is no reorder command).
+- `dfl step add` writes a skeleton `SKILL.md.hbs` for you to fill in. After editing templates or
+  `flow.json` by hand, run `dfl flow-update`.
 
 ## Templates
 
@@ -244,26 +310,40 @@ Templates are [Handlebars 4](https://handlebarsjs.com/guide/) (no HTML escaping)
 | `step.id`, `step.skillName`, `step.title`, `step.description`, `step.number` (1-based), `step.index` | the step being rendered |
 | `step.next[]`, `step.prev[]` | outgoing / incoming transitions: `event`, `id`, `skillName`, `title`, `final`, `description` |
 | `vars.<name>` | [variables](#variables) |
-| `env.<NAME>` | environment variables at render time |
-| `dfl.version`, `dfl.mcpServer`, `dfl.cli` | dfl version, MCP server name (`dfl`), CLI command (`dfl` or `npx dfl`) |
+| `env.<NAME>` | the environment variable `DFL_ENV_<NAME>` at render time (no other environment variables are visible to templates) |
+| `dfl.version`, `dfl.mcpServer`, `dfl.cli` | dfl version, MCP server name (`dfl`), CLI command (`dfl` or `npx --no-install dfl`, see [Global or per project](#global-or-per-project)) |
 
 **Helpers**: `eq`, `ne`, `and`, `or`, `not` (inline or as blocks: `{{#eq a b}}…{{else}}…{{/eq}}`),
 `default value fallback`, `upper`, `lower`, `kebab`, `title`, `json value`, `join list sep`,
-`indent n text` (or `{{#indent 2}}…{{/indent}}`), `command skillName` (→ `/skill-name`).
+`indent n text` (or `{{#indent 2}}…{{/indent}}`), `command skillName` (→ `/skill-name`),
+`handle value` (a login without a leading `@` or spaces, e.g. for `gh --reviewer`). `{{log …}}`
+prints to stderr for debugging and renders nothing.
 
 **Partials**: end every step template with `{{> flow-context}}`. It renders a "Flow context"
-section: the step's position, the previous and next steps with their commands, and the
-instructions to call `get_status` first and `complete_step` with the right event at the end.
-Put your own partials (or an override of `flow-context`) in `.df/<flow>/partials/<name>.hbs`
-and use them as `{{> name}}`.
+section: the step's position, the step it comes after and the steps that send work back to it
+(with their commands and conditions), the instruction to call `get_status` first, and the events
+to finish with (`complete_step` with the right event, plus CLI fallbacks). The MCP calls name the
+flow, so a skill keeps working on its own flow even when another flow is active. Put your own
+partials (or an override of `flow-context`) in `.df/<flow>/partials/<name>.hbs` and use them as
+`{{> name}}`.
 
 **Rules**
 
-- Write `\{{` for literal braces.
+- Write `\{{` for literal braces (for example a GitHub Actions expression:
+  `$\{{ secrets.NPM_TOKEN }}`). `dfl flow validate` warns about an expression whose first name is
+  not part of the context (`{{ secrets.NPM_TOKEN }}` would render as an empty string).
 - Avoid `$ARGUMENTS`, `$1`…, lines starting with `` !` `` and `@word` tokens: Claude Code and
-  OpenCode expand them when a skill runs as a slash command.
-- Every `.md` file under `.df/<flow>/steps/` is generated; one without a matching `.md.hbs` is
-  deleted on the next sync. Name hand-written reference docs `X.md.hbs`.
+  OpenCode expand them when a skill runs as a slash command. The sync warns when a rendered
+  `SKILL.md` contains one, for example from a variable value such as a reviewer stored as `@octocat`
+  (render handles with `{{handle vars.reviewer}}`).
+- Only `*.md.hbs` files are templates; `dfl flow validate` warns about other `.hbs` files under
+  `steps/` (they are neither rendered nor copied) and reports template syntax errors and unknown
+  partials with file and line.
+- Every `.md` file under `.df/<flow>/steps/` is treated as rendered output and git-ignored. dfl
+  deletes a rendered file only when it rendered it itself (it is listed in `.df/installed.json`) and
+  its template is gone; a hand-written `.md` file there is kept but neither committed nor installed,
+  so name hand-written reference docs `X.md.hbs`. Step directories without a state that hold only
+  dfl-rendered files are removed on sync.
 - Rendered skills are the same for every agent; slash commands in them use the `/name` form
   (Codex users invoke `$name`).
 
@@ -284,9 +364,11 @@ dfl vars set reviewer octocat --personal
 dfl vars unset reviewer
 ```
 
-`dfl install` asks for required variables that have no value. Guard optional ones in templates
-with `{{#if vars.reviewer}}…{{/if}}`. Because rendered skills can contain personal values, they
-are git-ignored.
+Stored values are shared by all flows of the project: a variable with the same name means the same
+thing in every flow (the prebuilt flows use `featureBranchPrefix` and `fixBranchPrefix` rather than
+one `branchPrefix`). `dfl install` asks for required variables that have no value. Guard optional
+ones in templates with `{{#if vars.reviewer}}…{{/if}}`. Because rendered skills can contain personal
+values, they are git-ignored.
 
 ## Built-in skills
 
@@ -309,8 +391,8 @@ hand. Files are re-read on every call, so edits and `git pull` are picked up imm
 
 | Tool | Purpose |
 |------|---------|
-| `get_status` | current step, its command, the events it can fire and the history tail |
-| `get_flow` | the active (or named) flow: steps in order, transitions, variables, current step |
+| `get_status` | current step, its command, the events it can fire, the history tail and whether your installed skills are up to date (`skills`) |
+| `get_flow` | the active (or named) flow: steps in order, transitions, variables, current step; also works on a broken flow (`current: null` plus `problem` and `issues`) |
 | `list_flows` | all flows and which one is active |
 | `get_step` | one step: metadata, transitions, template and rendered skill |
 | `validate_flow` | validation errors and warnings |
@@ -318,18 +400,35 @@ hand. Files are re-read on every call, so edits and `git pull` are picked up imm
 | `transition` | fire an event (default `NEXT`) from the current step |
 | `complete_step` | fire an event (default `NEXT`) from a given step; fails if it is not current |
 | `goto_step` | jump to a step |
-| `add_step` | create a step (directory, template, wiring), then re-install the skills |
-| `update_step` | change title, description, template, transitions, id or initial step, then re-install |
-| `delete_step` | delete a step and reroute transitions, then re-install |
+| `add_step` | create a step (directory, template, wiring), then re-install the skills; `placement` says where it went |
+| `update_step` | change title, description, template, transitions (with descriptions), id or initial step, then re-install |
+| `delete_step` | delete a step and reroute transitions (`rewired`, `dropped`), then re-install |
 | `sync` | same as `dfl flow-update` |
 
-Resources: `dfl://flow` (flow.json of the active flow) and `dfl://steps/{id}` (a step's
-template). Every tool except `list_flows`, `sync` and `get_authoring_guide` accepts an optional
-`flow` argument.
+- Resources: `dfl://flow` (flow.json of the active flow) and `dfl://steps/{id}` (a step's
+  template). After `add_step`, `update_step`, `delete_step` and `sync` the server sends
+  `notifications/resources/list_changed`; changes made outside the server (CLI, editor, `git pull`)
+  are not announced.
+- Every tool except `list_flows`, `sync` and `get_authoring_guide` accepts an optional `flow`
+  argument (a flow name).
+- Commands in results (`command`, `targetCommand`, `next.command`) use the client's syntax:
+  `$name` when the MCP client identifies itself as Codex, `/name` otherwise.
+- The editing tools re-install the skills only when you ran `dfl install` in this clone, and
+  otherwise say so. Mutations take a lock file, `.df/.lock`, so several agents (and the CLI) never
+  overwrite each other's changes.
+- The project is found through `--root <dir>`, then `DFL_ROOT`, then the client's MCP roots (the
+  first root inside a directory with `.df/`; clients on the 2026-07-28 protocol are asked for their
+  roots through an `input_required` result), then the nearest parent of the working directory that
+  has `.df/`.
+- stdout carries only JSON-RPC (the template `log` helper writes to stderr); set `DFL_DEBUG=1` to
+  log transport errors to stderr.
 
-The project is found through `--root <dir>`, then `DFL_ROOT`, then the client's MCP roots (the
-first root with a `.df/` directory), then the nearest parent of the working directory that has
-`.df/`. stdout carries only JSON-RPC; set `DFL_DEBUG=1` to log transport errors to stderr.
+**Turning it off.** Answer "no" in the `dfl install` wizard or run `dfl install --no-mcp`: the
+choice is stored in your `.df/local.json` and later syncs leave the MCP configs alone (`dfl install
+--mcp` turns it back on; `dfl flow-update --mcp`/`--no-mcp` applies to one run only). The MCP entries
+are committed team config, so deselecting an agent never removes one; only `dfl uninstall` removes
+the `dfl` entry, and only when its command looks like dfl (`dfl …`, `npx`/`pnpm`/`yarn` running
+`dfl`, or your `config.json` override). Files and containers dfl did not create are left in place.
 
 ## Flow viewer
 
@@ -347,9 +446,9 @@ The current step has a heavy border; `NEXT` edges are unlabelled, other events a
 | `x` / Ctrl+C | exit |
 
 Zoom levels: `0` one-line nodes, `1` title boxes, `2` cards with a short description, `3`
-cards with the full description and the skill command. `--print` (or a non-terminal stdout)
-prints the whole graph instead; `--zoom <0-3>`, `--lr` and `--ascii` (7-bit box drawing) work
-in both modes.
+cards with the full description and the skill command of your agents (`/name`, `$name` for
+Codex). `--print` (or a non-terminal stdout) prints the whole graph instead; `--zoom <0-3>`,
+`--lr` and `--ascii` (7-bit output, header and footer included) work in both modes.
 
 ## Supported agents
 
@@ -366,9 +465,17 @@ in both modes.
 | `kiro` | Kiro | `.kiro/skills` | `/name` | `.kiro/settings/mcp.json` |
 
 `dfl agents` shows which agents are detected in the project and selected, with per-tool notes
-(trust prompts, reloads, MCP approval). [docs/AGENTS.md](docs/AGENTS.md) has the details and
-sources for each tool. Several tools also read other tools' folders (for example Cursor reads
+(trust prompts, reloads, MCP approval).
+[docs/AGENTS.md](https://github.com/vishin-pavel/dfl/blob/main/docs/AGENTS.md) has the details
+and sources for each tool. Several tools also read other tools' folders (for example Cursor reads
 `.claude/skills`), so installing for several agents can show a skill twice in one tool.
+
+**Other tools.** The list of agents is fixed; there is no way yet to declare your own skills folder
+or MCP config file. Many tools read one of the folders above (`.agents/skills` and
+`.claude/skills` are the most widely read): install for the agent whose folder your tool reads, and
+register a stdio MCP server named `dfl` running `dfl mcp` (or `npx --no-install dfl mcp`) in your
+tool's MCP settings yourself. Selecting an agent also writes that agent's MCP config file; use
+`--no-mcp` if you do not want it. Please open an issue for the tool you need.
 
 ## Sharing flows over git
 
@@ -376,66 +483,114 @@ A flow is just files, so the normal way to share it is to commit `.df/` (dfl's o
 `.df/.gitignore` keeps personal files out) together with the MCP config files:
 
 ```sh
-git add .df .mcp.json .cursor/mcp.json .gitignore
+git add .df .mcp.json .cursor/mcp.json
 git commit -m "Add the feature flow"
 ```
 
+Installed skill folders ignore themselves, so `git status` never shows them, and the committed
+files do not change when a teammate installs for other agents: dfl never writes the root
+`.gitignore`, and the MCP entry is the same for everyone.
+
 Teammates clone or pull and run `dfl install` once (it keeps the team's active flow from
 `.df/config.json` and asks for their agents and any missing personal variables), then
-`dfl flow-update` after pulling flow changes. `dfl install --project-agents` (or answering yes in
-the wizard) saves the agent selection as the team default.
+`dfl flow-update` after pulling flow changes (`dfl status` tells them when that is needed).
+`dfl install --project-agents` (or answering yes in the wizard) saves the agent selection as the
+team default. With several flows and no team default, a non-interactive `dfl install` needs
+`--flow <name>`; the team default (`activeFlow` in `.df/config.json`) is only written for a flow you
+chose explicitly or the project's only flow, and `dfl flow use <name> --project` changes it.
 
 To reuse flows across repositories, import them:
 
 ```sh
 dfl flow import github:acme/dev-flows/flows/feature#v1     # GitHub shorthand: owner/repo[/path][#ref]
-dfl flow import https://github.com/acme/dev-flows.git#main  # any git URL, optional //sub/path and #branch-or-tag
+dfl flow import https://github.com/acme/dev-flows.git#main  # any git URL, optional //sub/path and #branch, tag or commit
 dfl flow import ../other-project/.df/bugfix --name bf       # a local directory
 dfl flow import github:acme/dev-flows --flow feature bugfix --use
 ```
 
 A source may contain one flow (a directory with `flow.json`) or several (`*/flow.json`,
-`flows/*/flow.json` or `.df/*/flow.json`). The origin is recorded in `flow.json` `source`;
-re-import with `--force` to update a flow.
+`flows/*/flow.json` or `.df/*/flow.json`). Every target name is checked, and nothing is replaced,
+before anything is written; importing a directory into itself is refused. The origin is recorded
+in `flow.json` `source`: the template name, the git URL with `rev` and the imported `commit`, or the
+directory relative to the project root. To update a flow from its origin later:
+
+```sh
+dfl flow pull                 # the active flow: shows the changed files, asks, then replaces them
+dfl flow pull bugfix --yes    # without asking
+dfl flow pull --dry-run       # only show what would change
+dfl flow pull --rev v2        # git sources: another branch, tag or commit
+```
+
+`flow pull` replaces the flow's files with the source's (local edits are lost; your position in the
+flow is kept) and re-installs the skills when the flow is active. Flows created with
+`dfl flow create --steps` have no source to pull from. `dfl flow import --force` also replaces an
+existing flow.
+
+## Windows
+
+dfl is developed and tested on macOS and Linux; native Windows is not covered by CI. WSL works
+like Linux. On native Windows the CLI and the skills work, but the default MCP entry does not
+start: npm installs `dfl` and `npx` as `.cmd` shims, and agents start MCP servers without a shell,
+so `dfl mcp` or `npx --no-install dfl mcp` fails with "Connection closed" or ENOENT. Set the MCP
+command in `.df/config.json` and run `dfl flow-update`:
+
+- Windows-only team: `"mcp": { "command": "cmd", "args": ["/c", "dfl", "mcp"] }` (per-project install:
+  `["/c", "npx", "--no-install", "dfl", "mcp"]`).
+- Mixed team with a per-project install: `"mcp": { "command": "node", "args":
+  ["node_modules/@vishin-pavel/dfl/dist/cli.mjs", "mcp"] }` works on every OS, as long as the
+  agent starts the server with the project root as its working directory (start the agent in the
+  project root, not in a subdirectory).
+
+The override is committed, so it applies to the whole team.
 
 ## Command reference
 
 Global options: `--root <dir>` (default: `DFL_ROOT` or the nearest directory with `.df/`),
-`--no-color`, `-v, --version`, `-h, --help`. Commands never prompt with `--yes`, when stdin or
-stdout is not a terminal, or when `CI` is set, and exit non-zero on errors. Warnings go to stderr, so `--json` output can
-be piped.
+`--no-color`, `-v, --version`, `-h, --help`. The `.df/` search never crosses into an enclosing git
+repository: inside a nested clone or submodule without its own `.df/`, commands fail with a hint to
+pass `--root`, and `dfl install` sets up that repository instead. Commands never prompt with `--yes`,
+when stdin or stdout is not a terminal, or when `CI` is set; destructive commands (`uninstall`,
+`flow delete`, `flow pull`, `step remove`) then need `--yes`. Commands exit non-zero on errors.
+Warnings go to stderr, so `--json` output can be piped. Tables fit the terminal width (or
+`COLUMNS` when the output is not a terminal).
 
 | Command | Description |
 |---------|-------------|
-| `dfl install [-a, --agents <list>] [-f, --flow <name>] [-y, --yes] [--no-mcp] [--project-agents]` | set up dfl: create/activate a flow, install skills and the MCP server (outside a dfl project it installs at the git root) |
-| `dfl uninstall [--purge] [-y]` | remove installed skills, MCP entries and the `.gitignore` block; `--purge` also deletes `local.json`, `state.json` and rendered files (flows are kept) |
-| `dfl flow-update` (alias `dfl update`) `[--dry-run] [--no-mcp] [-y]` | re-render and re-install the active flow |
-| `dfl status [--flow <f>] [--json]` | active flow, current step, available events |
+| `dfl install [-a, --agents <list>] [-f, --flow <name>] [-y, --yes] [--mcp \| --no-mcp] [--project-agents]` | set up dfl: create/activate a flow, install skills and the MCP server (outside a dfl project it installs at the git root); `--mcp`/`--no-mcp` is remembered |
+| `dfl uninstall [--purge] [-y]` | remove the installed skills and the `dfl` MCP entries; `--purge` also deletes `local.json`, `state.json` and rendered files (flows are kept) |
+| `dfl flow-update` (alias `dfl update`) `[--dry-run] [--mcp \| --no-mcp] [-y]` | re-render and re-install the active flow (always, also before `dfl install`); `--mcp`/`--no-mcp` for this run only |
+| `dfl status [--flow <f>] [--json]` | active flow, current step, available events, stale-skill warning (`--json`: `skills: { installed, upToDate, reason?, hint? }`) |
 | `dfl next [event] [--from <step>] [--flow <f>] [--json]` | fire an event (default `NEXT`) |
 | `dfl goto <step> [--flow <f>] [--json]` | jump to a step |
 | `dfl reset [--flow <f>] [-y] [--json]` | back to the initial step |
 | `dfl flow list` / `ls [--json]` | flows of the project |
 | `dfl flow templates` | prebuilt templates |
-| `dfl flow use <name> [--project] [--no-sync]` | make a flow active (personal, or team default with `--project`) |
-| `dfl flow create <name> [--from <template> \| --steps a,b] [--title] [--description] [--use]` | create a flow |
+| `dfl flow use <name> [--project] [--no-sync]` | make a flow active (personal, or team default with `--project`); an invalid flow is refused, and a failed sync restores the previous flow |
+| `dfl flow create <name> [--from <template> \| --steps a,b] [--title] [--description] [--use] [--no-sync]` | create a flow |
 | `dfl flow import <source> [--name <n>] [--flow <names...>] [--force] [--use] [--no-sync]` | import flows from git or a directory |
+| `dfl flow pull [name] [--rev <ref>] [--dry-run] [-y] [--no-sync]` | update a flow from its recorded source (template, git, directory) |
 | `dfl flow delete` / `rm <name> [-y]` | delete a flow |
-| `dfl flow validate [name] [--json]` | validate a flow (all flows when none is active) |
+| `dfl flow validate [name] [--json]` | validate a flow (all flows when none is active); `--json`: `{ valid, flows: [{ flow, valid, issues }] }` |
 | `dfl flow view [name] [--zoom <0-3>] [--print] [--lr] [--ascii]` | flow viewer |
 | `dfl step list` / `ls [--flow <f>] [--json]` | steps in flow order |
 | `dfl step add <id> [--after <s> \| --before <s>] [--title] [--description] [--event <E>] [--template-file <f>]` | add a step |
 | `dfl step edit <id> [--title] [--description] [--rename <new-id>] [--template-file <f>] [--initial]` | change a step |
 | `dfl step remove` / `rm <id> [--force] [-y]` | remove a step |
-| `dfl step transition <id> <event> [target] [--remove]` | set or remove a transition |
+| `dfl step transition <id> <event> [target] [--description <text>] [--remove]` | set (with the condition for firing it) or remove a transition |
 | `dfl vars list` / `ls [--json]` | variables and their sources (`dfl vars` alone lists them) |
 | `dfl vars set <name> <value> [--personal \| --project]` | set a variable |
 | `dfl vars unset <name>` | remove a stored value |
 | `dfl agents [--json]` | supported agents, detection and paths |
 | `dfl mcp` | run the MCP server over stdio |
 
-Step commands take `--flow <name>` (default: the active flow) and `--no-sync`.
+Step and vars commands take `--no-sync`; step commands take `--flow <name>` (default: the active
+flow).
 
 ## Development
+
+Building, packing and publishing need **Node.js 22.18+ or 24.11+** (tsdown 0.23 cannot load its
+config on older Node and fails with `Failed to import module "unrun"`); the installed CLI still runs
+on 22.12+.
 
 ```sh
 git clone https://github.com/vishin-pavel/dfl.git && cd dfl
@@ -450,11 +605,20 @@ npm run check          # all of the above
 - Source is TypeScript ESM in `src/` (`core/` flow model, rendering, sync; `agents/` tool
   adapters and MCP config editors; `mcp/` server; `tui/` viewer; `commands/` and `ui/` CLI),
   bundled to `dist/` with tsdown. Templates ship in `templates/`.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the design and module contracts;
-  [docs/AGENTS.md](docs/AGENTS.md) the per-agent research.
-- CI runs typecheck, tests and build on Ubuntu and macOS with Node 22 and 24. Publishing to
-  GitHub Packages runs on a GitHub release or a pushed `v*` tag whose version matches
-  `package.json` (`npm version patch && git push --follow-tags`).
+- [docs/ARCHITECTURE.md](https://github.com/vishin-pavel/dfl/blob/main/docs/ARCHITECTURE.md)
+  describes the design and module contracts;
+  [docs/AGENTS.md](https://github.com/vishin-pavel/dfl/blob/main/docs/AGENTS.md) the per-agent
+  research.
+- CI runs typecheck, tests and build on Ubuntu and macOS with Node 22 and 24 (and 22.18.0, the
+  oldest Node that builds dfl), and runs the built CLI on Node 22.12 (and checks that Node 20 gets
+  a clear error).
+- Publishing to GitHub Packages runs on a GitHub release or a pushed `v*` tag whose version matches
+  `package.json`:
+  - release: `npm version patch && git push --follow-tags` (published under `latest`);
+  - prerelease: `npm version prerelease --preid rc && git push --follow-tags` (for example
+    `0.2.0-rc.0`, published under `next`, as is any GitHub release marked as a prerelease). Test it
+    with `npm install -g @vishin-pavel/dfl@next`, then promote the final version with a normal
+    release.
 
 ## License
 

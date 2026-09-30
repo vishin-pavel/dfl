@@ -2,13 +2,14 @@
  * `dfl flow list | templates | use | create | import | delete | validate | view`.
  */
 import type { CommandUnknownOpts } from '@commander-js/extra-typings';
-import { getActiveFlowName, setActiveFlow } from '../core/config.js';
-import { DflError, errorMessage } from '../core/errors.js';
+import { getActiveFlowName, getSelectedAgents, loadProjectConfig } from '../core/config.js';
+import { DflError, errorMessage, isDflError } from '../core/errors.js';
 import { createFlow, deleteFlow, flowExists, listFlowTemplates, listFlows, loadFlow, loadFlowOrActive, skillSteps } from '../core/flow.js';
 import { relPosix } from '../core/fsx.js';
-import { importFlows } from '../core/import.js';
+import { assertValidFlowName } from '../core/ids.js';
+import { importFlows, pullFlow, type PullResult, type RecordedFlowSource } from '../core/import.js';
 import { loadRuntimeState } from '../core/machine.js';
-import { uninstallProject } from '../core/sync.js';
+import { isInstalledForUser, readManifest, uninstallProject, writeManifest } from '../core/sync.js';
 import type { FlowModel, ProjectPaths, ValidationIssue } from '../core/types.js';
 import { validateFlow } from '../core/validate.js';
 import { c } from '../ui/colors.js';
@@ -17,7 +18,17 @@ import { issueLines } from '../ui/format.js';
 import { plural, print, printJson, printLines, success, sym, terminalWidth, warning } from '../ui/output.js';
 import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { confirmDestructive, isInstalled, parseInteger, projectFor, syncAfterChange, type CliContext } from './shared.js';
+import {
+  confirmDestructive,
+  locked,
+  parseInteger,
+  printAfterChange,
+  projectFor,
+  switchActiveFlow,
+  syncAfterChange,
+  type AfterChange,
+  type CliContext,
+} from './shared.js';
 
 export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContext): void {
   const flow = program.command('flow').description('Manage the flows of this project');
@@ -82,9 +93,15 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
     .action(async (name, opts) => {
       const paths = projectFor(ctx);
       requireFlow(paths, name);
-      setActiveFlow(paths, name, opts.project ? 'project' : 'local');
+      // Validated before anything is written; a failed sync restores the previous active flow.
+      const result = await locked(paths, () =>
+        switchActiveFlow(paths, name, opts.project ? 'project' : 'local', {
+          sync: opts.sync,
+          interactive: isInteractive(),
+        }),
+      );
       success(`Active flow: ${c.bold(name)} ${c.dim(opts.project ? '(team default, .df/config.json)' : '(personal, .df/local.json)')}`);
-      await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+      printAfterChange(paths, result);
     });
 
   flow
@@ -106,14 +123,18 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       if (opts.from && steps) {
         throw new DflError('--steps cannot be combined with --from.', { code: 'INVALID_OPTIONS' });
       }
-      const model = createFlow(paths, name, { from: opts.from, title: opts.title, description: opts.description, steps });
+      const model = await locked(paths, () =>
+        createFlow(paths, name, { from: opts.from, title: opts.title, description: opts.description, steps }),
+      );
       success(
         `Created flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')}${opts.from ? `, from template "${opts.from}"` : ''})`)} in ${relPosix(paths.root, model.dir)}/`,
       );
       if (opts.use) {
-        setActiveFlow(paths, model.name);
+        const result = await locked(paths, () =>
+          switchActiveFlow(paths, model.name, 'local', { sync: opts.sync, interactive: isInteractive() }),
+        );
         success(`Active flow: ${c.bold(model.name)}`);
-        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+        printAfterChange(paths, result);
       } else {
         print(c.dim(`Activate it with \`dfl flow use ${model.name}\`; edit steps with \`dfl step add|edit|remove\`.`));
       }
@@ -130,18 +151,29 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
     .option('--no-sync', 'do not re-install skills')
     .action(async (source, opts) => {
       const paths = projectFor(ctx);
-      const models = await importFlows(paths, source, { name: opts.name, flows: opts.flow, force: opts.force });
+      const models = await locked(paths, () => importFlows(paths, source, { name: opts.name, flows: opts.flow, force: opts.force }));
       for (const model of models) {
         success(`Imported flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')})`)}`);
       }
       const active = getActiveFlowName(paths);
       if (opts.use && models[0]) {
-        setActiveFlow(paths, models[0].name);
-        success(`Active flow: ${c.bold(models[0].name)}`);
+        const first = models[0].name;
+        let result: AfterChange;
+        try {
+          result = await locked(paths, () => switchActiveFlow(paths, first, 'local', { sync: opts.sync, interactive: isInteractive() }));
+        } catch (error) {
+          if (!isDflError(error) || error.code !== 'INVALID_FLOW') throw error;
+          // The flow stays imported but inactive: the active flow and the installed skills are unchanged.
+          throw new DflError(`${error.message}\nThe flow was imported but not activated.`, {
+            hint: `Fix it, then run \`dfl flow use ${first}\`${active ? ` (the active flow is still "${active}")` : ''}.`,
+            code: 'INVALID_FLOW',
+          });
+        }
+        success(`Active flow: ${c.bold(first)}`);
         if (models.length > 1) print(c.dim(`Switch with \`dfl flow use <name>\` (${models.map((m) => m.name).join(', ')}).`));
-        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+        printAfterChange(paths, result);
       } else if (active && models.some((model) => model.name === active)) {
-        await syncAfterChange(paths, { sync: opts.sync, flow: active, interactive: isInteractive() });
+        await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: active, interactive: isInteractive() }));
       }
     });
 
@@ -155,32 +187,57 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       const paths = projectFor(ctx);
       requireFlow(paths, name);
       const wasActive = getActiveFlowName(paths) === name;
+      const wasTeamDefault = loadProjectConfig(paths).activeFlow === name;
       const ok = await confirmDestructive(`Delete flow "${name}" (.df/${name}/ and its state)?`, opts);
       if (!ok) {
         print(c.dim('Nothing changed.'));
         return;
       }
-      deleteFlow(paths, name);
-      success(`Deleted flow ${c.bold(name)}`);
-      if (!wasActive || !isInstalled(paths)) return;
-      const next = getActiveFlowName(paths);
-      if (next) {
-        print(c.dim(`Active flow is now "${next}".`));
-        await syncAfterChange(paths, { sync: true, interactive: isInteractive() });
+      await locked(paths, () => deleteAndResync(paths, name, { wasActive, wasTeamDefault }));
+    });
+
+  flow
+    .command('pull')
+    .description('Update a flow from the source it was created from (template, git or local directory)')
+    .argument('[name]', 'flow name (default: the active flow)')
+    .option('--rev <ref>', 'git sources: branch, tag or commit to pull instead of the recorded one')
+    .option('--dry-run', 'only show what would change')
+    .option('-y, --yes', 'do not ask for confirmation')
+    .option('--no-sync', 'do not re-install skills')
+    .action(async (name, opts) => {
+      const paths = projectFor(ctx);
+      if (name !== undefined) requireFlow(paths, name);
+      const flowName = name ?? loadFlowOrActive(paths).name;
+      let result: PullResult;
+      if (opts.yes && !opts.dryRun) {
+        result = await locked(paths, () => pullFlow(paths, flowName, { rev: opts.rev }));
+      } else {
+        // Show what would change first (git sources are fetched twice: preview, then pull).
+        const preview = await pullFlow(paths, flowName, { rev: opts.rev, dryRun: true });
+        if (changeCount(preview) === 0) {
+          success(`Flow ${c.bold(flowName)} is up to date with ${describeSource(preview.source)}`);
+          return;
+        }
+        print(`Changes to flow ${c.bold(flowName)} from ${describeSource(preview.source)}:`);
+        printLines(changeLines(preview));
+        if (opts.dryRun) return;
+        const ok = await confirmDestructive(
+          `Replace the files of flow "${flowName}" with ${describeSource(preview.source)} (local edits in .df/${flowName}/ are lost)?`,
+          opts,
+        );
+        if (!ok) {
+          print(c.dim('Nothing changed.'));
+          return;
+        }
+        result = await locked(paths, () => pullFlow(paths, flowName, { rev: opts.rev }));
+      }
+      if (changeCount(result) === 0) {
+        success(`Flow ${c.bold(flowName)} is up to date with ${describeSource(result.source)}`);
         return;
       }
-      // No flow is active any more: remove the deleted flow's installed skills and MCP entries.
-      const report = uninstallProject(paths);
-      print(`${c.cyan(sym.sync)} Removed ${plural(report.removed.length, 'installed skill dir')} of "${name}"`);
-      for (const message of report.warnings) warning(message);
-      const remaining = listFlows(paths);
-      print(
-        c.dim(
-          remaining.length > 0
-            ? `Select the active flow with \`dfl flow use <name>\` (${remaining.join(', ')}).`
-            : 'Create a flow with `dfl flow create <name>` or `dfl install --flow <template>`.',
-        ),
-      );
+      success(`Pulled flow ${c.bold(flowName)} from ${describeSource(result.source)} ${c.dim(`(${plural(changeCount(result), 'file')} changed)`)}`);
+      if (opts.yes) printLines(changeLines(result));
+      await locked(paths, () => syncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() }));
     });
 
   flow
@@ -199,7 +256,8 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
         const issues = validateFlow(paths, flowName);
         return { flow: flowName, valid: !issues.some((issue) => issue.level === 'error'), issues: issues.map((i) => relIssue(paths, i)) };
       });
-      if (opts.json) printJson(name || results.length === 1 ? results[0] : results);
+      // One JSON shape whatever the project state: { valid, flows: [{ flow, valid, issues }] }.
+      if (opts.json) printJson({ valid: results.every((result) => result.valid), flows: results });
       else for (const result of results) printValidation(result.flow, result.issues);
       if (results.some((result) => !result.valid)) throw new CliExit(1);
     });
@@ -219,6 +277,8 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       const { runFlowView } = await import('../tui/run-flow-view.js');
       await runFlowView(model, {
         current,
+        // Zoom-3 cards show how the selected agents invoke each skill (`/name`, `$name` for Codex).
+        agents: getSelectedAgents(paths),
         zoom: opts.zoom,
         print: opts.print,
         direction: opts.lr ? 'LR' : 'TB',
@@ -272,13 +332,92 @@ function currentStep(paths: ProjectPaths, model: FlowModel): string | undefined 
   }
 }
 
+/** `flow delete` after the confirmation: deletes the flow and re-syncs (or removes its skills when no flow is left active). */
+async function deleteAndResync(
+  paths: ProjectPaths,
+  name: string,
+  { wasActive, wasTeamDefault }: { wasActive: boolean; wasTeamDefault: boolean },
+): Promise<void> {
+  deleteFlow(paths, name);
+  success(`Deleted flow ${c.bold(name)}`);
+  const left = listFlows(paths);
+  if (wasTeamDefault && left.length > 1) {
+    warning(`No team default flow is set any more: choose one with \`dfl flow use <name> --project\` (${left.join(', ')}).`);
+  }
+  if (!wasActive || !isInstalledForUser(paths)) return;
+  const next = getActiveFlowName(paths);
+  if (next) {
+    print(c.dim(`Active flow is now "${next}".`));
+    await syncAfterChange(paths, { sync: true, interactive: isInteractive() });
+    return;
+  }
+  // No flow is active any more: remove the deleted flow's installed skills, but stay installed (a
+  // manifest without skills), so activating another flow later installs its skills again. The MCP
+  // entries are committed team config and stay (only `dfl uninstall` removes them).
+  const previous = readManifest(paths);
+  const report = uninstallProject(paths, { keepMcp: true });
+  const deletedPrefix = `.df/${name}/`;
+  writeManifest(paths, {
+    version: 1,
+    agents: previous.agents,
+    skills: [],
+    mcp: previous.mcp,
+    rendered: (previous.rendered ?? []).filter((rel) => !rel.startsWith(deletedPrefix)),
+  });
+  print(`${c.cyan(sym.sync)} Removed ${plural(report.removed.length, 'installed skill dir')} of "${name}"`);
+  for (const message of report.warnings) warning(message);
+  const remaining = listFlows(paths);
+  print(
+    c.dim(
+      remaining.length > 0
+        ? `Select the active flow with \`dfl flow use <name>\` (${remaining.join(', ')}).`
+        : 'Create a flow with `dfl flow create <name>` or `dfl install --flow <template>`.',
+    ),
+  );
+}
+
 function requireFlow(paths: ProjectPaths, name: string): void {
   if (flowExists(paths, name)) return;
+  assertValidFlowName(name);
   const flows = listFlows(paths);
+  const template = listFlowTemplates().some((t) => t.name === name)
+    ? `"${name}" is a prebuilt template: create a flow from it with \`dfl flow create ${name} --from ${name} --use\`.`
+    : undefined;
   throw new DflError(`Flow "${name}" not found.`, {
-    hint: flows.length > 0 ? `Flows: ${flows.join(', ')}.` : 'This project has no flows yet: run `dfl install` or `dfl flow create <name>`.',
+    hint: [
+      template,
+      flows.length > 0 ? `Flows: ${flows.join(', ')}.` : 'This project has no flows yet: run `dfl install` or `dfl flow create <name>`.',
+    ]
+      .filter(Boolean)
+      .join(' '),
     code: 'FLOW_NOT_FOUND',
   });
+}
+
+/** `template "feature"`, `github.com/acme/flows.git@v2`, `../shared-flows`. */
+function describeSource(source: RecordedFlowSource): string {
+  const sub = source.path ? `//${source.path}` : '';
+  switch (source.type) {
+    case 'template':
+      return `template "${source.ref ?? '?'}"`;
+    case 'git':
+      return `${source.ref ?? '?'}${sub}${source.rev ? `#${source.rev}` : ''}`;
+    default:
+      return `${source.ref ?? '?'}${sub}`;
+  }
+}
+
+function changeCount(result: PullResult): number {
+  return result.added.length + result.removed.length + result.changed.length;
+}
+
+/** Changed files of a pull, flow-relative. */
+function changeLines(result: PullResult): string[] {
+  return [
+    ...result.added.map((rel) => `  ${c.green(sym.added)} ${rel}`),
+    ...result.changed.map((rel) => `  ${c.yellow('~')} ${rel}`),
+    ...result.removed.map((rel) => `  ${c.red(sym.removed)} ${rel}`),
+  ];
 }
 
 /** Issue with a project-relative `file` for output. */

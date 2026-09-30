@@ -2,16 +2,18 @@
  * Runtime state commands: `status`, `next`, `goto`, `reset`.
  */
 import type { CommandUnknownOpts } from '@commander-js/extra-typings';
-import { getSelectedAgents } from '../core/config.js';
+import { dflLauncher } from '../agents/mcp-config.js';
+import { getActiveFlowName, getSelectedAgents } from '../core/config.js';
 import { loadFlowOrActive } from '../core/flow.js';
 import { availableEvents, gotoStep, loadRuntimeState, resetFlow, sendEvent } from '../core/machine.js';
+import { checkSyncState, type SyncState } from '../core/sync.js';
 import type { FlowModel, FlowRuntimeState, ProjectPaths, TransitionResult } from '../core/types.js';
 import { c } from '../ui/colors.js';
 import { progressChain, skillCommand, skillInvocations, stepPosition, stepStatuses } from '../ui/format.js';
 import { print, printJson, sym, terminalWidth, truncate, warning } from '../ui/output.js';
 import { confirm, isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { projectFor, type CliContext } from './shared.js';
+import { locked, notInstalledMessage, projectFor, type CliContext } from './shared.js';
 
 export function registerStateCommands(program: CommandUnknownOpts, ctx: CliContext): void {
   program
@@ -23,8 +25,10 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
       const paths = projectFor(ctx);
       const model = loadFlowOrActive(paths, opts.flow);
       const state = loadRuntimeState(paths, model);
-      if (opts.json) printJson(statusJson(paths, model, state));
-      else printStatus(paths, model, state);
+      // Installed skills only matter for the active flow (they are always the active flow's).
+      const sync = model.name === getActiveFlowName(paths) ? checkSyncState(paths) : undefined;
+      if (opts.json) printJson(statusJson(paths, model, state, sync));
+      else printStatus(paths, model, state, sync);
     });
 
   program
@@ -34,12 +38,16 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
     .option('--from <step>', 'only if this step is the current one')
     .option('--flow <name>', 'act on another flow instead of the active one')
     .option('--json', 'print JSON')
-    .action((event, opts) => {
+    .action(async (event, opts) => {
       const paths = projectFor(ctx);
-      const model = loadFlowOrActive(paths, opts.flow);
-      const result = sendEvent(paths, model, event, { from: opts.from });
-      if (opts.json) printJson(result);
-      else printMove(paths, model, result);
+      const { model, repaired, result } = await locked(paths, () => {
+        const model = loadFlowOrActive(paths, opts.flow);
+        // A stored step that no longer exists (renamed or removed upstream) fell back to the initial step.
+        const repaired = loadRuntimeState(paths, model).repaired;
+        return { model, repaired, result: sendEvent(paths, model, event, { from: opts.from }) };
+      });
+      if (opts.json) printJson(withRepaired(result, repaired));
+      else printMove(paths, model, result, repaired);
     });
 
   program
@@ -48,12 +56,15 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
     .argument('<step>', 'step id')
     .option('--flow <name>', 'act on another flow instead of the active one')
     .option('--json', 'print JSON')
-    .action((stepId, opts) => {
+    .action(async (stepId, opts) => {
       const paths = projectFor(ctx);
-      const model = loadFlowOrActive(paths, opts.flow);
-      const result = gotoStep(paths, model, stepId);
-      if (opts.json) printJson(result);
-      else printMove(paths, model, result);
+      const { model, repaired, result } = await locked(paths, () => {
+        const model = loadFlowOrActive(paths, opts.flow);
+        const repaired = loadRuntimeState(paths, model).repaired;
+        return { model, repaired, result: gotoStep(paths, model, stepId) };
+      });
+      if (opts.json) printJson(withRepaired(result, repaired));
+      else printMove(paths, model, result, repaired);
     });
 
   program
@@ -65,6 +76,8 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
     .action(async (opts) => {
       const paths = projectFor(ctx);
       const model = loadFlowOrActive(paths, opts.flow);
+      const repaired = loadRuntimeState(paths, model).repaired;
+      if (repaired && !opts.json) warning(repaired);
       if (!opts.json && isInteractive(opts)) {
         const current = loadRuntimeState(paths, model).current;
         const ok = await confirm({
@@ -76,9 +89,9 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
           return;
         }
       }
-      const state = resetFlow(paths, model);
+      const state = await locked(paths, () => resetFlow(paths, loadFlowOrActive(paths, opts.flow)));
       if (opts.json) {
-        printJson(state);
+        printJson(withRepaired(state, repaired));
         return;
       }
       const step = model.byId.get(state.current);
@@ -87,7 +100,22 @@ export function registerStateCommands(program: CommandUnknownOpts, ctx: CliConte
     });
 }
 
-function statusJson(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState): unknown {
+/** Adds `repaired` (why the stored step was replaced by the initial step) to JSON output. */
+function withRepaired<T extends object>(value: T, repaired: string | undefined): T & { repaired?: string } {
+  return repaired ? { ...value, repaired } : value;
+}
+
+/** `▲ Installed skills are out of date: …`, or the not-installed note; undefined when all is well. */
+function syncNotice(paths: ProjectPaths, sync: SyncState | undefined): { level: 'warning' | 'note'; text: string } | undefined {
+  if (!sync || sync.upToDate) return undefined;
+  if (!sync.installed) return { level: 'note', text: notInstalledMessage(paths) };
+  return {
+    level: 'warning',
+    text: `Installed skills are out of date: ${sync.reason ?? 'the flow changed'}. Run \`${dflLauncher(paths)} flow-update\`.`,
+  };
+}
+
+function statusJson(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState, sync: SyncState | undefined): unknown {
   const agents = getSelectedAgents(paths);
   const step = model.byId.get(state.current);
   const position = stepPosition(model, state.current);
@@ -113,12 +141,32 @@ function statusJson(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeSta
     history: state.history.slice(-10),
     updatedAt: state.updatedAt,
     ...(state.repaired ? { repaired: state.repaired } : {}),
+    ...(sync
+      ? {
+          skills: {
+            installed: sync.installed,
+            upToDate: sync.upToDate,
+            ...(sync.reason !== undefined ? { reason: sync.reason } : {}),
+            ...(sync.upToDate ? {} : { hint: sync.installed ? `${dflLauncher(paths)} flow-update` : `${dflLauncher(paths)} install` }),
+          },
+        }
+      : {}),
   };
 }
 
-function printStatus(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState): void {
-  const width = terminalWidth();
+function printStatus(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState, sync: SyncState | undefined): void {
   if (state.repaired) warning(state.repaired);
+  const notice = syncNotice(paths, sync);
+  if (notice?.level === 'warning') warning(notice.text);
+  printStatusBody(paths, model, state);
+  if (notice?.level === 'note') {
+    print();
+    print(c.dim(notice.text));
+  }
+}
+
+function printStatusBody(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState): void {
+  const width = terminalWidth();
   print(`${c.bold(model.title)} ${c.dim(`(${model.name})`)}`);
   for (const line of progressChain(model, state, width)) print(line);
   print();
@@ -164,7 +212,8 @@ function printNow(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState
   if (step.description) print(`  ${c.dim(truncate(step.description, terminalWidth() * 3 - 2))}`);
 }
 
-function printMove(paths: ProjectPaths, model: FlowModel, result: TransitionResult): void {
+function printMove(paths: ProjectPaths, model: FlowModel, result: TransitionResult, repaired: string | undefined): void {
+  if (repaired) warning(repaired);
   const from = model.byId.get(result.from);
   const to = model.byId.get(result.to);
   print(

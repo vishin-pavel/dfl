@@ -46,11 +46,10 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
    ```
 
 5. **Open the pull request** against `{{vars.mainBranch}}`. With the GitHub CLI:
-   `gh pr create --base {{vars.mainBranch}} --title "<title>" --body-file <file>{{#if vars.reviewer}} --reviewer {{vars.reviewer}}{{/if}}`.
+   `gh pr create --base {{vars.mainBranch}} --title "<title>" --body-file <file>{{#if vars.reviewer}} --reviewer {{handle vars.reviewer}}{{/if}}`.
    Without it, give the user the compare link printed by `git push` and the description to paste.
 {{#if vars.reviewer}}
-   This requests a review from your personal default reviewer (the `reviewer` variable). `gh`
-   expects the login without a leading at-sign; drop it if the value has one.
+   This requests a review from your personal default reviewer (the `reviewer` variable).
 {{else}}
    No default reviewer is configured, so ask the user whom to request. They can set a personal
    default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.

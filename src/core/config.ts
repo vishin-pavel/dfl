@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { DflError } from './errors.js';
 import { exists, ensureDir, listDirs, readJsonIfExists, writeJson } from './fsx.js';
 import { writeDfGitignore } from './gitignore.js';
+import { assertValidFlowName, isValidFlowName } from './ids.js';
 import { AGENT_IDS, type AgentId, type LocalConfig, type ProjectConfig, type ProjectPaths } from './types.js';
 
 const agentIdSchema = z.enum(AGENT_IDS);
@@ -59,9 +60,9 @@ export function initProject(paths: ProjectPaths): void {
   writeDfGitignore(paths);
 }
 
-/** Flow directories under `.df/` that contain a flow.json (sorted). */
+/** Flow directories under `.df/` with a valid flow name that contain a flow.json (sorted). */
 function flowDirNames(paths: ProjectPaths): string[] {
-  return listDirs(paths.dfDir).filter((name) => exists(paths.flowFile(name)));
+  return listDirs(paths.dfDir).filter((name) => isValidFlowName(name) && exists(paths.flowFile(name)));
 }
 
 /**
@@ -78,7 +79,9 @@ export function getActiveFlowName(paths: ProjectPaths): string | undefined {
   return undefined;
 }
 
+/** Stores the active flow (`local.json`, or the team default in `config.json`). Invalid names: DflError `INVALID_NAME`. */
 export function setActiveFlow(paths: ProjectPaths, name: string, scope: 'local' | 'project' = 'local'): void {
+  assertValidFlowName(name);
   if (scope === 'project') {
     const config = loadProjectConfig(paths);
     saveProjectConfig(paths, { ...config, activeFlow: name });

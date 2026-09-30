@@ -125,6 +125,8 @@ export interface FlowSource {
   path?: string | undefined;
   /** Git ref (branch/tag/commit). */
   rev?: string | undefined;
+  /** Git imports: the commit that was imported (`git rev-parse HEAD`). */
+  commit?: string | undefined;
 }
 
 export interface FlowDefinition {
@@ -357,6 +359,11 @@ export interface Manifest {
   dflVersion?: string | undefined;
   /** Project-relative posix paths of the `.md` files dfl rendered under `.df/<flow>/steps/`. */
   rendered?: string[] | undefined;
+  /**
+   * Set by `dfl uninstall` when it keeps the manifest only to retry MCP entries it could not remove:
+   * dfl counts as not installed for this developer (no auto-sync) until the next `dfl install`.
+   */
+  uninstalled?: boolean | undefined;
 }
 
 export interface SyncReport {

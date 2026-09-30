@@ -1026,7 +1026,10 @@ describe('MCP entries (F20, F21, F22, F26, F43, F80, F81, F83, F84)', () => {
     const first = uninstallProject(paths);
     expect(first.warnings.join('\n')).toMatch(/Could not remove the dfl MCP server from \.mcp\.json.*run `dfl uninstall` again/);
     expect(first.manifestKept).toBe(true);
-    expect(readManifest(paths)).toMatchObject({ skills: [], mcp: [{ file: '.mcp.json' }] });
+    expect(readManifest(paths)).toMatchObject({ skills: [], mcp: [{ file: '.mcp.json' }], uninstalled: true });
+    // The kept manifest does not count as installed: mutations must not auto-sync skills back.
+    expect(isInstalledForUser(paths)).toBe(false);
+    expect(checkSyncState(paths)).toMatchObject({ installed: false, upToDate: false });
 
     write(paths, '.mcp.json', read(paths, '.mcp.json').replace(',,', ','));
     const second = uninstallProject(paths);
@@ -1034,6 +1037,19 @@ describe('MCP entries (F20, F21, F22, F26, F43, F80, F81, F83, F84)', () => {
     expect(second.mcp).toEqual([{ file: '.mcp.json', changed: true }]);
     expect(readConfig(paths, '.mcp.json')['mcpServers']).toEqual({ mine: { command: 'x' } });
     expect(has(paths, '.df/installed.json')).toBe(false);
+  });
+
+  it('a later install clears the "uninstalled" mark of a kept manifest', async () => {
+    const paths = sampleProject();
+    await syncProject(paths, { agents: ['claude'] });
+    write(paths, '.mcp.json', read(paths, '.mcp.json').replace('"mcpServers": {', '"mcpServers": {,,'));
+    expect(uninstallProject(paths).manifestKept).toBe(true);
+    expect(isInstalledForUser(paths)).toBe(false);
+    write(paths, '.mcp.json', read(paths, '.mcp.json').replace('"mcpServers": {,,', '"mcpServers": {'));
+    await syncProject(paths, { agents: ['claude'] });
+    expect(isInstalledForUser(paths)).toBe(true);
+    expect(readManifest(paths).uninstalled).toBeUndefined();
+    expect(readManifest(paths).mcp).toMatchObject([{ file: '.mcp.json', createdFile: true }]);
   });
 
   it('dry run reports a rewritten entry as updated and never writes (F21, F83)', async () => {

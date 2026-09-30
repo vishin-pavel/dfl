@@ -11,6 +11,8 @@ export const DF_GITIGNORE_CONTENT = [
   '*/steps/**/*.md',
   '# temporary dirs of an interrupted flow import',
   '.dfl-*/',
+  '# held while a dfl process changes the project',
+  '.lock',
   '',
 ].join('\n');
 

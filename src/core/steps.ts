@@ -251,11 +251,26 @@ export function addStep(paths: ProjectPaths, flowName: string, options: AddStepO
   const remainingErrors = assertNoNewErrors(original, def, flowName);
   if (options.template !== undefined) assertTemplateCompiles(paths, flowName, id, options.template);
 
-  const templateFile = path.join(paths.stepDir(flowName, id), SKILL_TEMPLATE_FILE);
-  if (options.template !== undefined || !exists(templateFile)) {
+  const stepDir = paths.stepDir(flowName, id);
+  const templateFile = path.join(stepDir, SKILL_TEMPLATE_FILE);
+  const hadDir = exists(stepDir);
+  const previousTemplate = readTextIfExists(templateFile);
+  if (options.template !== undefined || previousTemplate === undefined) {
     writeText(templateFile, options.template ?? defaultStepTemplate({ title, description: options.description }));
   }
-  writeFlowDefinition(paths, def);
+  try {
+    writeFlowDefinition(paths, def);
+  } catch (error) {
+    // flow.json was not changed: undo the template write so no orphan step directory is left behind.
+    try {
+      if (!hadDir) removePath(stepDir);
+      else if (previousTemplate === undefined) removePath(templateFile);
+      else writeText(templateFile, previousTemplate);
+    } catch {
+      // Best effort: the original error is what matters.
+    }
+    throw error;
+  }
   return Object.assign(loadFlow(paths, flowName), { placement, remainingErrors });
 }
 
@@ -327,6 +342,42 @@ export function updateStep(paths: ProjectPaths, flowName: string, stepId: string
  */
 export function removeStep(paths: ProjectPaths, flowName: string, stepId: string, options: RemoveStepOptions = {}): RemoveStepResult {
   const def = readFlowDefinition(paths, flowName);
+  const plan = planRemoval(def, flowName, stepId, options);
+  writeFlowDefinition(paths, def);
+  const currentMoved =
+    plan.moveCurrentTo !== '' && moveCurrentInRuntime(paths, flowName, stepId, plan.moveCurrentTo)
+      ? { from: stepId, to: plan.moveCurrentTo }
+      : undefined;
+  if (isValidId(stepId)) removePath(paths.stepDir(flowName, stepId));
+  return Object.assign(loadFlow(paths, flowName), {
+    rewired: plan.rewired,
+    dropped: plan.dropped,
+    initialMoved: plan.initialMoved,
+    currentMoved,
+    remainingErrors: plan.remainingErrors,
+  });
+}
+
+/** What removeStep would do, computed without writing anything (see planRemoveStep). */
+export interface RemoveStepPlan extends StepEditInfo {
+  rewired: RewiredTransition[];
+  dropped: DroppedTransition[];
+  initialMoved?: { from: string; to: string } | undefined;
+  /** Where the developer's position moves if the removed step is the current one ('' when nowhere). */
+  moveCurrentTo: string;
+}
+
+/**
+ * Dry run of removeStep: the same checks and errors (`STEP_NOT_FOUND`, `LAST_STEP`, `CANNOT_REWIRE`,
+ * `INVALID_FLOW`) and the transitions it would reroute or drop, without writing anything. Lets callers
+ * report a refusal before asking for confirmation.
+ */
+export function planRemoveStep(paths: ProjectPaths, flowName: string, stepId: string, options: RemoveStepOptions = {}): RemoveStepPlan {
+  return planRemoval(readFlowDefinition(paths, flowName), flowName, stepId, options);
+}
+
+/** Applies the removal of `stepId` to `def` in memory (validated) and reports what changed. */
+function planRemoval(def: FlowDefinition, flowName: string, stepId: string, options: RemoveStepOptions): RemoveStepPlan {
   const original = structuredClone(def);
   const { machine } = def;
   const states = machine.states;
@@ -394,13 +445,8 @@ export function removeStep(paths: ProjectPaths, flowName: string, stepId: string
     incoming.find((t) => t.event === NEXT_EVENT && isStep(t.source))?.source ?? incoming.find((t) => isStep(t.source))?.source;
   delete states[stepId];
   const remainingErrors = assertNoNewErrors(original, def, flowName);
-
-  writeFlowDefinition(paths, def);
-  const moveTo = isStep(replacement) ? replacement : (predecessor ?? machine.initial);
-  const currentMoved =
-    moveTo !== '' && moveCurrentInRuntime(paths, flowName, stepId, moveTo) ? { from: stepId, to: moveTo } : undefined;
-  if (isValidId(stepId)) removePath(paths.stepDir(flowName, stepId));
-  return Object.assign(loadFlow(paths, flowName), { rewired, dropped, initialMoved, currentMoved, remainingErrors });
+  const moveCurrentTo = isStep(replacement) ? replacement : (predecessor ?? machine.initial);
+  return { rewired, dropped, initialMoved, moveCurrentTo, remainingErrors };
 }
 
 /**

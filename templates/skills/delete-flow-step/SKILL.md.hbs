@@ -19,7 +19,9 @@ Active flow at the last sync: **{{flow.title}}** (`{{flow.name}}`):
 (no steps yet)
 {{/each}}
 
-This is a snapshot; always read the live flow with `get_flow` before changing anything.
+This is a snapshot; always read the live flow with `get_flow` before changing anything. If
+`get_flow` returns `current: null` with a `problem`, the flow is broken (for example after a
+merge): call `validate_flow`, show the user the errors and repair them with `update_step` first.
 {{else}}
 No flow was active at the last sync. Call `list_flows` and ask the user which flow to change
 (every tool accepts a `flow` argument).

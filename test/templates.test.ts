@@ -26,7 +26,7 @@ import { cleanupTempDirs, makeTempProject } from './helpers/project.js';
 afterEach(cleanupTempDirs);
 
 /** Helper names the dfl renderer registers (docs/ARCHITECTURE.md §3). */
-const HELPER_NAMES = ['eq', 'ne', 'and', 'or', 'not', 'default', 'upper', 'lower', 'kebab', 'title', 'json', 'join', 'indent', 'command'];
+const HELPER_NAMES = ['eq', 'ne', 'and', 'or', 'not', 'default', 'upper', 'lower', 'kebab', 'title', 'json', 'join', 'indent', 'command', 'handle'];
 const PARTIAL_MARKER = '<!-- flow-context partial -->';
 const STEP_FRONTMATTER_KEYS = new Set(['allowed-tools', 'license']);
 const BUILTIN_FRONTMATTER_KEYS = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools']);
@@ -75,6 +75,7 @@ function testHandlebars(): typeof Handlebars {
     join: (items: unknown, sep: unknown) => (Array.isArray(items) ? items.join(typeof sep === 'string' ? sep : ', ') : ''),
     indent: (n: unknown, text: unknown) => String(text ?? '').replace(/^(?=.)/gm, ' '.repeat(Number(n) || 0)),
     command: (name: unknown) => `/${String(name)}`,
+    handle: (value: unknown) => String(value ?? '').trim().replace(/^@+/, '').trim(),
   });
   expect(Object.keys(hb.helpers)).toEqual(expect.arrayContaining(HELPER_NAMES));
   return hb;
@@ -612,9 +613,9 @@ describe('content regressions', () => {
     const skills = renderShipped('feature');
     for (const [step, text] of skills) {
       const context = flowContext(text);
-      expect(context, step).toContain(`\`dfl next <EVENT> --from ${step}\``);
-      expect(context, step).toContain(`\`dfl goto ${step}\``);
-      expect(context, step).toContain(`\`goto_step\` with \`{"step": "${step}"}\``);
+      expect(context, step).toContain(`\`dfl next <EVENT> --from ${step} --flow feature\``);
+      expect(context, step).toContain(`\`dfl goto ${step} --flow feature\``);
+      expect(context, step).toContain(`\`goto_step\` with \`{"step": "${step}", "flow": "feature"}\``);
       expect(context, step).not.toContain('or continue with the current one');
       expect(context, step).not.toMatch(/\n{3,}/);
     }
@@ -646,7 +647,10 @@ describe('content regressions', () => {
       const text = skills.get(ship)!;
       expect(text.match(/octocat/g), ship).toHaveLength(1);
       expect(text, ship).toContain(' --reviewer octocat`');
-      expect(text, ship).toMatch(/login without a leading at-sign/);
     }
+    // The handle helper drops a leading at-sign (gh expects the bare login).
+    const withAt = renderShipped('feature', { reviewer: '@octocat ' }).get('ship-feature')!;
+    expect(withAt).toContain(' --reviewer octocat`');
+    expect(withAt).not.toContain('@octocat');
   });
 });

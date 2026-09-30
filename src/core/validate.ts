@@ -7,7 +7,7 @@ import { SKILL_TEMPLATE_FILE, normalizeTransitions, parseFlowDefinition, skillNa
 import { exists, isFile, listDirs, readJson, readText, walkFiles } from './fsx.js';
 import { RESERVED_FLOW_NAMES, isValidId } from './ids.js';
 import { createFlowMachine } from './machine.js';
-import { createHandlebars, type HandlebarsEnv } from './render.js';
+import { createHandlebars, readRenderedOutputs, type HandlebarsEnv } from './render.js';
 import type { FlowDefinition, FlowStateNodeConfig, ProjectPaths, ValidationIssue } from './types.js';
 
 /** Skills dfl installs next to every flow's step skills; step skill names must not collide with them. */
@@ -150,8 +150,12 @@ export function validateFlow(paths: ProjectPaths, name: string): ValidationIssue
     for (const rel of walkFiles(dir)) {
       if (!rel.endsWith(TEMPLATE_SUFFIX)) continue;
       const abs = path.join(dir, ...rel.split('/'));
-      for (const message of checkTemplateSource(readText(abs), `steps/${id}/${rel}`, env)) {
-        issues.push({ level: 'error', message, step: id, file: abs });
+      const source = readText(abs);
+      const errors = checkTemplateSource(source, `steps/${id}/${rel}`, env);
+      for (const message of errors) issues.push({ level: 'error', message, step: id, file: abs });
+      if (errors.length > 0) continue;
+      for (const message of templateContextWarnings(source, `steps/${id}/${rel}`, env)) {
+        issues.push({ level: 'warning', message, step: id, file: abs });
       }
     }
   }
@@ -177,6 +181,7 @@ export function validateFlow(paths: ProjectPaths, name: string): ValidationIssue
     }
   }
 
+  const rendered = readRenderedOutputs(paths);
   for (const rel of walkFiles(stepsDir)) {
     const abs = path.join(stepsDir, ...rel.split('/'));
     const step = rel.split('/')[0];
@@ -194,11 +199,15 @@ export function validateFlow(paths: ProjectPaths, name: string): ValidationIssue
     }
     if (!rel.endsWith('.md')) continue;
     if (isFile(`${abs}.hbs`)) continue;
+    const base = path.posix.basename(rel);
+    // Output dfl rendered from a template that no longer exists: the next sync deletes it.
+    const stale = rendered.has(path.posix.join('.df', name, 'steps', rel));
     issues.push({
       level: 'warning',
-      message:
-        `steps/${rel} has no ${path.posix.basename(rel)}.hbs template: .md files under steps/ are treated as ` +
-        `generated output (git-ignored and overwritten). Rename it to ${path.posix.basename(rel)}.hbs to keep it.`,
+      message: stale
+        ? `steps/${rel} was rendered from a ${base}.hbs template that no longer exists; the next sync deletes it.`
+        : `steps/${rel} has no ${base}.hbs template: .md files under steps/ are git-ignored (rendered output) and ` +
+          `not installed with the skill. Rename it to ${base}.hbs to commit and install it.`,
       step: stepOf,
       file: abs,
     });
@@ -260,6 +269,78 @@ export function checkTemplateSource(source: string, displayPath: string, env: Te
         `${displayPath} uses the partial {{> ${name}}}, which does not exist ` +
         `(known partials: ${known.join(', ') || '(none)'}; a flow partial lives in partials/${name}.hbs).`,
     );
+}
+
+/** Top-level names of the template context (docs/ARCHITECTURE.md §3). */
+export const TEMPLATE_CONTEXT_ROOTS: readonly string[] = ['project', 'flow', 'step', 'vars', 'env', 'dfl'];
+
+/** Block helpers whose body is rendered with the same context (other blocks, e.g. `each`/`with`, change it). */
+const SAME_CONTEXT_BLOCKS: ReadonlySet<string> = new Set(['if', 'unless', 'eq', 'ne', 'and', 'or', 'not', 'indent']);
+
+/**
+ * Warnings for expressions in a step template's top-level context whose first name is neither a
+ * context root nor a helper, e.g. a GitHub Actions `{{ secrets.NPM_TOKEN }}` copied without `\{{`:
+ * non-strict Handlebars renders it as an empty string. Bodies of context-changing blocks (`each`,
+ * `with`, …) are not checked. Assumes the source parses (see checkTemplateSource).
+ */
+export function templateContextWarnings(source: string, displayPath: string, env: TemplateCheckEnv): string[] {
+  let ast: unknown;
+  try {
+    ast = env.hb.parse(source);
+  } catch {
+    return [];
+  }
+  const helpers = new Set(Object.keys(env.hb.helpers));
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  const checkPath = (node: unknown): void => {
+    const n = node as { type?: unknown; data?: unknown; depth?: unknown; parts?: unknown; original?: unknown; loc?: { start?: { line?: number } } };
+    if (n?.type === 'SubExpression') {
+      visitCall(node);
+      return;
+    }
+    if (n?.type !== 'PathExpression' || n.data || n.depth !== 0 || !Array.isArray(n.parts)) return;
+    const original = typeof n.original === 'string' ? n.original : '';
+    if (original === 'this' || original.startsWith('this.') || original.startsWith('this/')) return;
+    const head = n.parts[0];
+    if (typeof head !== 'string' || TEMPLATE_CONTEXT_ROOTS.includes(head) || helpers.has(head)) return;
+    if (seen.has(original)) return;
+    seen.add(original);
+    const line = n.loc?.start?.line;
+    warnings.push(
+      `${displayPath}${line === undefined ? '' : `, line ${line}`}: {{${original}}} refers to "${head}", which is not in the ` +
+        `template context (${TEMPLATE_CONTEXT_ROOTS.join(', ')}), so it renders empty. Write \\{{ to output literal braces ` +
+        '(e.g. a GitHub Actions expression).',
+    );
+  };
+  /** A mustache, block or sub-expression: `path` is a helper when it has arguments or names one. */
+  const visitCall = (node: unknown): void => {
+    const n = node as { path?: { original?: unknown }; params?: unknown[]; hash?: { pairs?: Array<{ value: unknown }> } };
+    const params = n.params ?? [];
+    const pairs = n.hash?.pairs ?? [];
+    const name = typeof n.path?.original === 'string' ? n.path.original : undefined;
+    if (params.length === 0 && pairs.length === 0 && !(name !== undefined && helpers.has(name))) checkPath(n.path);
+    for (const param of params) checkPath(param);
+    for (const pair of pairs) checkPath(pair.value);
+  };
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    const n = node as { type?: unknown; body?: unknown; program?: unknown; inverse?: unknown; path?: { original?: unknown } } | undefined;
+    if (!n || typeof n !== 'object') return;
+    if (n.type === 'Program') visit(n.body);
+    else if (n.type === 'MustacheStatement') visitCall(n);
+    else if (n.type === 'BlockStatement') {
+      visitCall(n);
+      const name = typeof n.path?.original === 'string' ? n.path.original : '';
+      if (SAME_CONTEXT_BLOCKS.has(name)) visit(n.program);
+      visit(n.inverse);
+    }
+  };
+  visit(ast);
+  return warnings;
 }
 
 /** One-line description of a Handlebars parse/compile error. */

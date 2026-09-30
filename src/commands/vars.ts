@@ -12,7 +12,7 @@ import { c } from '../ui/colors.js';
 import { print, printJson, printLines, success, sym, terminalWidth, truncate } from '../ui/output.js';
 import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { projectFor, syncAfterChange, type CliContext } from './shared.js';
+import { locked, projectFor, syncAfterChange, type CliContext } from './shared.js';
 
 type VarSource = 'env' | 'local' | 'project' | 'default' | 'none';
 
@@ -80,15 +80,17 @@ export function registerVarsCommands(program: CommandUnknownOpts, ctx: CliContex
         throw new DflError('Use either --personal or --project, not both.', { code: 'INVALID_OPTIONS' });
       }
       const paths = projectFor(ctx);
-      const def = activeDefinition(paths);
-      const scope: VarScope = opts.personal ? 'personal' : opts.project ? 'project' : varScope(def, name);
-      const declared = def?.vars?.[name];
-      setVar(paths, name, coerce(value, declared), scope);
-      success(`Set ${c.bold(name)} = ${formatValue(coerce(value, declared))} ${c.dim(`(${scopeFile(scope)})`)}`);
-      if (def && !declared) print(c.dim(`  Note: flow "${def.name}" does not declare "${name}"; templates can still use {{vars.${name}}}.`));
-      const env = process.env[envVarName(name)];
-      if (env) print(c.dim(`  Note: ${envVarName(name)} is set in the environment and overrides this value.`));
-      await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+      await locked(paths, async () => {
+        const def = activeDefinition(paths);
+        const scope: VarScope = opts.personal ? 'personal' : opts.project ? 'project' : varScope(def, name);
+        const declared = def?.vars?.[name];
+        setVar(paths, name, coerce(value, declared), scope);
+        success(`Set ${c.bold(name)} = ${formatValue(coerce(value, declared))} ${c.dim(`(${scopeFile(scope)})`)}`);
+        if (def && !declared) print(c.dim(`  Note: flow "${def.name}" does not declare "${name}"; templates can still use {{vars.${name}}}.`));
+        const env = process.env[envVarName(name)];
+        if (env) print(c.dim(`  Note: ${envVarName(name)} is set in the environment and overrides this value.`));
+        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+      });
     });
 
   vars
@@ -98,14 +100,16 @@ export function registerVarsCommands(program: CommandUnknownOpts, ctx: CliContex
     .option('--no-sync', 'do not re-install skills')
     .action(async (name, opts) => {
       const paths = projectFor(ctx);
-      if (!unsetVar(paths, name)) {
-        print(c.dim(`"${name}" has no stored value; nothing changed.`));
-        return;
-      }
-      const def = activeDefinition(paths);
-      const fallback = def?.vars?.[name]?.default;
-      success(`Unset ${c.bold(name)}${fallback !== undefined ? c.dim(` (default: ${formatValue(fallback)})`) : ''}`);
-      await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+      await locked(paths, async () => {
+        if (!unsetVar(paths, name)) {
+          print(c.dim(`"${name}" has no stored value; nothing changed.`));
+          return;
+        }
+        const def = activeDefinition(paths);
+        const fallback = def?.vars?.[name]?.default;
+        success(`Unset ${c.bold(name)}${fallback !== undefined ? c.dim(` (default: ${formatValue(fallback)})`) : ''}`);
+        await syncAfterChange(paths, { sync: opts.sync, interactive: isInteractive() });
+      });
     });
 }
 
