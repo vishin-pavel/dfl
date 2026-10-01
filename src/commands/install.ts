@@ -43,6 +43,7 @@ import {
   promptVarInteractive,
   storeVarAnswers,
   syncWithDiff,
+  templateUpdateLines,
   warnRepairedState,
   type CliContext,
   type SyncRun,
@@ -97,7 +98,7 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
   program
     .command('flow-update')
     .alias('update')
-    .description('Re-render and re-install the active flow skills (after git pull or edits)')
+    .description('Re-render and re-install the active flow skills (after git pull or edits); never changes the flows in .df/')
     .option('--mcp', 'register the dfl MCP server this time, whatever your saved preference')
     .option('--no-mcp', 'do not touch MCP configs this time')
     .option('--dry-run', 'show what would change without writing')
@@ -111,7 +112,7 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
         storeVarAnswers(paths, answers);
         return syncWithDiff(paths, { mcp: opts.mcp, dryRun: opts.dryRun });
       });
-      printLines(compactSyncLines(run, opts.dryRun === true));
+      printLines([...compactSyncLines(run, opts.dryRun === true), ...templateUpdateLines(paths)]);
       for (const message of run.report.warnings) warning(message);
       warnRepairedState(paths, run.report.flow);
     });
@@ -245,6 +246,8 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
       : nextLine(paths, model, ready.length > 0 ? ready : agents);
   const repaired = loadRuntimeState(paths, model).repaired;
   const warnings = [...run.report.warnings, ...(repaired ? [repaired] : [])];
+  const updates = templateUpdateLines(paths);
+  if (updates.length > 0) lines.push('', ...updates);
   if (interactive) {
     logMessage(lines);
     for (const message of warnings) logWarning(message);

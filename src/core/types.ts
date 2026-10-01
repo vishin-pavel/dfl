@@ -127,6 +127,12 @@ export interface FlowSource {
   rev?: string | undefined;
   /** Git imports: the commit that was imported (`git rev-parse HEAD`). */
   commit?: string | undefined;
+  /**
+   * Digests of the flow's files as they came from the source (flow-relative posix path → digest,
+   * see `flowDigests`), recorded on create, import and pull. They tell changes made in the project
+   * apart from changes in the source; flows without them (older dfl) cannot tell.
+   */
+  files?: Record<string, string> | undefined;
 }
 
 export interface FlowDefinition {
