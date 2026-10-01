@@ -300,7 +300,11 @@ describe('flow templates', () => {
     const paths = makeTempProject();
     for (const name of flowNames) {
       const model = createFlow(paths, `my-${name}`, { from: name });
-      expect(model.def.source).toEqual({ type: 'template', ref: name });
+      expect(model.def.source).toMatchObject({ type: 'template', ref: name });
+      // The template's files are recorded, so later changes in the project can be told from template updates.
+      expect(Object.keys(model.def.source?.files ?? {})).toEqual(
+        ['flow.json', ...EXPECTED_FLOWS[name]!.chain.filter((id) => id !== 'done').map((id) => `steps/${id}/SKILL.md.hbs`)].sort(),
+      );
       const loaded = loadFlow(paths, `my-${name}`);
       expect(loaded.steps.map((s) => s.id)).toEqual(EXPECTED_FLOWS[name]!.chain);
       for (const step of loaded.steps.filter((s) => !s.final)) {

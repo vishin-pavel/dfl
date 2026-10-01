@@ -30,6 +30,7 @@ every macOS/Linux machine and the npm global bin precedes `/bin` in `PATH`.
     .gitignore               # generated  – ignores the files above, rendered skills, .dfl-*/ and .lock
     .lock                    # transient  – held while a dfl process changes the project (§6.2)
     .dfl-stage-*/            # transient  – staging dirs of a flow import / pull
+    .dfl-backups/            # ignored    – <flow>-<UTC time>.dfl.json, written before a flow is replaced or deleted (§6.3)
     <flow>/                  # one directory per flow, name = flow id (kebab-case) = flow.json "name"
       flow.json              # committed  – flow definition (xstate machine config + metadata)
       partials/*.hbs         # committed  – optional Handlebars partials for this flow
@@ -254,6 +255,12 @@ markers and have no skill.
 - `source` records where the flow came from: `template` (`ref` = template name), `git` (`ref` =
   URL, optional `path`, `rev`, and the imported `commit`), `local` (`ref` = directory as a posix path
   relative to the project root, never absolute), or `created`. `dfl flow pull` uses it (§6).
+- `source.files` (§6.3) – digests of the flow's files as they came from the source, recorded by
+  `stageFlowCopy` whenever a source is recorded (create from a template, import, pull): path →
+  `fileDigest` (sha256 of the bytes with CRLF read as LF, first 16 hex digits); `flow.json` →
+  `definitionDigest` (the parsed definition without `source`, `name` and `machine.id`, so formatting
+  and renames do not count, key order does). Not part of the zod schema (older dfl versions keep it as
+  an unknown key); malformed or missing digests mean "no recorded version" (`recordedDigests`).
 - Parsing keeps key order (`parseFlowDefinition` returns the input object), so a no-op edit
   rewrites flow.json byte for byte.
 
@@ -517,8 +524,9 @@ dfl reset [--flow <f>] [--yes] [--json]                  # back to initial
 dfl flow list | templates
 dfl flow use <name> [--project] [--no-sync]
 dfl flow create <name> [--from <template> | --steps a,b] [--title <t>] [--description <d>] [--use] [--no-sync]
-dfl flow import <git-url|github:owner/repo[/path][#ref]|path> [--name <n>] [--flow <names...>] [--force] [--use] [--no-sync]
-dfl flow pull [name] [--rev <ref>] [--dry-run] [--yes] [--no-sync]
+dfl flow export [names...] [--all] [-o <file|dir/|->] [--force]
+dfl flow import <export-file|git-url|github:owner/repo[/path][#ref]|path> [--name <n>] [--flow <names...>] [--force] [--dry-run] [--yes] [--use] [--no-sync]
+dfl flow pull [name] [--rev <ref>] [--dry-run] [--yes] [--discard-local] [--no-sync]
 dfl flow delete <name> [--yes]
 dfl flow validate [name] [--json]    # --json: { valid, flows: [{ flow, valid, issues }] }
 dfl flow view [name] [--zoom <0-3>] [--print] [--lr] [--ascii]
@@ -538,20 +546,23 @@ Global options: `--root <dir>`, `--no-color`, `-v/--version`. Step mutations acc
   for the full-screen flow viewer. Warnings go to stderr. Tables fit `process.stdout.columns`, or
   `$COLUMNS` when stdout is not a terminal.
 - All commands work non-interactively (`--yes`, stdin/stdout not a TTY, or `CI` set) and exit
-  non-zero on error. Destructive commands (`uninstall`, `flow delete`, `flow pull`, `step remove`)
-  ask for confirmation interactively and require `--yes` otherwise. `step remove` reports
+  non-zero on error. Destructive commands (`uninstall`, `flow delete`, `flow pull`, `flow import
+  --force`, `step remove`) ask for confirmation interactively and require `--yes` otherwise (§6.3). `step remove` reports
   `LAST_STEP`/`CANNOT_REWIRE`/new validation errors before asking (`planRemoveStep`).
 - A non-interactive `install` with several flows and no active flow fails with `NO_ACTIVE_FLOW`
   (`--flow`) before writing anything.
-- `flow pull` (`pullFlow` in `import.ts`) re-imports a flow from its recorded `source` (template →
-  the package template; git → URL at `rev` (or `--rev`), recording the new `commit`; local → the
-  directory), replacing the flow's files while keeping runtime state and hand-written `.md` files
-  under steps/ (not in the manifest's `rendered`, no sibling `.hbs`); a removed current step moves
-  (§1.3). It shows the changed and kept files and the move first (dry run), writes nothing when
-  nothing changed, and refuses `created` flows and flows without a source (`NO_SOURCE`).
+- `flow pull` (`preparePull`/`pullFlow` in `import.ts`) re-imports a flow from its recorded `source`
+  (template → the package template; git → URL at `rev` (or `--rev`), recording the new `commit`;
+  local → the directory), replacing the flow's files while keeping runtime state and hand-written
+  `.md` files under steps/ (not in the manifest's `rendered`, no sibling `.hbs`); a removed current
+  step moves (§1.3). It shows the changed and kept files and the move first, writes nothing when
+  nothing changed, and refuses `created` flows and flows without a source (`NO_SOURCE`). Consent,
+  backups and the preview/apply check: §6.3.
 - `flow import` validates every target name and refuses a source that is (or contains) the target
   directory before deleting anything; flows are staged in `.df/.dfl-stage-*` and swapped in through
-  a backup, so a failed import leaves existing flows untouched.
+  a backup, so a failed import leaves existing flows untouched. A target that holds flow files without
+  a flow.json counts as existing.
+- `flow pull`, `flow import --force` and `flow delete` follow §6.3.
 - `src/cli.ts` checks `process.versions.node` (>= 22.12, `src/ui/node-version.ts`, no imports)
   before `await import('./run.js')`.
 
@@ -595,6 +606,48 @@ is taken (`askMissingVars`; the sync under the lock never prompts). A waiting pr
 15 s, then fails with `LOCKED`. The holder refreshes the lock file's mtime every 15 s (heartbeat); a
 lock whose process is gone (same host) or that was not refreshed for 60 s is taken over. A `.lock` that is not a regular file is never followed or deleted.
 The lock is not re-entrant.
+
+### 6.3 Flow safety: explicit updates, exports, backups
+
+A flow is the team's own; dfl changes it only when asked.
+
+- **Syncs never write flow sources.** `syncProject` (install, flow-update, flow use, MCP `sync`, auto-sync)
+  writes only rendered `.md` output next to `.md.hbs` templates and removes only output it rendered
+  (§5). `templateUpdates(paths)` lists template-sourced flows whose template in the running package
+  differs from the recorded `source.files` (e.g. after upgrading dfl); `install` and `flow-update`
+  print a notice with `dfl flow pull <flow> --dry-run`. Nothing is applied.
+- **Two-phase replacement.** `preparePull` / `prepareImport` fetch the source and stage the new version
+  in `.df/.dfl-stage-*` without the lock and without touching the flow; they return the diff
+  (`FlowDiff`) and the `kept`/`currentMoved` preview. The CLI shows it, asks (outside the lock), then
+  calls `apply()` under the lock. `apply` compares a fingerprint of `.df/<flow>` (content digests +
+  recorded source, or `absent`) with the one taken when staging and throws `PLAN_CHANGED`, writing
+  nothing, when they differ — the user confirmed a specific change. `discard()` removes the staging
+  dir. `pullFlow`/`importFlows` are prepare + apply in one call.
+- **Diff.** `FlowDiff.changes` compares content digests (rendered output, junk and line ends ignored;
+  flow.json by definition), `sourceChanged` the recorded source records. Each change gets `local`
+  from the base `source.files`: `none` (unchanged here: the change comes from the source), `reverted`
+  (changed here, unchanged in the source), `conflict` (changed in both), `added-here`, `deleted-here`,
+  or `unknown` (no recorded version). `localLosses` = changes with `local !== 'none'`. A replacement
+  with no changes and an unchanged source is a no-op (no write, no backup).
+- **Consent.** `pullFlow`/`apply` throw `LOCAL_CHANGES` when there are losses unless `discardLocal`.
+  CLI: interactively the question names the files; non-interactively `--yes` is required, plus
+  `--discard-local` when there are losses. `flow import --force` shows the diff and asks (`--yes`).
+- **Backups.** Before replacing (pull, import --force) or deleting a flow, `backupFlow` writes an export
+  of it to `.df/.dfl-backups/<flow>-<YYYYMMDDTHHMMSSZ>[-n].dfl.json` (`O_EXCL`, never overwritten,
+  never pruned; git-ignored by `.dfl-*/`). If the backup fails nothing is replaced or deleted.
+- **Export file** (`bundle.ts`, `dfl flow export`, `.dfl.json`):
+  ```json
+  { "format": "dfl-flows", "version": 1, "dfl": "0.1.0", "exportedAt": "…",
+    "flows": [{ "name": "feature", "files": [{ "path": "flow.json", "text": "…" }, { "path": "steps/x/logo.png", "base64": "…" }, { "path": "steps/x/run.sh", "text": "…", "executable": true }] }] }
+  ```
+  Only flow content (`isFlowContentPath`: no rendered `steps/**/*.md`, `.git`, `node_modules`, OS junk;
+  symlinks skipped). Text when the bytes are valid UTF-8 without NUL, else base64. `readBundle` checks
+  everything before extraction (`INVALID_BUNDLE`): format/version (newer → upgrade hint), ≤ 64 MB,
+  valid unique flow names, plain relative paths (`isSafeRelPath`), no case-insensitive duplicates, no
+  path that is both file and directory, one flow.json per flow whose `name` matches. Import extracts
+  to a temp dir and stages from there; an export is a snapshot, so each flow keeps the `source`
+  (and `files`) it was exported with. `parseFlowSource` reads any non-`flow.json` file as an export
+  (a `flow.json` path stands for its directory). The CLI never writes an export into a flow dir.
 
 ---
 
@@ -659,7 +712,8 @@ src/
     steps.ts             # step CRUD
     vars.ts render.ts    # template variables + Handlebars rendering
     sync.ts              # install/sync orchestrator, manifest, fingerprint
-    import.ts            # git/local flow import, flow pull
+    import.ts            # git/local/export-file flow import, flow pull (prepare → apply), template updates
+    bundle.ts            # flow export files, backups (.df/.dfl-backups)
   agents/
     types.ts registry.ts mcp-config.ts   # adapters, MCP config editors, dflLauncher
   mcp/

@@ -1,9 +1,23 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { DflError } from './errors.js';
-import { copyDir, ensureDir, exists, isDir, isFile, listDirs, lstatOrUndefined, readJson, readJsonIfExists, removePath, writeJson, writeText } from './fsx.js';
+import {
+  copyDir,
+  ensureDir,
+  exists,
+  isDir,
+  isFile,
+  listDirs,
+  lstatOrUndefined,
+  readJson,
+  readJsonIfExists,
+  removePath,
+  walkFiles,
+  writeJson,
+  writeText,
+} from './fsx.js';
 import { assertValidFlowName, assertValidStepId, isValidFlowName, isValidId, titleCase } from './ids.js';
 import { flowTemplatesDir } from './paths.js';
 import { getActiveFlowName, loadLocalConfig, loadProjectConfig, saveLocalConfig, saveProjectConfig } from './config.js';
@@ -248,6 +262,86 @@ export function skillSteps(model: FlowModel): StepInfo[] {
 }
 
 // ---------------------------------------------------------------------------
+// Flow content and digests (`source.files`)
+// ---------------------------------------------------------------------------
+
+/** OS junk that is never part of a flow. */
+const JUNK_FILES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db']);
+
+/**
+ * True for a flow-relative posix path that belongs to the flow itself: not rendered `.md` output
+ * under steps/ (git-ignored, may hold personal values), not inside `.git`/`node_modules`, not OS junk.
+ */
+export function isFlowContentPath(rel: string): boolean {
+  const parts = rel.split('/');
+  if (parts.some((part) => part === '.git' || part === 'node_modules')) return false;
+  if (JUNK_FILES.has(parts.at(-1)!)) return false;
+  return !(parts[0] === 'steps' && rel.endsWith('.md'));
+}
+
+/**
+ * The files that make up the flow at `dir` (flow-relative posix paths, sorted; symlinks skipped):
+ * what imports copy, exports bundle and `source.files` describes.
+ */
+export function flowContentFiles(dir: string): string[] {
+  return walkFiles(dir).filter(isFlowContentPath);
+}
+
+/** Digest of one flow file: sha256 (first 16 hex digits) of its bytes with CRLF line ends read as LF. */
+export function fileDigest(content: Buffer): string {
+  return shortHash(Buffer.from(content.toString('latin1').replace(/\r\n/g, '\n'), 'latin1'));
+}
+
+/**
+ * Digest of a flow definition without `source`, `name` and `machine.id` (imports rewrite them):
+ * reformatting flow.json is not a change, reordering its keys (the step order) is.
+ */
+export function definitionDigest(def: FlowDefinition): string {
+  const { source: _source, name: _name, ...rest } = def;
+  const { id: _id, ...machine } = def.machine;
+  return shortHash(Buffer.from(JSON.stringify({ ...rest, machine }), 'utf8'));
+}
+
+/**
+ * Path → digest for every content file of the flow at `dir` (see {@link flowContentFiles}); flow.json
+ * is digested as a definition ({@link definitionDigest}) – `def`, else the file parsed – or, when it
+ * cannot be parsed, by its bytes.
+ */
+export function flowDigests(dir: string, def?: FlowDefinition): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rel of flowContentFiles(dir)) {
+    const file = path.join(dir, ...rel.split('/'));
+    if (rel === 'flow.json') {
+      const parsed = def ?? tryParseDefinition(file);
+      out[rel] = parsed ? definitionDigest(parsed) : fileDigest(fs.readFileSync(file));
+    } else {
+      out[rel] = fileDigest(fs.readFileSync(file));
+    }
+  }
+  return out;
+}
+
+/** The recorded `source.files` of a definition, or undefined when there is none (or it is malformed). */
+export function recordedDigests(def: FlowDefinition | undefined): Record<string, string> | undefined {
+  const files: unknown = def?.source?.files;
+  if (typeof files !== 'object' || files === null || Array.isArray(files)) return undefined;
+  const entries = Object.entries(files);
+  return entries.length > 0 && entries.every(([, value]) => typeof value === 'string') ? (files as Record<string, string>) : undefined;
+}
+
+function tryParseDefinition(file: string): FlowDefinition | undefined {
+  try {
+    return parseFlowDefinition(readJson(file), file);
+  } catch {
+    return undefined;
+  }
+}
+
+function shortHash(data: Buffer): string {
+  return createHash('sha256').update(data).digest('hex').slice(0, 16);
+}
+
+// ---------------------------------------------------------------------------
 // Templates, creation, copying, deletion
 // ---------------------------------------------------------------------------
 
@@ -323,10 +417,13 @@ export interface StagedFlow {
 
 /**
  * Copies a flow directory (containing flow.json) into a staging dir under `.df/`, rewriting the
- * definition name/id and recording its source. Rendered `.md` files under steps/, VCS metadata and
- * symlinks are skipped. Throws INVALID_NAME for an invalid `name` and INVALID_SOURCE when the source
- * and `.df/<name>` overlap (same directory, or one inside the other). Nothing outside the staging dir
- * is touched; finish with {@link commitStagedFlow} and always {@link discardStagedFlow}.
+ * definition name/id. With `source`, that source is recorded together with the digests of the copied
+ * files (`source.files`, the version later changes are compared with); without it the definition's
+ * own `source` is kept as is (a restored export). Only flow content is copied
+ * ({@link isFlowContentPath}; symlinks are skipped). Throws INVALID_NAME for an invalid `name` and
+ * INVALID_SOURCE when the source and `.df/<name>` overlap (same directory, or one inside the other).
+ * Nothing outside the staging dir is touched; finish with {@link commitStagedFlow} and always
+ * {@link discardStagedFlow}.
  */
 export function stageFlowCopy(paths: ProjectPaths, srcDir: string, name: string, source?: FlowSource): StagedFlow {
   assertValidFlowName(name);
@@ -337,23 +434,31 @@ export function stageFlowCopy(paths: ProjectPaths, srcDir: string, name: string,
   }
   assertNoOverlap(paths, src, name);
   const def = parseFlowDefinition(readJson(file), file);
-  const next = renamedDefinition(def, name, source);
+  let next = renamedDefinition(def, name, source);
   buildFlowModel(next, paths.flowDir(name)); // rejects unsafe step ids before anything is copied
   const stage = makeStagingDir(paths);
   try {
-    copyDir(src, stage, (rel) => {
-      const parts = rel.split('/');
-      if (parts.some((part) => part === '.git' || part === 'node_modules')) return false;
-      if (rel === 'flow.json') return false;
-      if (parts[0] === 'steps' && rel.endsWith('.md')) return false;
-      return true;
-    });
+    copyDir(src, stage, (rel) => rel !== 'flow.json' && isFlowContentPath(rel));
+    if (source) {
+      // flow.json's digest leaves `source` out, so recording the digests does not change it.
+      const files = { 'flow.json': definitionDigest(next), ...flowDigests(stage) };
+      next = renamedDefinition(next, name, { ...withoutFiles(source), files: sortedRecord(files) });
+    }
     writeJson(path.join(stage, 'flow.json'), next);
   } catch (error) {
     removePath(stage);
     throw error;
   }
   return { name, dir: stage, def: next };
+}
+
+function withoutFiles(source: FlowSource): FlowSource {
+  const { files: _files, ...rest } = source;
+  return rest;
+}
+
+function sortedRecord(record: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(record).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /**

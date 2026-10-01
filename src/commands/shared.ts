@@ -23,6 +23,7 @@ import { exists, isFile, readText, readTextIfExists, removePath, writeText } fro
 import { withProjectLock } from '../core/lock.js';
 import { loadRuntimeState } from '../core/machine.js';
 import { findProjectRoot, projectPaths, resolveProjectRoot } from '../core/paths.js';
+import { templateUpdates } from '../core/import.js';
 import { isInstalledForUser, readManifest, syncProject, type SyncOptions } from '../core/sync.js';
 import type { FlowDefinition, FlowVarDef, ProjectPaths, SyncReport, VarScope } from '../core/types.js';
 import { assertFlowValid, validateFlow } from '../core/validate.js';
@@ -175,6 +176,26 @@ export function promptVarInteractive(name: string, def: FlowVarDef): Promise<unk
     placeholder: fallback,
     defaultValue: fallback,
   });
+}
+
+/**
+ * One line per flow whose prebuilt template changed since the flow was created or last pulled (after
+ * upgrading dfl). dfl never applies such an update on its own: the line says how to review it.
+ */
+export function templateUpdateLines(paths: ProjectPaths): string[] {
+  let updates: ReturnType<typeof templateUpdates>;
+  try {
+    updates = templateUpdates(paths);
+  } catch {
+    return []; // a notice only: never let it break the command
+  }
+  const cli = dflLauncher(paths);
+  return updates.map(({ flow, template }) =>
+    c.cyan(
+      `${sym.dot} Template "${template}" has changed since flow "${flow}" was created or last pulled. The flow was not changed; ` +
+        `review the update with \`${cli} flow pull ${flow} --dry-run\`.`,
+    ),
+  );
 }
 
 /** Warns (stderr) when the stored step of the active flow no longer exists and the state fell back. */

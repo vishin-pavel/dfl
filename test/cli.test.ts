@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { lockedSwitchActiveFlow, switchActiveFlow } from '../src/commands/shared.js';
-import { createFlow } from '../src/core/flow.js';
+import { createFlow, fileDigest } from '../src/core/flow.js';
 import { packageVersion, projectPaths } from '../src/core/paths.js';
 import { runCli } from '../src/run.js';
 import { CancelledError } from '../src/ui/exit.js';
@@ -1065,8 +1065,17 @@ describe('dfl flow pull', () => {
     expect(refused.code).toBe(1);
     expect(refused.stderr).toContain('confirmation required');
 
-    const pulled = await ok(root, 'flow', 'pull', 'fixes', '--yes');
+    // --yes confirms the update, but not losing the local edit: that takes --discard-local.
+    const kept = await dfl(root, 'flow', 'pull', 'fixes', '--yes');
+    expect(kept.code).toBe(1);
+    expect(kept.stdout).toContain('~ steps/fix-bug/SKILL.md.hbs ▲ edited here – your edits are lost');
+    expect(kept.stderr).toContain('Flow "fixes" was not updated: it would discard edits made in this project to 1 file');
+    expect(kept.stderr).toContain('--yes --discard-local');
+    expect(fs.readFileSync(file, 'utf8')).toContain('Local edit.');
+
+    const pulled = await ok(root, 'flow', 'pull', 'fixes', '--yes', '--discard-local');
     expect(pulled.stdout).toContain('Pulled flow fixes from template "bugfix" (1 file changed)');
+    expect(pulled.stdout).toMatch(/Backup: \.df\/\.dfl-backups\/fixes-\d{8}T\d{6}Z\.dfl\.json \(restore with `dfl flow import \S+ --force`\)/);
     expect(pulled.stdout).toContain('Synced');
     expect(fs.readFileSync(file, 'utf8')).toBe(pristine);
     expect(read(root, '.claude/skills/fix-bug/SKILL.md')).not.toContain('Local edit.');
@@ -1105,7 +1114,7 @@ describe('dfl flow pull', () => {
     expect(dry.stdout).toContain('= steps/plan-feature/refs/checklist.md (hand-written, kept)');
     expect(dry.stdout).not.toContain('SKILL.md (hand-written');
 
-    const pulled = await ok(root, 'flow', 'pull', '--yes');
+    const pulled = await ok(root, 'flow', 'pull', '--yes', '--discard-local');
     expect(pulled.stdout).toContain('(1 file changed)');
     expect(pulled.stdout).toContain('= steps/plan-feature/notes.md (hand-written, kept)');
     expect(read(root, '.df/feature/steps/plan-feature/notes.md')).toBe('# my notes\n');
@@ -1118,10 +1127,10 @@ describe('dfl flow pull', () => {
     await ok(root, 'step', 'add', 'qa', '--after', 'verify-feature');
     await ok(root, 'goto', 'qa');
     const dry = await ok(root, 'flow', 'pull', '--dry-run');
-    expect(dry.stdout).toMatch(/ steps\/qa\/SKILL\.md\.hbs\n/);
+    expect(dry.stdout).toContain('− steps/qa/SKILL.md.hbs ▲ added here – it is deleted');
     expect(dry.stdout).toContain('"qa" (your current step) is not in the new version; you would continue at "review-feature".');
 
-    const pulled = await ok(root, 'flow', 'pull', 'feature', '--yes');
+    const pulled = await ok(root, 'flow', 'pull', 'feature', '--yes', '--discard-local');
     expect(pulled.stdout).toContain('"qa" was your current step and is not in the new version; the flow continues at "review-feature".');
     expect(pulled.stderr).not.toContain('falling back to the initial step');
     const status = await json(root, 'status');
@@ -1314,5 +1323,190 @@ describe('step ids made of digits only', () => {
     expect(validated.stdout).toContain('Invalid step id "1": a step id cannot be only digits');
     await ok(root, 'step', 'edit', '1', '--rename', 'intro', '--flow', 'legacy');
     expect((await dfl(root, 'flow', 'validate', 'legacy')).stdout).not.toContain('Invalid step id');
+  });
+});
+
+describe('flows are safe from updates: export, import, pull, delete', () => {
+  /** The flow's own files (rendered .md output excluded) → content. */
+  const flowFiles = (root: string, flow: string): Record<string, string> => {
+    const dir = path.join(root, '.df', flow);
+    const out: Record<string, string> = {};
+    for (const entry of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
+      const rel = path.relative(dir, path.join(entry.parentPath, entry.name)).split(path.sep).join('/');
+      if (entry.isFile() && !(rel.startsWith('steps/') && rel.endsWith('.md'))) out[rel] = fs.readFileSync(path.join(dir, rel), 'utf8');
+    }
+    return out;
+  };
+  const backups = (root: string): string[] => (has(root, '.df/.dfl-backups') ? fs.readdirSync(path.join(root, '.df', '.dfl-backups')) : []);
+
+  /** The installed feature flow, customized: an edited template, a new step, an edited title. */
+  async function customizedProject(): Promise<string> {
+    const root = await installedProject();
+    fs.appendFileSync(path.join(root, '.df/feature/steps/plan-feature/SKILL.md.hbs'), '\nTeam rule: run the linter.\n');
+    await ok(root, 'step', 'add', 'qa', '--after', 'verify-feature', '--title', 'QA', '--description', 'Run the QA checklist. Use after verification.');
+    const def = readJsonFile(root, '.df/feature/flow.json');
+    fs.writeFileSync(path.join(root, '.df/feature/flow.json'), `${JSON.stringify({ ...def, title: 'Our feature flow' }, null, 2)}\n`);
+    return root;
+  }
+
+  /** Pretends the flow was created from an older template: its ship step differs, as recorded. */
+  function fromOlderTemplate(root: string): void {
+    const rel = 'steps/ship-feature/SKILL.md.hbs';
+    const old = '# Ship (older template)\n';
+    fs.writeFileSync(path.join(root, '.df/feature', rel), old);
+    const def = readJsonFile(root, '.df/feature/flow.json');
+    def.source.files[rel] = fileDigest(Buffer.from(old));
+    fs.writeFileSync(path.join(root, '.df/feature/flow.json'), `${JSON.stringify(def, null, 2)}\n`);
+  }
+
+  it('install, update, flow-update and flow use never change a flow, and only announce template updates', async () => {
+    const root = await customizedProject();
+    fromOlderTemplate(root);
+    const before = flowFiles(root, 'feature');
+
+    for (const args of [['update'], ['flow-update', '--dry-run'], ['flow-update', '--no-mcp'], ['install', '--yes'], ['install', '--yes', '--flow', 'feature'], ['flow', 'use', 'feature']]) {
+      const run = await ok(root, ...args);
+      expect({ args, files: flowFiles(root, 'feature') }).toEqual({ args, files: before });
+      if (args[0] !== 'flow') {
+        expect(run.stdout).toContain('Template "feature" has changed since flow "feature" was created or last pulled. The flow was not changed');
+        expect(run.stdout).toContain('`dfl flow pull feature --dry-run`');
+      }
+    }
+    expect(backups(root)).toEqual([]);
+
+    // The preview tells the template's change apart from the team's own changes.
+    const dry = await ok(root, 'flow', 'pull', '--dry-run');
+    expect(dry.stdout).toContain('~ steps/ship-feature/SKILL.md.hbs\n');
+    expect(dry.stdout).toContain('~ steps/plan-feature/SKILL.md.hbs ▲ edited here – your edits are lost');
+    expect(dry.stdout).toContain('− steps/qa/SKILL.md.hbs ▲ added here – it is deleted');
+    expect(dry.stdout).toContain('~ flow.json ▲ edited here – your edits are lost');
+    expect(flowFiles(root, 'feature')).toEqual(before);
+
+    // After a pull the flow matches its template again, so there is nothing to announce.
+    await ok(root, 'flow', 'pull', '--yes', '--discard-local');
+    expect((await ok(root, 'update')).stdout).not.toContain('has changed since');
+  });
+
+  it('flow export writes a file that flow import restores, also in another project', async () => {
+    const root = await customizedProject();
+    const out = makeTempDir('dfl-out-');
+    fs.writeFileSync(path.join(root, '.df/feature/steps/plan-feature/notes.md'), '# hand-written\n');
+
+    // Default: <flow>.dfl.json in the current directory; an existing file needs --force.
+    vi.spyOn(process, 'cwd').mockReturnValue(out);
+    const exported = await ok(root, 'flow', 'export');
+    expect(exported.stdout).toContain('Exported flow feature (7 steps, 8 files) to feature.dfl.json');
+    expect(exported.stderr).toContain('Not exported from flow "feature": steps/plan-feature/notes.md');
+    const again = await dfl(root, 'flow', 'export');
+    expect(again.code).toBe(1);
+    expect(again.stderr).toContain('feature.dfl.json already exists');
+    await ok(root, 'flow', 'export', '--force');
+    vi.mocked(process.cwd).mockRestore();
+
+    const file = path.join(out, 'feature.dfl.json');
+    const bundle = JSON.parse(fs.readFileSync(file, 'utf8'));
+    expect(bundle).toMatchObject({ format: 'dfl-flows', version: 1, dfl: packageVersion() });
+    expect(bundle.flows.map((flow: any) => flow.name)).toEqual(['feature']);
+    const paths = bundle.flows[0].files.map((entry: any) => entry.path);
+    expect(paths).toContain('steps/qa/SKILL.md.hbs');
+    // Rendered skills (personal values) and hand-written .md files are never exported.
+    expect(paths.filter((rel: string) => rel.endsWith('.md'))).toEqual([]);
+
+    // stdout, a directory, --all; never into a flow dir.
+    expect(JSON.parse((await ok(root, 'flow', 'export', '-o', '-')).stdout).flows[0].name).toBe('feature');
+    await ok(root, 'flow', 'create', 'quick', '--from', 'quick');
+    await ok(root, 'flow', 'export', '--all', '-o', `${out}/all/`);
+    expect(JSON.parse(read(out, 'all/flows.dfl.json')).flows.map((flow: any) => flow.name)).toEqual(['feature', 'quick']);
+    const inside = await dfl(root, 'flow', 'export', '-o', path.join(root, '.df/feature/copy.dfl.json'));
+    expect(inside.code).toBe(1);
+    expect(inside.stderr).toContain('it would become part of flow "feature"');
+    expect((await dfl(root, 'flow', 'export', 'feature', '--all')).code).toBe(1);
+
+    // Another project gets the flow exactly as exported, including where it came from.
+    const other = makeTempDir();
+    await ok(other, 'install', '--yes', '--agents', 'claude', '--flow', 'bugfix');
+    const imported = await ok(other, 'flow', 'import', file, '--use');
+    expect(imported.stdout).toContain('Imported flow feature (7 steps)');
+    expect(flowFiles(other, 'feature')).toEqual(flowFiles(root, 'feature'));
+    expect(readJsonFile(other, '.df/feature/flow.json').source).toEqual(readJsonFile(root, '.df/feature/flow.json').source);
+    expect(read(other, '.claude/skills/plan-feature/SKILL.md')).toContain('Team rule: run the linter.');
+    // …so its customizations are still known as such.
+    expect((await ok(other, 'flow', 'pull', '--dry-run')).stdout).toContain('~ steps/plan-feature/SKILL.md.hbs ▲ edited here');
+  });
+
+  it('flow import --force shows the changes and asks first; a backup is saved', async () => {
+    const root = await customizedProject();
+    const out = makeTempDir('dfl-out-');
+    await ok(root, 'flow', 'export', '-o', `${out}/`);
+    await ok(root, 'step', 'remove', 'qa', '--yes');
+    const before = flowFiles(root, 'feature');
+    const file = path.join(out, 'feature.dfl.json');
+
+    const exists = await dfl(root, 'flow', 'import', file);
+    expect(exists.code).toBe(1);
+    expect(exists.stderr).toContain('Flow "feature" already exists');
+
+    const dry = await ok(root, 'flow', 'import', file, '--force', '--dry-run');
+    expect(dry.stdout).toContain('Changes to flow feature:');
+    expect(dry.stdout).toContain('+ steps/qa/SKILL.md.hbs');
+
+    const refused = await dfl(root, 'flow', 'import', file, '--force');
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain('Replace flow "feature" with the imported version (a backup is saved first): confirmation required.');
+    expect(flowFiles(root, 'feature')).toEqual(before);
+    expect(backups(root)).toEqual([]);
+
+    const replaced = await ok(root, 'flow', 'import', file, '--force', '--yes');
+    expect(replaced.stdout).toContain('Replaced flow feature (7 steps)');
+    expect(replaced.stdout).toContain('Synced');
+    expect(has(root, '.df/feature/steps/qa/SKILL.md.hbs')).toBe(true);
+    expect(backups(root)).toHaveLength(1);
+
+    // The backup holds the replaced version and restores it.
+    const backup = path.join(root, '.df/.dfl-backups', backups(root)[0]!);
+    await ok(root, 'flow', 'import', backup, '--force', '--yes');
+    expect(flowFiles(root, 'feature')).toEqual(before);
+    // Importing what is already there changes nothing (and needs no confirmation).
+    const same = await ok(root, 'flow', 'import', backup, '--force');
+    expect(same.stdout).toContain('Flow feature is the same as the imported version (nothing replaced)');
+  });
+
+  it('flow delete saves a backup that flow import restores', async () => {
+    const root = await customizedProject();
+    const before = flowFiles(root, 'feature');
+    const deleted = await ok(root, 'flow', 'delete', 'feature', '--yes');
+    expect(deleted.stdout).toMatch(/Backup: (\.df\/\.dfl-backups\/feature-\d{8}T\d{6}Z\.dfl\.json) \(restore with `dfl flow import \1`\)/);
+    expect(has(root, '.df/feature')).toBe(false);
+
+    const [backup] = backups(root);
+    await ok(root, 'flow', 'import', path.join(root, '.df/.dfl-backups', backup!), '--use');
+    expect(flowFiles(root, 'feature')).toEqual(before);
+    expect(read(root, '.claude/skills/qa/SKILL.md')).toContain('name: qa');
+  });
+
+  it('a flow without a recorded version (older dfl) is treated as possibly changed', async () => {
+    const root = await installedProject();
+    const def = readJsonFile(root, '.df/feature/flow.json');
+    delete def.source.files;
+    fs.writeFileSync(path.join(root, '.df/feature/flow.json'), `${JSON.stringify(def, null, 2)}\n`);
+    expect((await ok(root, 'update')).stdout).not.toContain('has changed since');
+
+    // Same files as the template: only the record is added.
+    const record = await ok(root, 'flow', 'pull', '--yes');
+    expect(record.stdout).toContain('~ flow.json (recorded source only)');
+    expect(record.stdout).toContain('Pulled flow feature from template "feature" (recorded source updated)');
+    expect(readJsonFile(root, '.df/feature/flow.json').source.files['flow.json']).toMatch(/^[0-9a-f]{16}$/);
+
+    // Without a record, dfl cannot tell an edit from a template change: --discard-local is required.
+    delete def.source.files;
+    fs.writeFileSync(path.join(root, '.df/feature/flow.json'), `${JSON.stringify(def, null, 2)}\n`);
+    fs.appendFileSync(path.join(root, '.df/feature/steps/spec-feature/SKILL.md.hbs'), '\nOurs.\n');
+    const refused = await dfl(root, 'flow', 'pull', '--yes');
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toContain('▲ This flow has no record of the version it came from (older dfl versions did not keep one)');
+    expect(refused.stderr).toContain('Flow "feature" was not updated: this flow has no record');
+    expect(read(root, '.df/feature/steps/spec-feature/SKILL.md.hbs')).toContain('Ours.');
+    await ok(root, 'flow', 'pull', '--yes', '--discard-local');
+    expect(read(root, '.df/feature/steps/spec-feature/SKILL.md.hbs')).not.toContain('Ours.');
   });
 });

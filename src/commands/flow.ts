@@ -1,14 +1,40 @@
 /**
- * `dfl flow list | templates | use | create | import | delete | validate | view`.
+ * `dfl flow list | templates | use | create | export | import | pull | delete | validate | view`.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import type { CommandUnknownOpts } from '@commander-js/extra-typings';
+import { BUNDLE_EXTENSION, backupFlow, bundleFlows, serializeBundle } from '../core/bundle.js';
 import { getActiveFlowName, getSelectedAgents, loadProjectConfig } from '../core/config.js';
 import { DflError, errorMessage, isDflError } from '../core/errors.js';
-import { createFlow, deleteFlow, flowExists, listFlowTemplates, listFlows, loadFlow, loadFlowOrActive, skillSteps } from '../core/flow.js';
-import { relPosix } from '../core/fsx.js';
+import {
+  createFlow,
+  deleteFlow,
+  flowExists,
+  listFlowTemplates,
+  listFlows,
+  loadActiveFlow,
+  loadFlow,
+  loadFlowOrActive,
+  skillSteps,
+} from '../core/flow.js';
+import { isDir, relPosix, writeText } from '../core/fsx.js';
 import { assertValidFlowName } from '../core/ids.js';
 import { packageVersion } from '../core/paths.js';
-import { importFlows, pullFlow, type FlowReplacement, type PullResult, type RecordedFlowSource } from '../core/import.js';
+import {
+  handWrittenFlowFiles,
+  hasChanges,
+  localChangeLabel,
+  localLosses,
+  prepareImport,
+  preparePull,
+  type FileChange,
+  type FlowDiff,
+  type FlowReplacement,
+  type ImportedFlow,
+  type PullResult,
+  type RecordedFlowSource,
+} from '../core/import.js';
 import { loadRuntimeState } from '../core/machine.js';
 import { isInstalledForUser, readManifest, uninstallProject, writeManifest } from '../core/sync.js';
 import type { FlowModel, ProjectPaths, ValidationIssue } from '../core/types.js';
@@ -140,19 +166,95 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
     });
 
   flow
+    .command('export')
+    .description('Write flows to one file, as a backup or to share; `dfl flow import <file>` restores them')
+    .argument('[names...]', 'flows to export (default: the active flow)')
+    .option('--all', 'export every flow of the project')
+    .option('-o, --output <file>', `file or directory to write, \`-\` for stdout (default: <flow>${BUNDLE_EXTENSION} here)`)
+    .option('--force', 'overwrite an existing file')
+    .action(async (names, opts) => {
+      const paths = projectFor(ctx);
+      if (opts.all && names.length > 0) throw new DflError('Give flow names or --all, not both.', { code: 'INVALID_OPTIONS' });
+      for (const name of names) requireFlow(paths, name);
+      const flows = opts.all ? listFlows(paths) : names.length > 0 ? [...new Set(names)] : [activeFlowName(paths)];
+      if (flows.length === 0) {
+        throw new DflError('This project has no flows to export.', { hint: 'Create one with `dfl flow create <name>`.', code: 'NO_ACTIVE_FLOW' });
+      }
+      const target = opts.output === '-' ? undefined : exportTarget(paths, opts.output, flows, opts.force === true);
+      // Read under the lock, so a concurrent pull or step edit is never half exported.
+      const bundle = await locked(paths, () => bundleFlows(paths, flows));
+      for (const flow of flows) warnNotExported(paths, flow);
+      const content = serializeBundle(bundle);
+      if (target === undefined) {
+        process.stdout.write(content);
+        return;
+      }
+      writeText(target, content);
+      const shown = displayFile(target);
+      const files = bundle.flows.reduce((sum, flow) => sum + flow.files.length, 0);
+      success(
+        flows.length === 1
+          ? `Exported flow ${c.bold(flows[0]!)} ${c.dim(`(${stepsAndFiles(paths, flows[0]!, files)})`)} to ${shown}`
+          : `Exported ${plural(flows.length, 'flow')} ${c.dim(`(${flows.join(', ')}; ${plural(files, 'file')})`)} to ${shown}`,
+      );
+      print(c.dim(`Import it with \`dfl flow import ${shown}\` (in this or another project).`));
+    });
+
+  flow
     .command('import')
-    .description('Import flows from git (URL or github:owner/repo[/path][#ref]) or a local directory')
-    .argument('<source>', 'git URL, github:owner/repo[/path][#ref] or directory')
+    .description('Import flows from a `dfl flow export` file, git (URL or github:owner/repo[/path][#ref]) or a local directory')
+    .argument('<source>', 'export file, git URL, github:owner/repo[/path][#ref] or directory')
     .option('--name <name>', 'name for the imported flow (single flow only)')
     .option('--flow <names...>', 'import only these flows from the source')
-    .option('--force', 'replace existing flows with the same name')
+    .option('--force', 'replace existing flows with the same name (shows the changes and asks first; a backup is saved)')
+    .option('--dry-run', 'only show what would be imported or replaced')
+    .option('-y, --yes', 'with --force: replace without asking')
     .option('--use', 'make the (first) imported flow active')
     .option('--no-sync', 'do not re-install skills')
     .action(async (source, opts) => {
       const paths = projectFor(ctx);
-      const models = await locked(paths, () => importFlows(paths, source, { name: opts.name, flows: opts.flow, force: opts.force }));
+      // Fetched and staged without the lock (a clone can take a while); nothing in the project changes yet.
+      const prepared = await prepareImport(paths, source, { name: opts.name, flows: opts.flow, force: opts.force });
+      let models: ImportedFlow[];
+      try {
+        const replacing = prepared.flows.filter((preview) => preview.diff !== undefined && hasChanges(preview.diff));
+        if (opts.dryRun) {
+          for (const preview of prepared.flows) {
+            if (!preview.diff) print(`${c.green(sym.added)} Would import flow ${c.bold(preview.name)} ${c.dim(`(${plural(skillSteps(preview.model).length, 'step')})`)}`);
+            else if (!hasChanges(preview.diff)) print(`= Flow ${c.bold(preview.name)} is the same as the imported version`);
+            else {
+              print(`Changes to flow ${c.bold(preview.name)}:`);
+              printLines([...diffLines(preview.diff), ...keptLines(preview), ...currentMoveLines(preview, true)]);
+            }
+          }
+          return;
+        }
+        for (const preview of replacing) {
+          print(`Changes to flow ${c.bold(preview.name)}:`);
+          printLines([...diffLines(preview.diff!), ...keptLines(preview), ...currentMoveLines(preview, true)]);
+        }
+        if (replacing.length > 0 && !opts.yes) {
+          const list = replacing.map((preview) => `"${preview.name}"`).join(', ');
+          const ok = await confirmDestructive(
+            `Replace flow${replacing.length > 1 ? 's' : ''} ${list} with the imported version (a backup is saved first)?`,
+            opts,
+          );
+          if (!ok) {
+            print(c.dim('Nothing changed.'));
+            return;
+          }
+        }
+        models = await locked(paths, () => prepared.apply());
+      } finally {
+        prepared.discard();
+      }
       for (const model of models) {
-        success(`Imported flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')})`)}`);
+        if (model.unchanged) {
+          success(`Flow ${c.bold(model.name)} is the same as the imported version ${c.dim('(nothing replaced)')}`);
+          continue;
+        }
+        success(`${model.replaced ? 'Replaced' : 'Imported'} flow ${c.bold(model.name)} ${c.dim(`(${plural(skillSteps(model).length, 'step')})`)}`);
+        if (model.backup) print(backupLine(model.backup, true));
         printLines([...keptLines(model), ...currentMoveLines(model, false)]);
       }
       const active = getActiveFlowName(paths);
@@ -172,7 +274,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
         success(`Active flow: ${c.bold(first)}`);
         if (models.length > 1) print(c.dim(`Switch with \`dfl flow use <name>\` (${models.map((m) => m.name).join(', ')}).`));
         printAfterChange(paths, result);
-      } else if (active && models.some((model) => model.name === active)) {
+      } else if (active && models.some((model) => model.name === active && !model.unchanged)) {
         await lockedSyncAfterChange(paths, { sync: opts.sync, flow: active, interactive: isInteractive() });
       }
     });
@@ -188,7 +290,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
       requireFlow(paths, name);
       const wasActive = getActiveFlowName(paths) === name;
       const wasTeamDefault = loadProjectConfig(paths).activeFlow === name;
-      const ok = await confirmDestructive(`Delete flow "${name}" (.df/${name}/ and its state)?`, opts);
+      const ok = await confirmDestructive(`Delete flow "${name}" (.df/${name}/ and its state; a backup is saved first)?`, opts);
       if (!ok) {
         print(c.dim('Nothing changed.'));
         return;
@@ -198,45 +300,56 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
 
   flow
     .command('pull')
-    .description('Update a flow from the source it was created from (template, git or local directory)')
+    .description('Update a flow from the source it was created from (template, git or local directory), after showing the changes')
     .argument('[name]', 'flow name (default: the active flow)')
     .option('--rev <ref>', 'git sources: branch, tag or commit to pull instead of the recorded one')
     .option('--dry-run', 'only show what would change')
     .option('-y, --yes', 'do not ask for confirmation')
+    .option('--discard-local', 'with --yes: also replace changes made to the flow in this project (a backup is saved first)')
     .option('--no-sync', 'do not re-install skills')
     .action(async (name, opts) => {
       const paths = projectFor(ctx);
       if (name !== undefined) requireFlow(paths, name);
       const flowName = name ?? loadFlowOrActive(paths).name;
+      // Fetched and staged without the lock; `apply` replaces exactly what was shown, or refuses.
+      const pull = await preparePull(paths, flowName, { rev: opts.rev });
       let result: PullResult;
-      if (opts.yes && !opts.dryRun) {
-        result = await locked(paths, () => pullFlow(paths, flowName, { rev: opts.rev }));
-      } else {
-        // Show what would change first (git sources are fetched twice: preview, then pull).
-        const preview = await pullFlow(paths, flowName, { rev: opts.rev, dryRun: true });
-        if (changeCount(preview) === 0) {
-          success(`Flow ${c.bold(flowName)} is up to date with ${describeSource(preview.source)}`);
+      try {
+        if (!hasChanges(pull)) {
+          success(`Flow ${c.bold(flowName)} is up to date with ${describeSource(pull.source)}`);
           return;
         }
-        print(`Changes to flow ${c.bold(flowName)} from ${describeSource(preview.source)}:`);
-        printLines([...changeLines(preview), ...currentMoveLines(preview, true)]);
+        print(`Changes to flow ${c.bold(flowName)} from ${describeSource(pull.source)}:`);
+        printLines([...diffLines(pull), ...keptLines(pull), ...currentMoveLines(pull, true)]);
         if (opts.dryRun) return;
-        const ok = await confirmDestructive(
-          `Replace the files of flow "${flowName}" with ${describeSource(preview.source)} (local edits in .df/${flowName}/ are lost)?`,
-          opts,
-        );
-        if (!ok) {
-          print(c.dim('Nothing changed.'));
-          return;
+        const losses = localLosses(pull);
+        if (opts.yes && losses.length > 0 && !opts.discardLocal) {
+          throw new DflError(`Flow "${flowName}" was not updated: ${lossSummary(pull, losses)}.`, {
+            hint: 'Keep your version, or re-run with --yes --discard-local to replace it (a backup of the flow is saved first).',
+            code: 'LOCAL_CHANGES',
+          });
         }
-        result = await locked(paths, () => pullFlow(paths, flowName, { rev: opts.rev }));
+        if (!opts.yes) {
+          const question =
+            losses.length > 0
+              ? `Update flow "${flowName}" and discard ${pull.baseline ? 'your edits to' : 'any edits made here to'} ${plural(losses.length, 'file')} (a backup is saved first)?`
+              : `Update flow "${flowName}" from ${describeSource(pull.source)} (a backup is saved first)?`;
+          const ok = await confirmDestructive(question, { ...opts, flag: losses.length > 0 ? '--yes --discard-local' : '--yes' });
+          if (!ok) {
+            print(c.dim('Nothing changed.'));
+            return;
+          }
+        }
+        // Answering yes to the question above (it names the discarded files) is the explicit consent.
+        result = await locked(paths, () => pull.apply({ discardLocal: !opts.yes || opts.discardLocal === true }));
+      } finally {
+        pull.discard();
       }
-      if (changeCount(result) === 0) {
-        success(`Flow ${c.bold(flowName)} is up to date with ${describeSource(result.source)}`);
-        return;
-      }
-      success(`Pulled flow ${c.bold(flowName)} from ${describeSource(result.source)} ${c.dim(`(${plural(changeCount(result), 'file')} changed)`)}`);
-      if (opts.yes) printLines(changeLines(result));
+      const count = result.changes.length;
+      success(
+        `Pulled flow ${c.bold(flowName)} from ${describeSource(result.source)} ${c.dim(count > 0 ? `(${plural(count, 'file')} changed)` : '(recorded source updated)')}`,
+      );
+      if (result.backup) print(backupLine(result.backup, true));
       printLines(currentMoveLines(result, false));
       await lockedSyncAfterChange(paths, { sync: opts.sync, flow: flowName, interactive: isInteractive() });
     });
@@ -339,8 +452,11 @@ async function deleteAndResync(
   name: string,
   { wasActive, wasTeamDefault }: { wasActive: boolean; wasTeamDefault: boolean },
 ): Promise<void> {
+  // Without a backup nothing is deleted: a flow that is not committed yet would be gone for good.
+  const backup = backupFlow(paths, name);
   deleteFlow(paths, name);
   success(`Deleted flow ${c.bold(name)}`);
+  print(backupLine(backup, false));
   const left = listFlows(paths);
   if (wasTeamDefault && left.length > 1) {
     warning(`No team default flow is set any more: choose one with \`dfl flow use <name> --project\` (${left.join(', ')}).`);
@@ -411,18 +527,112 @@ function describeSource(source: RecordedFlowSource): string {
   }
 }
 
-function changeCount(result: PullResult): number {
-  return result.added.length + result.removed.length + result.changed.length;
+/**
+ * The files a replacement adds (`+`), changes (`~`) or removes (`−`), flow-relative, in path order.
+ * A change that discards work done in this project says so in yellow; without a recorded version a
+ * note says that dfl cannot tell.
+ */
+function diffLines(diff: FlowDiff): string[] {
+  const mark = (change: FileChange): string =>
+    change.change === 'added' ? c.green(sym.added) : change.change === 'removed' ? c.red(sym.removed) : c.yellow('~');
+  const lines = diff.changes.map((change) =>
+    change.local === 'none' || change.local === 'unknown'
+      ? `  ${mark(change)} ${change.path}`
+      : `  ${mark(change)} ${change.path} ${c.yellow(`${sym.warn} ${localChangeLabel(change)}`)}`,
+  );
+  if (diff.sourceChanged && !diff.changes.some((change) => change.path === 'flow.json')) {
+    lines.push(`  ${c.yellow('~')} flow.json ${c.dim('(recorded source only)')}`);
+  }
+  const losses = localLosses(diff);
+  if (losses.length > 0) lines.push(c.yellow(`  ${sym.warn} ${capitalize(lossSummary(diff, losses))}.`));
+  return lines;
 }
 
-/** Changed files of a pull, flow-relative, and the hand-written files it keeps. */
-function changeLines(result: PullResult): string[] {
-  return [
-    ...result.added.map((rel) => `  ${c.green(sym.added)} ${rel}`),
-    ...result.changed.map((rel) => `  ${c.yellow('~')} ${rel}`),
-    ...result.removed.map((rel) => `  ${c.red(sym.removed)} ${rel}`),
-    ...keptLines(result),
-  ];
+/** `it would discard 2 changes made in this project` (or, without a recorded version, that dfl cannot tell). */
+function lossSummary(diff: FlowDiff, losses: readonly FileChange[]): string {
+  return diff.baseline
+    ? `it would discard edits made in this project to ${plural(losses.length, 'file')} (marked above)`
+    : 'this flow has no record of the version it came from (older dfl versions did not keep one), so dfl cannot tell ' +
+        'whether the files above hold edits made in this project; any such edit would be replaced';
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** `  Backup: .df/.dfl-backups/x.dfl.json (restore with `dfl flow import … --force`)` */
+function backupLine(backup: string, replaced: boolean): string {
+  return c.dim(`  Backup: ${backup} (restore with \`dfl flow import ${backup}${replaced ? ' --force' : ''}\`)`);
+}
+
+/** The active flow's name, else the NO_ACTIVE_FLOW error of loadActiveFlow (a broken active flow can still be exported). */
+function activeFlowName(paths: ProjectPaths): string {
+  return getActiveFlowName(paths) ?? loadActiveFlow(paths).name;
+}
+
+/**
+ * Where `dfl flow export` writes: `<flow>.dfl.json` (`flows.dfl.json` for several) in the current
+ * directory or in `output` when that is a directory, else `output`. Refuses an existing file without
+ * `force`, and any place inside a flow directory (the file would become part of the flow).
+ */
+function exportTarget(paths: ProjectPaths, output: string | undefined, flows: readonly string[], force: boolean): string {
+  const fileName = `${flows.length === 1 ? flows[0]! : 'flows'}${BUNDLE_EXTENSION}`;
+  const given = output === undefined ? process.cwd() : path.resolve(output);
+  // `-o exports/` names a directory even before it exists (path.resolve drops the slash).
+  const dirGiven = output === undefined || /[/\\]$/.test(output) || isDir(given);
+  const file = dirGiven ? path.join(given, fileName) : given;
+  const real = realpathOrSelf(file);
+  for (const name of listFlows(paths)) {
+    const rel = path.relative(realpathOrSelf(paths.flowDir(name)), real);
+    if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      throw new DflError(`Cannot write the export into .df/${name}/: it would become part of flow "${name}".`, {
+        hint: 'Write it somewhere else with -o <file>.',
+        code: 'INVALID_OPTIONS',
+      });
+    }
+  }
+  if (fs.existsSync(file)) {
+    if (isDir(file)) throw new DflError(`${displayFile(file)} is a directory.`, { code: 'INVALID_OPTIONS' });
+    if (!force) throw new DflError(`${displayFile(file)} already exists.`, { hint: 'Pass --force to overwrite it, or -o <file>.', code: 'FILE_EXISTS' });
+  }
+  return file;
+}
+
+function realpathOrSelf(file: string): string {
+  try {
+    return fs.realpathSync.native(file);
+  } catch {
+    const parent = path.dirname(file);
+    return parent === file ? file : path.join(realpathOrSelf(parent), path.basename(file));
+  }
+}
+
+/** A path for messages: relative to the current directory when inside it. */
+function displayFile(file: string): string {
+  const rel = path.relative(process.cwd(), file);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : file;
+}
+
+/** `6 steps, 7 files` (only the file count when the flow does not load). */
+function stepsAndFiles(paths: ProjectPaths, flow: string, files: number): string {
+  try {
+    return `${plural(skillSteps(loadFlow(paths, flow)).length, 'step')}, ${plural(files, 'file')}`;
+  } catch {
+    return plural(files, 'file');
+  }
+}
+
+/** Warns about what an export of `flow` leaves out or carries over as is. */
+function warnNotExported(paths: ProjectPaths, flow: string): void {
+  const handWritten = handWrittenFlowFiles(paths, flow);
+  if (handWritten.length > 0) {
+    warning(
+      `Not exported from flow "${flow}": ${handWritten.join(', ')} (hand-written .md files under steps/ are not part of the flow; ` +
+        'rename one to <name>.md.hbs to make it a template of the flow).',
+    );
+  }
+  const errors = validateFlow(paths, flow).filter((issue) => issue.level === 'error').length;
+  if (errors > 0) warning(`Flow "${flow}" has ${plural(errors, 'validation error')}; it is exported as is (see \`dfl flow validate ${flow}\`).`);
 }
 
 /** `= steps/plan/notes.md (hand-written, kept)` for each hand-written file a replacement keeps. */

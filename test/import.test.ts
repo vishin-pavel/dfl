@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { getActiveFlowName, loadLocalConfig, setActiveFlow } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
 import { createFlow, listFlows, loadFlow, readFlowDefinition, writeFlowDefinition } from '../src/core/flow.js';
+import { BACKUP_DIR } from '../src/core/bundle.js';
 import { findFlowDirs, importFlows, parseFlowSource, pullFlow } from '../src/core/import.js';
 import { STEP_REMOVED_EVENT, loadRuntimeState } from '../src/core/machine.js';
 import { addStep } from '../src/core/steps.js';
 import { flowTemplatesDir } from '../src/core/paths.js';
-import type { FlowDefinition, ProjectPaths } from '../src/core/types.js';
+import type { FlowDefinition, FlowSource, ProjectPaths } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
 afterEach(cleanupTempDirs);
@@ -81,8 +82,22 @@ function snapshot(dir: string): Record<string, string> {
   return out;
 }
 
+/** Staging and swap dirs left in `.df/` (the backups dir is meant to stay). */
 function leftovers(paths: ProjectPaths): string[] {
-  return fs.readdirSync(paths.dfDir).filter((name) => name.startsWith('.dfl-'));
+  return fs.readdirSync(paths.dfDir).filter((name) => name.startsWith('.dfl-') && name !== BACKUP_DIR);
+}
+
+/** A recorded source without its `files` digests (checked separately). */
+function origin(def: FlowDefinition | undefined): Omit<FlowSource, 'files'> | undefined {
+  if (!def?.source) return undefined;
+  const { files: _files, ...rest } = def.source;
+  return rest;
+}
+
+/** The backups of a flow in `.df/.dfl-backups/` (file names). */
+function backups(paths: ProjectPaths, flow: string): string[] {
+  const dir = path.join(paths.dfDir, BACKUP_DIR);
+  return fs.existsSync(dir) ? fs.readdirSync(dir).filter((name) => name.startsWith(`${flow}-`)) : [];
 }
 
 async function rejectionCode(promise: Promise<unknown>): Promise<string | undefined> {
@@ -151,7 +166,9 @@ describe('parseFlowSource', () => {
     })();
     expect(error).toBeInstanceOf(DflError);
     expect((error as DflError).code).toBe('SOURCE_NOT_FOUND');
-    expect(() => parseFlowSource('README.md', src)).toThrow(/not a directory/);
+    // Any other file is read as an export file; a flow.json stands for its directory.
+    expect(parseFlowSource('README.md', src)).toEqual({ kind: 'bundle', url: path.join(src, 'README.md') });
+    expect(parseFlowSource('flows/feature/flow.json', src)).toEqual({ kind: 'local', url: path.join(src, 'flows', 'feature') });
   });
 });
 
@@ -185,7 +202,9 @@ describe('importFlows', () => {
 
     const def = readFlowDefinition(paths, 'feature');
     // Local sources are recorded relative to the project root (never absolute).
-    expect(def.source).toEqual({ type: 'local', ref: relRef(paths, src), path: 'flows/feature' });
+    expect(origin(def)).toEqual({ type: 'local', ref: relRef(paths, src), path: 'flows/feature' });
+    // The digests of the imported files: the version later changes are compared with.
+    expect(Object.keys(def.source!.files!)).toEqual(['flow.json', 'steps/build/SKILL.md.hbs', 'steps/build/scripts/run.sh', 'steps/plan/SKILL.md.hbs', 'steps/review/SKILL.md.hbs']);
     expect(path.isAbsolute(def.source!.ref!)).toBe(false);
     expect(def.title).toBe('Feature v1');
     const dir = paths.flowDir('feature');
@@ -210,7 +229,7 @@ describe('importFlows', () => {
     await expect(importFlows(paths, makeTempDir())).rejects.toMatchObject({ code: 'FLOW_NOT_FOUND' });
     // A single flow dir can be imported directly.
     const [bugfix] = await importFlows(paths, path.join(src, 'flows', 'bugfix'));
-    expect(bugfix?.def.source).toEqual({ type: 'local', ref: relRef(paths, path.join(src, 'flows', 'bugfix')) });
+    expect(origin(bugfix?.def)).toEqual({ type: 'local', ref: relRef(paths, path.join(src, 'flows', 'bugfix')) });
   });
 
   it('refuses to overwrite existing flows unless forced, keeping the active flow', async () => {
@@ -242,13 +261,13 @@ describe('importFlows', () => {
 
     const [v1] = await importFlows(paths, `${url}//flows#v1`, { flows: ['feature'] });
     expect(v1?.def.title).toBe('Feature v1');
-    expect(v1?.def.source).toEqual({ type: 'git', ref: url, path: 'flows/feature', rev: 'v1', commit: gitOut(repo, 'rev-parse', 'v1^{commit}') });
+    expect(origin(v1?.def)).toEqual({ type: 'git', ref: url, path: 'flows/feature', rev: 'v1', commit: gitOut(repo, 'rev-parse', 'v1^{commit}') });
     expect(fs.existsSync(path.join(paths.flowDir('feature'), '.git'))).toBe(false);
     expect(fs.existsSync(path.join(paths.flowDir('feature'), 'steps', 'build', 'scripts', 'run.sh'))).toBe(true);
 
     const [head] = await importFlows(paths, url, { flows: ['feature'], name: 'feature-head' });
     expect(head?.def.title).toBe('Feature v2');
-    expect(head?.def.source).toEqual({ type: 'git', ref: url, path: 'flows/feature', commit: gitOut(repo, 'rev-parse', 'main') });
+    expect(origin(head?.def)).toEqual({ type: 'git', ref: url, path: 'flows/feature', commit: gitOut(repo, 'rev-parse', 'main') });
 
     await expect(importFlows(paths, `${url}#no-such-tag`)).rejects.toMatchObject({ code: 'CLONE_FAILED' });
     await expect(importFlows(paths, `${url}//missing`)).rejects.toMatchObject({ code: 'SOURCE_NOT_FOUND' });
@@ -327,12 +346,12 @@ describe('importFlows safety', () => {
 
     // Copying one of the project's flows under a new name is fine.
     const [copy] = await importFlows(paths, paths.flowDir('feature'), { name: 'feature-copy' });
-    expect(copy?.def.source).toEqual({ type: 'local', ref: '.df/feature' });
+    expect(origin(copy?.def)).toEqual({ type: 'local', ref: '.df/feature' });
     // Searching the project root skips its own .df flows but finds others.
     writeFlowDir(path.join(paths.root, 'flows', 'shared'), sampleFlowDefinition('shared'));
     const models = await importFlows(paths, paths.root);
     expect(models.map((m) => m.name)).toEqual(['shared']);
-    expect(models[0]?.def.source).toEqual({ type: 'local', ref: '.', path: 'flows/shared' });
+    expect(origin(models[0]?.def)).toEqual({ type: 'local', ref: '.', path: 'flows/shared' });
   });
 
   (process.platform === 'win32' || isRoot ? it.skip : it)('leaves the existing flow untouched when the copy fails', async () => {
@@ -359,7 +378,7 @@ describe('importFlows safety', () => {
     const sha = gitOut(repo, 'rev-parse', 'v1^{commit}');
     const [full] = await importFlows(paths, `${url}//flows#${sha}`, { flows: ['feature'], name: 'by-sha' });
     expect(full?.def.title).toBe('Feature v1');
-    expect(full?.def.source).toEqual({ type: 'git', ref: url, path: 'flows/feature', rev: sha, commit: sha });
+    expect(origin(full?.def)).toEqual({ type: 'git', ref: url, path: 'flows/feature', rev: sha, commit: sha });
     const [short] = await importFlows(paths, `${url}//flows#${sha.slice(0, 10)}`, { flows: ['feature'], name: 'by-short' });
     expect(short?.def.title).toBe('Feature v1');
     expect((short?.def.source as { commit?: string }).commit).toBe(sha);
@@ -381,11 +400,25 @@ describe('pullFlow', () => {
 
     const dry = await pullFlow(paths, 'mine', { dryRun: true });
     expect(dry).toMatchObject({ dryRun: true, added: [], removed: ['steps/make-change/local.txt'], changed: ['steps/make-change/SKILL.md.hbs'] });
+    expect(dry.changes).toEqual([
+      { path: 'steps/make-change/SKILL.md.hbs', change: 'changed', local: 'reverted' },
+      { path: 'steps/make-change/local.txt', change: 'removed', local: 'added-here' },
+    ]);
     expect(fs.readFileSync(path.join(stepDir, 'SKILL.md.hbs'), 'utf8')).toBe('locally edited');
 
-    const result = await pullFlow(paths, 'mine');
-    expect(result.source).toEqual({ type: 'template', ref: 'quick' });
+    // Local changes are only discarded when asked to; the refusal writes nothing.
+    const before = snapshot(paths.flowDir('mine'));
+    expect(await rejectionCode(pullFlow(paths, 'mine'))).toBe('LOCAL_CHANGES');
+    expect(snapshot(paths.flowDir('mine'))).toEqual(before);
+    expect(backups(paths, 'mine')).toEqual([]);
+
+    const result = await pullFlow(paths, 'mine', { discardLocal: true });
+    expect(origin(result.model.def)).toEqual({ type: 'template', ref: 'quick' });
     expect(result.model.name).toBe('mine');
+    // The flow as it was before the pull is backed up.
+    expect(result.backup).toMatch(/^\.df\/\.dfl-backups\/mine-\d{8}T\d{6}Z\.dfl\.json$/);
+    expect(backups(paths, 'mine')).toEqual([path.basename(result.backup!)]);
+    expect(fs.readFileSync(path.join(paths.root, result.backup!), 'utf8')).toContain('locally edited');
     const template = path.join(flowTemplatesDir(), 'quick', 'steps', 'make-change', 'SKILL.md.hbs');
     expect(fs.readFileSync(path.join(stepDir, 'SKILL.md.hbs'), 'utf8')).toBe(fs.readFileSync(template, 'utf8'));
     expect(fs.existsSync(path.join(stepDir, 'local.txt'))).toBe(false);
@@ -406,7 +439,7 @@ describe('pullFlow', () => {
     fs.writeFileSync(upstream, '# plan v2\n');
     const result = await pullFlow(paths, 'feature');
     expect(result.changed).toEqual(['steps/plan/SKILL.md.hbs']);
-    expect(result.source).toEqual({ type: 'local', ref: relRef(paths, src), path: 'flows/feature' });
+    expect(origin(result.model.def)).toEqual({ type: 'local', ref: relRef(paths, src), path: 'flows/feature' });
     expect(fs.readFileSync(path.join(paths.stepDir('feature', 'plan'), 'SKILL.md.hbs'), 'utf8')).toBe('# plan v2\n');
   });
 
@@ -421,7 +454,7 @@ describe('pullFlow', () => {
     const main = await pullFlow(paths, 'feature', { rev: 'main' });
     expect(main.changed).toEqual(['flow.json']);
     expect(main.model.def.title).toBe('Feature v2');
-    expect(readFlowDefinition(paths, 'feature').source).toEqual({
+    expect(origin(readFlowDefinition(paths, 'feature'))).toEqual({
       type: 'git',
       ref: url,
       path: 'flows/feature',
@@ -479,7 +512,7 @@ describe('replacing a flow keeps hand-written files and the position', () => {
     expect(dry.removed).toEqual(['steps/qa/SKILL.md.hbs']);
     expect(dry.changed).toEqual(['flow.json', 'steps/spec-feature/SKILL.md.hbs']);
 
-    const result = await pullFlow(paths, 'mine');
+    const result = await pullFlow(paths, 'mine', { discardLocal: true });
     expect(result.kept).toEqual(kept);
     expect(fs.readFileSync(path.join(plan, 'notes.md'), 'utf8')).toBe('# my notes\n');
     expect(fs.readFileSync(path.join(plan, 'refs', 'checklist.md'), 'utf8')).toBe('# ref\n');
@@ -491,7 +524,7 @@ describe('replacing a flow keeps hand-written files and the position', () => {
 
     // Up to date: nothing is replaced, so nothing needs keeping (and rendered output stays).
     write(path.join(plan, 'SKILL.md'), 'rendered');
-    const again = await pullFlow(paths, 'mine');
+    const again = await pullFlow(paths, 'mine', { discardLocal: true });
     expect([again.added, again.removed, again.changed, again.kept]).toEqual([[], [], [], []]);
     expect(fs.existsSync(path.join(plan, 'SKILL.md'))).toBe(true);
   });
@@ -507,7 +540,7 @@ describe('replacing a flow keeps hand-written files and the position', () => {
     await importFlows(paths, src, { flows: ['feature'] });
     await importFlows(paths, src, { flows: ['feature'], force: true });
     fs.appendFileSync(path.join(paths.stepDir('from-template', 'plan-change'), 'SKILL.md.hbs'), 'edit');
-    await pullFlow(paths, 'from-template');
+    await pullFlow(paths, 'from-template', { discardLocal: true });
     for (const name of ['from-template', 'blank', 'feature']) {
       expect({ name, mode: fs.statSync(paths.flowDir(name)).mode & 0o777 }).toEqual({ name, mode: expected });
     }
@@ -532,7 +565,7 @@ describe('replacing a flow keeps hand-written files and the position', () => {
       expect(dry.currentMoved).toEqual({ from: current, to });
       expect(readState(paths).flows.mine.current).toBe(current);
 
-      const result = await pullFlow(paths, 'mine');
+      const result = await pullFlow(paths, 'mine', { discardLocal: true });
       expect(result.currentMoved).toEqual({ from: current, to });
       const entry = readState(paths).flows.mine;
       expect(entry.current).toBe(to);
@@ -545,11 +578,11 @@ describe('replacing a flow keeps hand-written files and the position', () => {
     createFlow(paths, 'mine', { from: 'feature' });
     addStep(paths, 'mine', { id: 'qa', after: 'verify-feature' });
     setCurrent(paths, 'mine', 'plan-feature');
-    expect((await pullFlow(paths, 'mine')).currentMoved).toBeUndefined();
+    expect((await pullFlow(paths, 'mine', { discardLocal: true })).currentMoved).toBeUndefined();
     expect(readState(paths).flows.mine.current).toBe('plan-feature');
     addStep(paths, 'mine', { id: 'qa', after: 'verify-feature' });
     setCurrent(paths, 'mine', 'deleted-long-ago');
-    expect((await pullFlow(paths, 'mine')).currentMoved).toEqual({ from: 'deleted-long-ago', to: 'spec-feature' });
+    expect((await pullFlow(paths, 'mine', { discardLocal: true })).currentMoved).toEqual({ from: 'deleted-long-ago', to: 'spec-feature' });
     expect(readState(paths).flows.mine.current).toBe('spec-feature');
   });
 
