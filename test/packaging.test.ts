@@ -8,6 +8,20 @@ import { parse as parseYaml } from 'yaml';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel: string): string => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
+let packed: Set<string> | undefined;
+
+/** The paths `npm pack` would publish (computed once). */
+function packedFiles(): Set<string> {
+  packed ??= new Set(
+    (
+      JSON.parse(
+        execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+      ) as Array<{ files: Array<{ path: string }> }>
+    )[0]!.files.map((file) => file.path),
+  );
+  return packed;
+}
+
 function distTag(...args: string[]): { code: number; stdout: string; stderr: string } {
   const result = spawnSync(process.execPath, [path.join(ROOT, 'scripts/publish-tag.mjs'), ...args], { encoding: 'utf8' });
   return { code: result.status ?? 1, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
@@ -63,10 +77,7 @@ describe('publish dist-tag (F82)', () => {
 
 describe('published README (F87)', () => {
   it('links only to files that ship in the package, or to absolute URLs', () => {
-    const packed = JSON.parse(
-      execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
-    ) as Array<{ files: Array<{ path: string }> }>;
-    const files = new Set(packed[0]!.files.map((file) => file.path));
+    const files = packedFiles();
     expect(files.has('README.md')).toBe(true);
     const readme = read('README.md');
     const links = [...readme.matchAll(/\]\(([^)\s]+)\)/g)].map((match) => match[1]!);
@@ -79,5 +90,16 @@ describe('published README (F87)', () => {
     // The docs are not shipped: they are linked on GitHub.
     expect(readme).toContain('https://github.com/vishin-pavel/dfl/blob/main/docs/AGENTS.md');
     expect(readme).toContain('https://github.com/vishin-pavel/dfl/blob/main/docs/ARCHITECTURE.md');
+  });
+});
+
+describe('package contents', () => {
+  it('ships the "dev" flow template only; the retired templates are test fixtures', () => {
+    const files = [...packedFiles()];
+    expect(files).toContain('templates/flows/dev/flow.json');
+    const flowTemplates = new Set(files.filter((file) => file.startsWith('templates/flows/')).map((file) => file.split('/')[2]));
+    expect([...flowTemplates]).toEqual(['dev']);
+    expect(files.filter((file) => file.startsWith('test/'))).toEqual([]);
+    for (const name of ['feature', 'bugfix', 'quick']) expect(fs.existsSync(path.join(ROOT, 'test/fixtures/flows', name, 'flow.json')), name).toBe(true);
   });
 });

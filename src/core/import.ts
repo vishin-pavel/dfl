@@ -35,6 +35,7 @@ import {
   parseFlowDefinition,
   readFlowDefinition,
   recordedDigests,
+  retiredTemplateReplacement,
   stageFlowCopy,
 } from './flow.js';
 import { copyFile, exists, isDir, isFile, listDirs, readJson, relPosix, toPosix, walkFiles } from './fsx.js';
@@ -357,7 +358,8 @@ export async function preparePull(paths: ProjectPaths, name: string, options: Pi
   const subpath = source.path !== undefined ? cleanSubpath(source.path, `.df/${name}/flow.json`) : undefined;
 
   if (source.type === 'template') {
-    const template = getFlowTemplate(source.ref ?? '');
+    // A template dfl no longer ships: TEMPLATE_RETIRED (the flow itself keeps working).
+    const template = getFlowTemplate(source.ref ?? '', { paths, flow: name });
     return stagePull(paths, name, template.dir, { type: 'template', ref: template.name });
   }
 
@@ -400,7 +402,7 @@ export interface TemplateUpdate {
  * Flows created from a prebuilt template whose template in the running dfl package differs from the
  * version recorded in their `source.files` (for example after upgrading dfl). Read-only: only
  * `dfl flow pull` applies an update. Flows without recorded digests, unreadable flows and flows
- * whose template no longer exists are skipped.
+ * whose template is no longer shipped (see {@link retiredTemplateFlows}) are skipped.
  */
 export function templateUpdates(paths: ProjectPaths): TemplateUpdate[] {
   const templates = new Map(listFlowTemplates().map((template) => [template.name, template]));
@@ -418,6 +420,36 @@ export function templateUpdates(paths: ProjectPaths): TemplateUpdate[] {
     const file = path.join(template.dir, 'flow.json');
     const current = flowDigests(template.dir, parseFlowDefinition(readJson(file), file));
     if (stableJson(current) !== stableJson(recorded)) out.push({ flow, template: template.name });
+  }
+  return out;
+}
+
+/** A flow created from a prebuilt template that dfl no longer ships. */
+export interface RetiredTemplateFlow {
+  flow: string;
+  template: string;
+  /** The template that replaced it (`RETIRED_FLOW_TEMPLATES`). */
+  replacement: string;
+}
+
+/**
+ * Flows whose recorded source is a template that dfl no longer ships (see
+ * {@link retiredTemplateReplacement}). Read-only; such flows are never in {@link templateUpdates}.
+ * Unreadable flows are skipped.
+ */
+export function retiredTemplateFlows(paths: ProjectPaths): RetiredTemplateFlow[] {
+  const templates = listFlowTemplates();
+  const out: RetiredTemplateFlow[] = [];
+  for (const flow of listFlows(paths)) {
+    let def: FlowDefinition;
+    try {
+      def = readFlowDefinition(paths, flow);
+    } catch {
+      continue;
+    }
+    const template = def.source?.type === 'template' ? def.source.ref : undefined;
+    const replacement = template === undefined ? undefined : retiredTemplateReplacement(template, templates);
+    if (template !== undefined && replacement !== undefined) out.push({ flow, template, replacement });
   }
   return out;
 }

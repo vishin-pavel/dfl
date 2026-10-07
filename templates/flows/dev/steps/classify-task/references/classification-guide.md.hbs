@@ -1,0 +1,136 @@
+# Classification guide
+
+Open this guide for every classification. Answer the questions in order, record the evidence
+(scenario IDs, files) in the brief's `## Classification`, then check the borderline examples.
+
+## Decision order
+
+1. Will the task end in a change to this repository? No → **Out of scope**.
+2. **Behavior test:** does any business rule, as stakeholders see it, change? Count it as yes too
+   when a business outcome (what the system accepts, rejects, computes, stores or shows) differs
+   after the task, or when the rule describing it must be written or reworded. No → **Technical
+   change**, go to 5.
+3. An accepted scenario describes the touched behavior (coverage complete):
+   - the code contradicts it → **Bug fix / requirements not satisfied**;
+   - the code matches it and the requester wants something else → **Feature update / requirements changed**.
+4. No scenario describes it, or the rule is silent, ambiguous or wrong:
+   - a business capability no existing feature owns → **New feature / new requirements**;
+   - a new capability within an existing feature's purpose → **Feature update / requirements changed**;
+   - the code does what stakeholders wanted until now and the requester wants something else →
+     **Feature update / requirements changed** (Behavior first writes the baseline of the touched
+     behavior, then changes it);
+   - the code already does what stakeholders intend → **Feature update / requirements clarified**;
+   - the current behavior was always unwanted → **Bug fix / requirements improved**.
+5. A quality target, infrastructure, CI or storage requirement changes, or a tech design ID must be
+   added or changed → **Technical change / technical requirements changed**. Otherwise (refactor,
+   dependency bump, chore, meeting an existing target) → **Technical change / no requirement change**.
+
+## Decision table
+
+| Class / outcome | Decision rule | Record as evidence | Route | Event |
+|---|---|---|---|---|
+| New feature / new requirements | a new business capability no existing feature owns (new feature folder) | the index rows you ruled out; proposed prefix | full | `NEXT` |
+| Feature update / requirements changed | current behavior matches an accepted scenario, or is wanted behavior no scenario describes yet, and the requester wants something else | the scenario IDs that change, or the code that shows today's behavior | full, or behavior when the no-technical-impact check passes | `NEXT` |
+| Feature update / requirements clarified | a requirement is silent or ambiguous, the code already does what is intended; only wording, glossary or added scenarios that pin the existing behavior change | the unclear IDs or terms; the code that shows the intended behavior | behavior | `NEXT` |
+| Bug fix / requirements not satisfied | the code contradicts an accepted scenario, whose ID is cited (coverage complete) | the violated IDs; observed vs expected | code (design when the fix needs a new technical requirement) | `CODE_ONLY` (`TECH_ONLY`) |
+| Bug fix / requirements improved | the requirement is silent, ambiguous or wrong, and the current behavior was always unwanted | the silent or wrong IDs; why the behavior was never wanted | behavior (full when the check finds technical impact) | `NEXT` |
+| Technical change / technical requirements changed | no business rule changes; a quality target, infrastructure, CI or storage requirement changes | the tech design IDs or baseline items that change | design | `TECH_ONLY` |
+| Technical change / no requirement change | refactor, dependency bump or chore inside existing requirements | objectives `OBJ-n` | code | `CODE_ONLY` |
+| Out of scope | question, estimate, spike, duplicate: no change to this repository | the reason (duplicate: its key or branch) | none | `OUT_OF_SCOPE` |
+
+## Context and coverage
+
+| Context | Signal (code first) | Consequence |
+|---|---|---|
+| greenfield | no product code: only a README, licence, tool configuration or an untouched scaffold | Behavior creates the requirements folder, index and glossary; Tech design writes the project baseline; the first implementation increment sets up the tests and CI the tech design requires |
+| adoption | product code exists, but `{{vars.requirementsDir}}/` is missing or nothing describes the touched behavior | the route includes Behavior: a baseline of only the touched behavior and the rules it depends on |
+| brownfield | product code and requirements for the touched behavior | coverage decides |
+
+Coverage of the touched behavior, per feature: **complete** (accepted scenarios describe all of
+it), **partial** (some of it), **none**. Partial or none → the route includes Behavior, and
+"requirements not satisfied" is not allowed for that part: nothing can be cited. The adoption and
+coverage rules apply when the task changes or cites a business rule; a Technical change keeps its
+route (see the borderline examples).
+
+## Modifiers
+
+| Modifier | When | Effect |
+|---|---|---|
+| `ui-design` | a bug fix corrects a design decision (the UI works as designed, the design is wrong), or the user gave explicit design requirements | Tech design `ui` section with strict rows; route design, or full when business outcomes change too; never `behavior` or `NO_TECH_IMPACT` |
+| `revert` | the task undoes an earlier change | also revert the requirement and tech design edits of the reverted change (find them through its brief's `Accepted:` shas); the route includes every step whose files the reverted change edited |
+| `sensitive` | security, privacy, payments, auth, migrations{{#if vars.sensitivePaths}}, paths matching `{{vars.sensitivePaths}}`{{/if}} | Dev QA requires human review; write the area: `sensitive (auth)` |
+| `multi-feature` | several features are touched | coverage per feature; the deepest route wins |
+| `mixed` | parts of different classes | suggest splitting into separate tasks; otherwise a class per part, the deepest route wins |
+
+## No-technical-impact check and tech design sections
+
+Ask the check for every changed or violated ID and every objective. Its hits are the first four
+rows, the four the classify step names: any hit puts Tech design on the route and its key into
+`Tech design sections`. The last three rows only name the sections of a Technical change /
+technical requirements changed: they apply when a requirement about them is added or changed,
+never because code moves.
+
+| Hit | Key |
+|---|---|
+| persisted data changes: an entity, attribute, relationship, retention or volume | `data` |
+| an interface or integration changes: an API, event, import or export or contract that a client, another feature or another system uses (code moved behind an unchanged contract is no hit) | `interfaces` |
+| UI placement changes: where an element appears, what it is, its states (always with `ui-design`) | `ui` |
+| a target in the quality catalog changes (time, availability, security, privacy, ...) | `quality (<codes>)`, e.g. `quality (PERF, SEC)` |
+| deployment, environments, rollout, observability or cost changes | `operations` |
+| code organization, test levels, CI/CD gates or developer tooling change | `engineering` |
+| a constraint or an expensive-to-reverse decision changes (storage system, sync vs async, deployment unit, public contract) | `context` |
+
+Prefix a key with `baseline:` when the project baseline (`{{vars.requirementsDir}}/{{vars.techDesignFile}}`)
+changes instead of a feature's tech design, e.g. `baseline:engineering`.
+
+## Objectives (Technical change only)
+
+One line each, verifiable by a test, a measurement or a yes/no check, citing the tech design ID
+that states the goal when one exists:
+- Good: `OBJ-1 Checkout confirmation meets CHK-PERF-1 again after the cache removal.`
+- Good: `OBJ-2 The HTTP client runs on a supported major version; every accepted scenario stays green.`
+- Bad: `OBJ-1 Improve the code quality of checkout.` (nothing to verify, no boundary)
+
+## Borderline examples
+
+- **Improved vs clarified.** Both start from an unclear rule. CHK-3 does not say whether the
+  order limit is inclusive; the code rejects at exactly the limit. Stakeholders agree with the
+  code → clarified (wording or an added boundary scenario; existing IDs and outcomes kept). They
+  never wanted that → improved (bug fix).
+- **"Bug" that is a feature update.** The requester calls it a bug, but the code does what an
+  accepted scenario says → requirements changed. Only a contradiction with a cited scenario is
+  "not satisfied".
+- **New capability inside an existing feature.** Would the index's purpose line of the feature
+  still describe it, with the same actors and terms? Yes → Feature update / requirements changed
+  (new rules in the existing file). It has its own actors and lifecycle → New feature, new folder.
+  Gift wrapping at checkout updates `checkout`; loyalty points are a new feature.
+- **Refactor vs technical requirement change.** Renaming or extracting modules, or a minor
+  dependency bump, keeps every technical requirement unless a TD row states that module boundary →
+  no requirement change (code, `OBJ-n`). Replacing an in-memory cache with a shared one changes
+  deployment and consistency → technical requirements changed (`operations`, `quality (DCONS)`).
+  A slow page with an existing target (CHK-PERF-1) → no requirement change,
+  `OBJ-1` cites it; without a target → technical requirements changed (`quality (PERF)`).
+- **Technical change without requirements.** Adoption or partial coverage forces Behavior only when
+  a business rule is changed or cited. A refactor or bump keeps its route; when tests of the
+  touched code are thin, add an objective for the characterization tests to write first.
+- **Mixed.** "Fix the empty-cart order and switch logs to JSON": suggest two tasks. Kept together:
+  `Class: Bug fix / requirements improved + Technical change / technical requirements changed`,
+  `Modifiers: mixed`, route full (Behavior for one part, Tech design for the other).
+- **Multi-feature.** One entry per feature in `Features:` with its own coverage; a feature with
+  partial coverage puts Behavior on the route even when the others need only code.
+- **Revert.** Reverting a change whose brief shows a requirements sha: Feature update /
+  requirements changed with `revert`; the Behavior step retires the IDs the reverted task added
+  and restores the wording it changed. Reverting a code-only change: the class of the reverted
+  task, route code.
+- **Greenfield first task.** Usually New feature / new requirements, coverage none, route full.
+  Without any commit, show `git status`. If `git branch --show-current` is not `{{vars.mainBranch}}`,
+  ask first: rename it (`git branch -m {{vars.mainBranch}}`, recommended) or keep it and run
+  `{{dfl.cli}} vars set mainBranch <name>`. Then, with the user's agreement, make the initial commit
+  with everything already there: the dfl setup (`.df/`, MCP config files), README, licence,
+  scaffold; ask before adding anything that looks secret (`.env`, keys). Use `git add -A` and
+  `git commit -m "chore: initial commit"`, then branch from it as in step 10. The user declines:
+  stop; the task branch and the pull request need a base commit.
+- **Adoption first task.** A reported bug cannot be "not satisfied" (nothing to cite): it becomes
+  requirements improved, route behavior or full; Behavior first writes the baseline of the touched
+  behavior, each extracted rule confirmed by the user. A wanted change of existing behavior becomes
+  Feature update / requirements changed: the baseline first, then the change.

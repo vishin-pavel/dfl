@@ -34,6 +34,9 @@ import type { FlowMachineConfig } from '../src/core/types.js';
 import { validateFlow } from '../src/core/validate.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
+// The flow templates dfl shipped before "dev" (feature, bugfix, quick) are test fixtures now.
+vi.mock('../src/core/paths.js', async (original) => (await import('./helpers/fixture-templates.js')).fixtureTemplatesPaths(original));
+
 afterEach(() => {
   vi.unstubAllEnvs();
   cleanupTempDirs();

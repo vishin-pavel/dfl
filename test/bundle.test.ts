@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BACKUP_DIR, backupFlow, bundleFlows, extractBundle, readBundle, serializeBundle } from '../src/core/bundle.js';
 import { DflError } from '../src/core/errors.js';
 import { createFlow, definitionDigest, fileDigest, flowDigests, readFlowDefinition, writeFlowDefinition } from '../src/core/flow.js';
@@ -8,6 +8,9 @@ import { importFlows, prepareImport, preparePull, pullFlow, templateUpdates } fr
 import { addStep } from '../src/core/steps.js';
 import type { ProjectPaths } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
+
+// The flow templates dfl shipped before "dev" (feature, bugfix, quick) are test fixtures now.
+vi.mock('../src/core/paths.js', async (original) => (await import('./helpers/fixture-templates.js')).fixtureTemplatesPaths(original));
 
 afterEach(cleanupTempDirs);
 

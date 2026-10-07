@@ -746,7 +746,7 @@ function mcpHintFor(error: DflError): string | undefined {
     case 'TASK_RECORD_INVALID':
       return 'Over MCP: call goto_step with task and the right step.';
     case 'TASK_DONE':
-      return 'Over MCP: call goto_step with task and the step to restart at, if the user asks to.';
+      return 'Over MCP: call goto_step with task and the step to resume at, if the user asks to.';
     case 'TRACKER_AUTH_MISSING':
     case 'TRACKER_AUTH':
     case 'TRACKER_CREDENTIALS_INVALID':

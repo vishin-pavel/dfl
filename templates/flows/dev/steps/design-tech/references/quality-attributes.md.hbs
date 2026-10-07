@@ -1,0 +1,113 @@
+# Quality attributes
+
+Detail behind the catalog in SKILL.md. Open it while screening (to decide a verdict) and while
+drafting (to pick the sub-characteristic and a measure). FUNC to SAFE are the nine product quality
+characteristics of ISO/IEC 25010:2023 with the standard's sub-characteristic names; the meanings
+are short paraphrases, not the standard's wording. The other codes are architecture concerns the
+standard does not name. Examples are patterns to adapt: never copy their numbers.
+
+## ISO/IEC 25010:2023 in brief
+
+- Second edition, 2023-11. Together with ISO/IEC 25002 (quality models overview and usage) and
+  ISO/IEC 25019 (quality-in-use model) it replaces ISO/IEC 25010:2011.
+- Renamed: usability → interaction capability (IC); portability → flexibility (FLEX).
+- New characteristic: safety (SAFE). New sub-characteristics: inclusivity and self-descriptiveness
+  (IC), resistance (SEC), scalability (FLEX).
+- Replaced: user interface aesthetics → user engagement; maturity → faultlessness; accessibility
+  is split into inclusivity and user assistance.
+- Quality in use (2011: effectiveness, efficiency, satisfaction, freedom from risk, context
+  coverage) is now ISO/IEC 25019:2023 (beneficialness, freedom from risk, acceptability). It judges
+  outcomes for stakeholders in a context of use: such outcomes are scenarios in
+  `{{vars.requirementsFile}}`, not catalog rows.
+- Documents written with 2011 terms map through the lines above.
+
+## Sub-characteristics and typical measures
+
+| Code | Sub-characteristic | Means | Typical measure |
+|---|---|---|---|
+| FUNC | Functional completeness | the functions cover the specified tasks and objectives | rarely a row: Dev QA's ID mapping checks it |
+| FUNC | Functional correctness | results are correct with the needed precision | decimal places, rounding mode, units, time zone rule; 0 differences against a reference data set |
+| FUNC | Functional appropriateness | the functions help complete the task without needless steps | steps per task; rarely a row |
+| PERF | Time behaviour | response time and throughput | p95 or p99 at a stated load; sustained throughput; a batch done by a deadline |
+| PERF | Resource utilization | amounts and types of resources used, energy included | peak memory per job; payload size; battery drain per hour |
+| PERF | Capacity | maximum limits of a parameter | largest file or data set, concurrent users, requests per second at which time targets still hold |
+| COMP | Co-existence | performs well in a shared environment without harming other products | connections, quota or host share used at peak |
+| COMP | Interoperability | exchanges information with other systems and uses it | formats and protocol versions; contract tests per consumer or provider |
+| IC | Appropriateness recognizability | users can tell whether it fits their needs | the entry point is visible from a named place |
+| IC | Learnability | users learn the functions within a set time | a first task done without help within N minutes |
+| IC | Operability | easy to operate and control | every action reachable by keyboard; steps per task |
+| IC | User error protection | prevents operation errors | destructive actions confirmed or undoable for N seconds; invalid input rejected before submit |
+| IC | User engagement | presents functions and information in an inviting way | rarely a row; strict rows only under `ui-design` |
+| IC | Inclusivity | usable by people of different backgrounds, ages, abilities, cultures, languages | locales supported; WCAG 2.2 AA |
+| IC | User assistance | people with the widest range of capabilities reach their goals, with assistive technology too | every state change announced to screen readers |
+| IC | Self-descriptiveness | shows its capabilities and use without extra help | every error names the cause and the next action; a CLI help lists every option |
+| REL | Faultlessness | performs without fault in normal operation (formerly maturity) | failed jobs per 1 000; 0 unhandled errors on documented inputs |
+| REL | Availability | operational and accessible when needed | 99.9 % per month, with the measurement window |
+| REL | Fault tolerance | works as intended despite hardware or software faults | outcome when a named dependency is down or slow; 0 lost writes |
+| REL | Recoverability | restores data and the desired state after a failure | RPO, RTO; a long job resumes from its last checkpoint |
+| SEC | Confidentiality | data accessible only to those authorized | 0 rows of another tenant; encrypted in transit and at rest |
+| SEC | Integrity | prevents unauthorized change or deletion of data or programs | every write authorized on the server side; input validated at the boundary |
+| SEC | Non-repudiation | actions or events can be proven to have happened | an append-only, signed record of each approval |
+| SEC | Accountability | actions can be traced to a unique entity | an audit entry with actor, action and time per administrative change |
+| SEC | Authenticity | the identity of a subject or resource can be proven | multi-factor sign-in for administrators; incoming webhook signatures verified |
+| SEC | Resistance | keeps operating while under attack | at most 10 sign-in attempts per minute per account; time targets hold under a request flood |
+| MAINT | Modularity | discrete components; a change to one barely affects others | dependency rules between capabilities (static) |
+| MAINT | Reusability | an asset serves more than one system or helps build others | only when reuse is a stated goal |
+| MAINT | Analysability | impact of a change, cause of a failure and parts to change are found quickly | every failure traceable to one request or job |
+| MAINT | Modifiability | changes without new defects or loss of quality | a named likely change touches one capability (change scenario) |
+| MAINT | Testability | test criteria can be set and tests run against them | external services replaceable by fakes; time and randomness controllable |
+| FLEX | Adaptability | adapts to other hardware, software, operational or usage environments | supported platforms, browsers, viewports |
+| FLEX | Scalability | handles growing or shrinking workloads; adapts capacity to variability | N times today's peak by adding instances, without code changes |
+| FLEX | Installability | installs and uninstalls successfully in a specified environment | one command on a clean host within N minutes; nothing left after removal |
+| FLEX | Replaceability | can take the place of another product with the same purpose in the same environment | a provider switch changes no caller; data exportable in an open format |
+| SAFE | Operational constraint | keeps operation within safe limits when a hazard arises | a hard daily limit on transfers |
+| SAFE | Risk identification | recognizes event sequences that expose people, property or the environment to unacceptable risk | the rules that flag such a sequence |
+| SAFE | Fail safe | switches to a safe mode or state on failure | deny by default when a check cannot run |
+| SAFE | Hazard warning | warns of unacceptable risk early enough to react | a warning before a bulk action affecting more than N customers |
+| SAFE | Safe integration | stays safe during and after integration with other components | safety checks run again when a component is replaced |
+
+## Notes per code
+
+- **FUNC**: the behavior itself lives in `{{vars.requirementsFile}}`; write only precision a
+  scenario cannot carry (money, units, rounding, time zones).
+- **IC** holds section 5, UI appearance, and applies to CLIs. In 25010, operability means end users
+  operating the product; concerns of operations staff go to OBS and DEPLOY.
+- **SEC** integrity and **MAINT** testability apply to every change (Applicable or Baseline).
+- **SAFE** (new in 2023): harm to life, health, property or the environment; in business software
+  mostly money movement, health data, devices and irreversible bulk actions.
+
+## Example requirements (Requirement · Measure · Verify by)
+
+| ID | Example |
+|---|---|
+| PAY-FUNC-1 | Amounts shall be exact decimals with 2 places, rounded half-even · 0 differences against the reference set · test |
+| ORD-PERF-1 | When a user exports up to 100 000 orders, the download shall start · p95 ≤ 2 s to first byte · bench |
+| ORD-COMP-1 | The order-placed event shall stay readable by consumers of the previous version · contract test passes · test |
+| ORD-IC-2 | When a user deletes an export, the deletion shall be undoable · for 30 s · test |
+| ORD-REL-1 | If the payment provider does not answer within 10 s, the order shall stay pending and be retried · 0 lost orders · test |
+| ORD-SEC-1 | An export shall contain only orders of the requester's tenant · 0 foreign rows · test |
+| ORD-MAINT-1 | When an export format is added, the change shall touch only the export capability and its tests · 0 other capabilities changed · inspect |
+| ORD-FLEX-1 | The order store shall absorb 3 times today's peak write rate by adding instances · no code change · bench |
+| PAY-SAFE-1 | A bulk payout above 10 000 EUR shall need a second approver · yes/no · test |
+
+## Extra codes
+
+| Code | Covers | Typical measures | Example |
+|---|---|---|---|
+| OBS | logs, metrics, traces, alerts | questions operators must answer; alert threshold and window | alert when export failures exceed 1 % for 5 min (ops) |
+| DEPLOY | release, rollback, feature flags | rollback time; deploy without downtime; switch-off without a deployment | rollback within 5 min without data loss (inspect) |
+| CICD | pipeline gates | checks that block merge; pipeline duration | tests, type check and dependency audit block merge (inspect) |
+| COST | money to run the feature | monthly ceiling at expected load; cost per business event | ≤ 50 USD per month at 2 000 orders per day (ops) |
+| PRIV | personal data: purpose, minimization, retention, erasure | retention and its start event; fields never logged | personal data deleted within 30 days of account closure (test) |
+| DCONS | consistency and durability across stores, caches, asynchronous flows | staleness bound; atomicity; delivery guarantee | search includes an order within 60 s of a change (test) |
+| COMPL | regulated data or markets | the rule and the regulation it comes from | card numbers are never stored (static) |
+| DX | developer experience | clone to green tests; local run with faked services | one command from a fresh clone to green tests, ≤ 10 min (inspect) |
+
+## SEI names at sub-characteristic level
+
+The catalog maps SEI names to codes. Where the sub-characteristic matters: availability → REL
+availability, fault tolerance, recoverability; energy efficiency → PERF resource utilization;
+integrability → COMP interoperability, MAINT modularity; modifiability → MAINT modifiability and
+modularity, FLEX adaptability; testability → MAINT testability. SEI's other attributes:
+portability → FLEX adaptability and installability; mobility → FLEX adaptability, PERF resource
+utilization; monitorability → OBS.

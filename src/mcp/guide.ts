@@ -41,7 +41,13 @@ installs each step as an Agent Skill (\`<agent skills dir>/<skillName>/SKILL.md\
 - Step ids are kebab-case (\`^[a-z0-9]+(-[a-z0-9]+)*$\`, at most 64 characters). The skill name and
   slash command is \`skillPrefix + id\`. Avoid names of built-in agent commands (\`review\`, \`plan\`,
   \`init\`, \`help\`, \`status\`, ...) and of the dfl built-in skills (\`add-flow-step\`,
-  \`edit-flow-step\`, \`delete-flow-step\`). A descriptive id such as \`review-feature\` is best.
+  \`edit-flow-step\`, \`delete-flow-step\`). A descriptive verb-object id such as \`verify-task\`
+  is best.
+- Keep long material (checklists, document skeletons, catalogs) in reference files next to
+  SKILL.md and rules several steps share in flow partials; SKILL.md keeps the procedure, links each
+  reference file and says when to open it. The prebuilt \`dev\` template (\`${cli} flow templates\`)
+  does both: every step includes \`{{> brief}}\` from \`partials/brief.hbs\`, and
+  \`steps/design-tech/references/\` holds the guides that step opens.
 
 ## 2. Frontmatter
 
@@ -140,7 +146,7 @@ Refer to arguments as "the text the user typed after the command".
 
 ## 5. Transitions and events
 
-A step's \`on\` maps an event to a target state id (\`"NEXT": "review-feature"\`) or to
+A step's \`on\` maps an event to a target state id (\`"NEXT": "verify-task"\`) or to
 \`{ "target": "...", "description": "when to fire it" }\`. The target must exist.
 
 - \`NEXT\` is the forward path. Give every non-final step a \`NEXT\`: \`delete_step\` reroutes incoming
@@ -173,7 +179,7 @@ Declare variables in the \`vars\` object of flow.json:
 
 \`\`\`json
 "vars": {
-  "testCommand": { "description": "Runs the test suite", "default": "npm test", "scope": "project" },
+  "mainBranch": { "description": "Default branch", "default": "main", "scope": "project" },
   "reviewer": { "description": "GitHub handle of your reviewer", "scope": "personal", "required": false }
 }
 \`\`\`
@@ -182,22 +188,29 @@ Declare variables in the \`vars\` object of flow.json:
   \`.df/local.json\` (which is why rendered skills are git-ignored too).
 - Precedence: \`default\` < \`.df/config.json\` < \`.df/local.json\` < environment \`DFL_VAR_<UPPER_SNAKE_NAME>\`.
 - Set values with \`${cli} vars set <name> <value>\` (add \`--personal\` for personal ones), then sync.
-- Use \`{{vars.testCommand}}\`, guard optional ones with \`{{#if vars.reviewer}}...{{/if}}\` or give a
-  fallback with \`{{default vars.mainBranch "main"}}\`. Reuse existing variables (\`get_flow\` lists
-  them) before adding new ones. Never put secrets in variables or templates.
+- Use \`{{vars.<name>}}\` directly only for a variable with a \`default\` or \`required: true\` (\`get_flow\`
+  shows them); any other renders empty until someone sets it. Guard one without a default, for example
+  \`\`{{#if vars.testCommand}}\`{{vars.testCommand}}\`{{else}}the project's test command (ask the user){{/if}}\`\`
+  or \`{{#if vars.reviewer}}...{{/if}}\`, or give a fallback with \`{{default vars.mainBranch "main"}}\`.
+  In the \`dev\` flow, include \`{{> project-commands}}\` instead of naming \`testCommand\` or
+  \`checkCommand\`. Reuse existing variables (\`get_flow\` lists them) before adding new ones. Never
+  put secrets in variables or templates.
 
 ## 7. Structure of a good step
 
 1. A title line (\`# ...\`) and one paragraph with the goal of the step.
 2. **Inputs**: what the step reads (files from earlier steps, the text the user typed after the
    command) and what to do when an input is missing (ask, or fire \`BACK\`).
-3. **Procedure**: numbered, concrete actions with real commands (\`{{vars.testCommand}}\`).
+3. **Procedure**: numbered, concrete actions with real commands
+   (\`git diff {{default vars.mainBranch "main"}}...HEAD\`).
 4. **Outputs**: files, commits or reports the step produces and where they go.
 5. **Exit criteria**: when the step is done, and which event to fire for which outcome.
 6. **Pitfalls**: what not to do.
 7. \`{{> flow-context}}\` as the last line.
 
 Aim for 60 to 140 lines an agent can follow without guessing. Keep one responsibility per step.
+Keep in SKILL.md every list the agent must not skip; move longer guides into reference files
+(section 1) and rules several steps share into a flow partial.
 
 ## 8. Example
 
@@ -215,7 +228,7 @@ ready (\`NEXT\`) or needs more work (\`CHANGES_REQUESTED\`).
 ## Procedure
 
 1. Run \`git diff {{default vars.mainBranch "main"}}...HEAD\` and read every change.
-2. Run \`{{vars.testCommand}}\` and note any failure.
+2. Run the tests ({{#if vars.testCommand}}\`{{vars.testCommand}}\`{{else}}ask the user for the test command{{/if}}) and note any failure.
 3. Check each acceptance criterion and list the ones that are not met.
 {{#if vars.reviewer}}
 4. Ask {{vars.reviewer}} for a second review when the change touches public APIs.
@@ -257,9 +270,9 @@ ticket; a rendered skill serves all of them.
   when \`get_status\` returned a task; otherwise derive the slug from the branch name".
 - \`{{> flow-context}}\` already tells the agent to pass the ticket to \`get_status\`, to follow
   \`task.instructions\` and to pass \`"task"\` to \`complete_step\` / \`goto_step\`; do not repeat it.
-- A step that produces a value later steps need (a spec path, a pull request URL) records it with
-  \`params\` of \`complete_step\`, for example \`{"specPath": "docs/specs/csv-export.md"}\` (CLI:
-  \`${cli} next <EVENT> --from <step> --task <key> --set specPath=docs/specs/csv-export.md\`). Params
+- A step that produces a value later steps or the team need (the route chosen at classification,
+  a pull request URL) records it with \`params\` of \`complete_step\`, for example
+  \`{"route": "full"}\` (CLI: \`${cli} next <EVENT> --from <step> --task <key> --set route=full\`). Params
   are short single-line strings (no line breaks); names that look like secrets are refused, and
   params that \`.df/tracker.json\` maps in \`fields\` (e.g. \`branch\`, \`prUrl\`) are also written to
   those Jira fields.

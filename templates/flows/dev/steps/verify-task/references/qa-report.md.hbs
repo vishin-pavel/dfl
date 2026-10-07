@@ -1,0 +1,99 @@
+# Dev QA report template
+
+Write one `### Round <n>` subsection per round under `## Dev QA report` in the brief; never edit an
+earlier round. Bring `## Hand-off to the QA team` up to the latest state every round: keep the
+follow-ups earlier steps added there and the lines Ship added, and add any follow-up
+`## Implementation` lists that is missing. Keep evidence concrete: test names, commands, numbers,
+`path:line`. Leave out no box: write "none" when a list is empty, so the reader knows it was checked.
+
+## Round skeleton
+
+```markdown
+### Round <n> (<date>)
+
+Verdict: <NEXT | FAILED | REQUIREMENTS_GAP | DESIGN_GAP> · Human review: <none | pending, <k> items>
+Independence: fresh session | overridden by the developer: <reason>
+Base: <ref> @ <sha> (<merge base with origin/{{vars.mainBranch}} | merge base with {{vars.mainBranch}} | Base: of the brief | empty tree>) · HEAD: <sha>
+Baseline: worktree at the base | not available (<why>) · CI: run by Ship | none
+
+| Command | HEAD | Base | New failures |
+|---|---|---|---|
+| `<test command>` | <passed> passed, <failed> failed, <skipped> skipped | <failed> failed | <list or 0> |
+| `<check command>` | pass | n/a | 0 |
+
+**1. Requirement mapping**
+
+| ID | Evidence | Result |
+|---|---|---|
+| CHK-1.2 | `<test file>` "CHK-1.2 <test name>": passes on HEAD, fails on the base | pass |
+| CHK-PERF-1 | bench `<command>`: p95 240 ms (target 300 ms) | pass |
+| CHK-SEC-2 | inspected `<file>:<line>`: <why no test is possible> | inspected |
+| CHK-OBS-1 | deferred to operations, owner <name> | deferred |
+| OBJ-1 | <evidence> | pass |
+
+Requirement diff vs class: matches | <finding>
+Change requests vs git: CR-1 accepted, `<sha> docs(req): CR-1 <summary>` | none
+
+**Hunk mapping:** <files> files, <hunks> hunks: <n> serve IDs, <n> enabling (<categories>),
+<n> unmapped (findings below). Declared change map: complete | missing <list>.
+
+**Route and screening:** consistent | <finding with event>
+
+**2. Code review:** <k> blockers, <k> should-fix, <k> nits. No findings in: <categories>.
+
+**3. Sensitive items**
+
+| Item | Location | Why | Status |
+|---|---|---|---|
+| New column holding email addresses | `<migration file>` | personal data, migration | pending (Ship requests review) |
+
+**4. Tests coverage:** in-scope <k>/<k> with passing tests naming them. Reproduction test: fails on
+the base, passes on HEAD | n/a. Regression: <k> IDs of the touched features with passing tests;
+unverified: <IDs> (in the hand-off).
+
+**Leakage:** none | <finding>
+
+**Findings**
+
+1. blocker · implement-task · CHK-1.2 · `src/checkout/order.ts:42`: an empty cart creates an order.
+   Expected: rejected. Reproduce: `<test command>` filtered to "CHK-1.2".
+2. should-fix · implement-task · `src/checkout/order.ts:57`: <problem>. Suggestion: <fix>.
+3. nit · `<file>:<line>`: <polish> (moved to follow-ups)
+```
+
+## Rework entry (any event other than NEXT)
+
+Append to `## Rework` in the format the brief already uses; the event and the sending step come
+first, then the numbered findings that need action, each tagged with the step that owns it. A
+receiving step closes only its own items; implementation picks up the rest. For a GAP event from
+the route check, item 1 is the route correction for the receiving step to record in the header,
+for example "Route: `code` → `behavior`: the outcome of CHK-3.1 changed".
+
+```markdown
+### FAILED from Dev QA, round <n> (<date>)
+
+1. [ ] (implement-task) CHK-1.2: an empty cart creates an order. Observed: order 17 created.
+   Expected: rejected with "cart is empty". Reproduce: `<command>`. Location: `src/checkout/order.ts:42`.
+2. [ ] (implement-task) Unmapped hunk `src/util/date.ts:10-30` (reformatting): remove it, or a
+   change request adds the requirement it serves.
+```
+
+## Hand-off skeleton
+
+```markdown
+## Hand-off to the QA team
+
+- **Scope:** IDs added, changed, retired and extracted (the baseline of existing behavior, which
+  this task does not change), with links to the requirement and tech design files.
+- **Test by hand:** scenarios worth a manual pass, with steps; user-visible ones first.
+- **Tested by hand in Dev QA:** <ID: what was run and observed> | none
+- **Unverified IDs:** <regression IDs of the touched features without a test naming them> | none
+- **Deferred verifications:** <TD ID: owner> | none
+- **Human review:** <sensitive items for the pull request> | none
+- **Follow-ups and known gaps:** those Behavior and Tech design added, those in `## Implementation`,
+  pre-existing failures, violations in features outside the task, should-fix items and nits the
+  developer moved here, request items the requirements left out.
+- **Not available:** <baseline, CI, tools or environments missing in this run> | none
+```
+
+Ship adds the pull request, the CI status and the post-merge cleanup note to this section.

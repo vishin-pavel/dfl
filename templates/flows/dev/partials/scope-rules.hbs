@@ -1,0 +1,27 @@
+## Scope rules
+
+In scope are the requirement IDs this task added, changed or clarified, the violated IDs of a bug,
+the tech design IDs it added or changed, and the objectives (`OBJ-n`) the developer confirmed at
+classification. A change is **in bounds** when it serves one of them, including:
+- a minimal refactor of the code being changed, needed to make the change;
+- tests and test helpers;
+- configuration, examples, a new dependency and its lockfile change;
+- docs and changelog entries for the changed behavior;
+- files regenerated with the project's own tools;
+- the brief, and requirement or tech design edits made in their own step or by an accepted change
+  request;
+- `.df/config.json` values a step of this flow saved (recorded in the brief).
+
+Extracted IDs (`extracted:` after the requirements sha in the header's `Accepted:` line) describe
+behavior the code already had: the baseline Behavior writes under adoption or partial coverage.
+They are in scope as characterization: each gets a test naming it (an existing test renamed, or a
+new one) that passes on the base too and is never expected to fail first. One that fails is a
+suspected bug or a wrong extraction: a change request, never a silent code or test change.
+
+**Out of bounds:** drive-by refactors and formatting churn, unrelated fixes, speculative options
+and extension points, dependency upgrades nobody needed, weakened or deleted tests (except for a
+retired ID), debug leftovers and hand-edited generated files. Something the request asked for that
+the accepted requirements do not contain is out of bounds too, until a change request adds it.
+
+Every hunk of the diff maps to one of the in-bounds categories. An unmapped hunk is removed, or a
+change request adds the requirement it serves; it is never kept silently.

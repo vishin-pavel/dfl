@@ -93,9 +93,9 @@ function startedInstructions(input: Extract<TaskInstructionsInput, { kind: 'star
   } else {
     const event = input.events.length === 1 ? input.events[0]! : '<EVENT>';
     parts.push(
-      'Take the slug, spec path and other inputs from task.params instead of deriving them. ' +
+      'Take the slug and other inputs from task.params instead of deriving them. ' +
         `When the step is done, call complete_step with "task": "${key}" (CLI: \`dfl next ${event} --from ${step} --task ${key}\`) ` +
-        'and pass in "params" the values later steps need or that the step tells you to record (for example {"specPath": "docs/specs/x.md"}).',
+        'and pass in "params" the values later steps need or that the step tells you to record (for example {"prUrl": "<pull request URL>"}).',
     );
     const fields = (input.fieldParams ?? []).filter((name) => PARAM_NAME_RE.test(name));
     if (fields.length > 0) parts.push(`These params are also written to Jira fields: ${fields.join(', ')}.`);

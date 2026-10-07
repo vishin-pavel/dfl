@@ -85,7 +85,7 @@ fallbacks at the end.
    approval.
 5. **Apply** with `update_step`. One call can combine `title`, `description`, `template`,
    `rename`, `on` and `initial: true`. In `on`, an event mapped to a target sets it (an existing
-   condition is kept), mapped to `{ "target": "implement-feature", "description": "Tests failed" }`
+   condition is kept), mapped to `{ "target": "implement-task", "description": "Tests failed" }`
    sets the target and its condition, and mapped to `null` removes it. Apply the edits to other
    steps' templates with one `update_step` call per step. dfl re-renders and re-installs the
    skills and returns the step (with its `rendered` skill text), a sync summary and warnings.

@@ -1,0 +1,116 @@
+# Data section guide
+
+Use this guide for section 3, Data, of a feature's `{{vars.techDesignFile}}`: the persistent
+entities the feature owns or writes, at the logical level, and the requirements that keep their
+data correct, consistent and private. The implementation chooses tables, schemas, types and code;
+this section states what must hold whatever it chooses.
+
+## When and which codes
+
+Write it when the feature stores anything, or when the task adds, changes or removes stored data, a
+retention or privacy rule, or a second copy of data (cache, search index, replica, projection).
+Describe every entity the feature owns; an entity of another feature that it writes gets one line
+(term, owning feature, what this feature writes), never a second definition. Dev QA sends
+`DESIGN_GAP` when a persistent entity changes and this section does not cover it.
+
+| Code | Covers here |
+|---|---|
+| DCONS | invariants, what changes together or not at all, how stale a copy may be, durability of a confirmed write, concurrent edits |
+| PRIV | which attributes are personal, minimisation, retention, erasure or anonymisation |
+| Other codes | a row that concerns one entity only (precision of stored money is FUNC, encryption at rest is SEC); feature-wide rows stay in section 2 |
+
+Backups and recovery targets (RPO, RTO) and schema compatibility during a rollout belong to
+section 6. Write each requirement once; elsewhere cite its ID.
+
+## What to write
+
+**Entities.** One `### <Term>` block per entity, named by its glossary term in the feature's
+`{{vars.requirementsFile}}`. A business term missing from the glossary is a requirements gap
+(Rework entry, `REQUIREMENTS_GAP`). A technical record nobody in the business names (import job,
+audit entry, idempotency record) appears only when it has a retention, sensitivity, volume or
+cross-boundary need; name it with a plain noun and mark it "technical". Entities have no ID; the
+requirements about them do, and a field that needs verifying cites the row instead of restating it.
+
+| Field | Write | Example |
+|---|---|---|
+| Identity | what makes one unique and stable, who assigns it, whether it is ever reused | order number, unique per shop, never reused |
+| Attributes | key attributes only, with business types: text, number with unit, money with currency and precision, date or timestamp with its time zone rule, state, reference; required or optional | total: money, EUR, 2 decimals |
+| Relationships | other entities, cardinality, ownership (deleted with the parent or not) | 1..n Items, deleted with the Order |
+| Lifecycle | states, allowed transitions, final states; the scenario IDs that drive them | placed → paid → shipped (CHK-3) |
+| Owner | the feature that is the system of record; who else reads it and through which interface (section 4) | checkout; invoicing reads the order-placed event |
+| Sensitivity | none, internal, personal, special category, secret; per attribute where it differs | delivery address: personal |
+| Retention | how long, counted from which event, then delete or anonymise; cite the row that states it (PRIV for personal data) | CHK-PRIV-1 |
+| Volume | expected count and growth over a stated horizon, with its source | about 2 000 per day, kept 5 years (user) |
+
+**Requirements.** After the entity blocks, a `### Data requirements` heading and one table in the
+[requirement format](../requirement-format.md). Rows for:
+
+- **Invariants**: what every stored state keeps (an Order's total equals the sum of its Items).
+- **Atomicity**: what is stored together or not at all.
+- **Copies**: the system of record, how stale each copy may be, what a reader sees meanwhile.
+- **Durability**: when a write counts as done for the user.
+- **Concurrent edits**: what happens when two people change the same record.
+- **Data that crosses the boundary** (event payload, export or import file, report): its business
+  content, the owner and the compatibility rule. How it travels belongs to section 4.
+- **Privacy**: retention, erasure on request, data deliberately not collected, personal data in
+  logs and exports.
+
+**Decisions.** The system of record and storage (when the baseline does not give it) and data
+ownership or tenancy are `DEC-n` entries in section 1. Everything else is the implementation's.
+
+## Never write
+
+- DDL, column types and lengths, table, collection, index or ORM class names, migration file names.
+- Storage engines or libraries, unless they are a constraint (`CON-n`) or a decision (`DEC-n`).
+- A copy of an existing schema: cite it as a constraint (the store, who owns its schema, what may
+  not change) and map its attributes to glossary terms.
+- Enum values from the code instead of the glossary's states.
+- A gap of today's code ("addresses are not anonymised yet"): it is a follow-up in the brief's
+  hand-off; the requirement stays as the user wants it.
+
+## Greenfield, adoption, brownfield
+
+- **Greenfield:** derive entities from the glossary's subjects and objects and from the scenarios
+  that keep something. Ask for volume, sensitivity and retention with proposed defaults. The data
+  store answer of the greenfield questions becomes a baseline row or a `DEC-n`; never pick a store
+  silently.
+- **Adoption and brownfield:** for the touched entities only, read the migrations or schema files,
+  model and repository code, seed data, cleanup or retention jobs, and other features' reads and
+  writes of the same data. Record the store and its schema owner as `CON-n`; map existing attributes
+  and states to glossary terms (a mismatch is a question, never a silent rename); write observed
+  invariants as rows with `Source: existing` once the user confirms them. Data the code stores that
+  no rule explains is a question for the user, not a requirement.
+- **Editing an existing section:** change blocks and rows in place, keep IDs, and move removed or
+  replaced rows to section 8, Retired IDs.
+
+## Example
+
+```markdown
+### Order
+- Identity: order number, unique per shop, assigned at placement, never reused
+- Attributes: placed at (timestamp, stored in UTC), total (money, EUR, 2 decimals), status (state), delivery address (text)
+- Relationships: placed by one Customer; has 1..n Items, deleted with the Order
+- Lifecycle: placed → paid → shipped; placed or paid → cancelled; shipped and cancelled are final (CHK-3, CHK-4)
+- Owner: checkout; invoicing reads it through the order-placed event
+- Sensitivity: delivery address personal · Retention: CHK-PRIV-1 · Volume: about 2 000 per day, kept 5 years (user)
+```
+
+Under `### Data requirements`:
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-DCONS-1 | Atomicity | When an Order is placed, the Order and the reservation of its Items shall be stored together or not at all | 0 Orders without a reservation after a failure during placement | test | Must | user |
+| CHK-DCONS-2 | Staleness | The order history of a Customer shall include each Order the Customer placed | within 5 s of placement | test | Should | user |
+| CHK-PRIV-1 | Retention | A delivery address shall be anonymised once its Order is 10 years old | 0 readable addresses older than 10 years | test | Must | user |
+
+## Staleness pitfalls
+
+Apply the long-lived check of the [grill](../grill.md) to every line: would it stay true after a
+refactor, a rename or a storage library swap?
+
+- Physical names or types slipped into an attribute list: state the logical attribute and its
+  business type.
+- "New", "now", "currently" or "no longer": state the rule timelessly.
+- Today's row count as the volume: it is evidence; the volume is the expected count over a horizon.
+- A lifecycle state no scenario reaches: ask; remove it or add the scenario (`REQUIREMENTS_GAP`).
+- A row restated from the baseline or another feature: cite the owning ID instead.

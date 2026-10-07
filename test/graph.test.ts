@@ -47,7 +47,10 @@ function flowDef(machine: Omit<Machine, 'id'>, name = 'f'): FlowDefinition {
   return { name, machine: { id: name, ...machine } } as FlowDefinition;
 }
 
-const TEMPLATE_FLOWS = fileURLToPath(new URL('../templates/flows/', import.meta.url));
+/** The flow templates dfl shipped before "dev" (feature, bugfix, quick), kept as test fixtures; `templates` adds the shipped "dev". */
+const TEMPLATE_FLOWS = fileURLToPath(new URL('./fixtures/flows/', import.meta.url));
+/** The flow dfl ships (templates/flows/dev). */
+const DEV_FLOW = fileURLToPath(new URL('../templates/flows/dev/flow.json', import.meta.url));
 
 function templateDef(name: string): FlowDefinition {
   return JSON.parse(fs.readFileSync(path.join(TEMPLATE_FLOWS, name, 'flow.json'), 'utf8')) as FlowDefinition;
@@ -93,7 +96,11 @@ const par = graphOf(
   }),
 );
 
-const templates = Object.fromEntries(['feature', 'bugfix', 'quick'].map((name) => [name, graphOf(templateDef(name))]));
+/** The retired fixtures and the shipped "dev" (back edges, skips and two final states). */
+const templates: Record<string, FlowGraph> = {
+  ...Object.fromEntries(['feature', 'bugfix', 'quick'].map((name) => [name, graphOf(templateDef(name))])),
+  dev: graphOf(JSON.parse(fs.readFileSync(DEV_FLOW, 'utf8')) as FlowDefinition),
+};
 
 /** Cells of the canvas (one entry per cell). */
 const cellsOf = (canvas: RenderedCanvas): string[][] => canvas.lines.map(lineCells);

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getActiveFlowName, loadLocalConfig, setActiveFlow } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
 import { createFlow, listFlows, loadFlow, readFlowDefinition, writeFlowDefinition } from '../src/core/flow.js';
@@ -13,6 +13,9 @@ import { addStep } from '../src/core/steps.js';
 import { flowTemplatesDir } from '../src/core/paths.js';
 import type { FlowDefinition, FlowSource, ProjectPaths } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
+
+// The flow templates dfl shipped before "dev" (feature, bugfix, quick) are test fixtures now.
+vi.mock('../src/core/paths.js', async (original) => (await import('./helpers/fixture-templates.js')).fixtureTemplatesPaths(original));
 
 afterEach(cleanupTempDirs);
 

@@ -101,7 +101,7 @@ const paramsArg = z
   .record(z.string(), z.string().nullable())
   .optional()
   .describe(
-    'Task params to record for later steps (flows tracked in Jira only), e.g. {"specPath": "docs/specs/x.md"}; null deletes one. Params are data: names like token or password are refused.',
+    'Task params to record for later steps (flows tracked in Jira only), e.g. {"prUrl": "https://github.com/acme/app/pull/42"}; null deletes one. Params are data: names like token or password are refused.',
   );
 
 /** A transition value: a target step id, or the target plus the condition for firing the event. */

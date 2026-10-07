@@ -1,0 +1,106 @@
+# UI appearance section guide
+
+Use this guide for section 5, UI appearance, of a feature's `{{vars.techDesignFile}}`: where the
+elements that carry the feature's scenarios appear, what they are, when they are visible or
+enabled, their states, and the accessibility and viewport targets. It places behavior; it does not
+design screens. Visual design, layout and wording are the implementation's and the design system's
+choice, except in strict rows.
+
+## When and which codes
+
+Write it when a scenario of the task is reached through a user interface, when the brief's
+`Tech design sections:` lists this section, or when its `Modifiers:` include `ui-design`.
+Dev QA sends `DESIGN_GAP` when UI placement changes and this section does not describe it.
+
+| Code | Covers here |
+|---|---|
+| IC | operability, user error protection, inclusivity (accessibility), self-descriptiveness, user assistance, learnability, recognizability, engagement |
+| SAFE | hazard warning: a warning or confirmation before an irreversible or wide-reaching action |
+| FLEX | adaptability: viewports, platforms, input methods |
+
+Project-wide targets (accessibility level, supported browsers, smallest viewport) belong to the
+baseline; write a feature row only where the feature needs more. UI words (page, dialog, button,
+field) are expected here; they are banned only in the requirements.
+
+## What to write
+
+Rows in the [requirement format](../requirement-format.md). Allowed content:
+
+| Allowed | Example |
+|---|---|
+| Where it appears: page, view, panel, dialog, menu or command, named by purpose; a relative position only when the behavior depends on it | in the cart summary of the cart page; next to each Item |
+| What it is, by role: action, link, input, list, message, indicator | the place-order action |
+| When it is visible or enabled, as business states from the glossary | disabled while the Cart is empty |
+| Its states: empty, loading, error, success, read-only | the order history shows an empty state for a new Customer |
+| The information a message carries (not its wording) | the confirmation names the refund amount |
+| Accessibility targets | every checkout action operable by keyboard alone |
+| Viewports and platforms | usable from 320 CSS px wide without horizontal scrolling |
+
+Every placement row cites the scenario ID it places at the end of the Requirement cell:
+`(places CHK-1.2)`. Accessibility and viewport rows apply to the feature's UI as a whole and cite
+none. A placement that no scenario needs is unspecified behavior: drop it, or ask for the scenario
+(`REQUIREMENTS_GAP`). For a command-line interface the same rules apply: the command that offers
+the behavior, when it asks, what it reports on success and failure.
+
+## Never write
+
+- Colours, spacing, element sizes, fonts, icons, animation.
+- Component libraries or component names, style classes or tokens, pixel positions, test
+  selectors, route paths, file names.
+- Copy: labels, messages, help texts. State the information, not the words.
+- Screenshots or mock-ups as the requirement; describe the required facts in words.
+
+## Strict UI behaviour (only with `ui-design`)
+
+When the brief's `Modifiers:` include `ui-design` (a bug fix corrects a design decision, or the
+user gave explicit design requirements), add a table under `### Strict UI behaviour` after the
+other rows, with the columns ID | Sub-characteristic | Before (must not return) | After (exact) |
+Verify by | Priority | Source (example below).
+
+- State exactly the properties the user specified or the corrected decision concerns, including
+  wording, order or a visual property when that is what the user specified, quoted as given. Add
+  nothing the user did not specify; prefer the design system's named role (the destructive action
+  style) to raw values when the user agrees.
+- The After cell cites the scenario ID it places; the Before cell is the behavior that must not
+  come back (so the row stays true after the fix), or "none" for a new element.
+- No strict rows without the modifier. When the user dictates exact design during this step,
+  ask whether it is a requirement (the implementation decides by default). If it is, add
+  `ui-design` to the brief header's `Modifiers:` and log the reason in `## Classification`; the
+  route already includes this step.
+
+## Greenfield, adoption, brownfield
+
+- **Greenfield:** there are no screens yet. Place elements by purpose, using names from the
+  scenarios and the glossary. Ask once for the accessibility level, supported platforms and the
+  smallest viewport, with proposed defaults (WCAG 2.2 AA, the two latest versions of the major
+  desktop and mobile browsers, 320 CSS px); they become baseline rows with the user's consent.
+- **Adoption and brownfield:** for the touched screens only, read the views where the behavior
+  lives, the design system or component library in use (for its vocabulary, never to prescribe
+  components), accessibility lint rules or automated checks, the supported browsers and
+  breakpoints, and end-to-end tests that pin placement. Write existing placements as rows with
+  `Source: existing` only when a scenario of the task depends on them and the user confirms each:
+  today's UI may be the bug.
+- **Editing an existing section:** change rows in place, keep IDs, move removed or replaced rows to
+  section 8, Retired IDs.
+
+## Example
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-IC-1 | Operability | The place-order action shall appear in the cart summary of the cart page and be disabled while the Cart is empty (places CHK-1.2) | present; disabled exactly when the Cart is empty | test | Must | user |
+| CHK-IC-2 | User error protection | When a Customer cancels a paid Order, a confirmation dialog shall name the refund amount before the Order is cancelled (places CHK-4.1) | no cancellation without confirmation | test | Must | user |
+| CHK-IC-3 | Inclusivity | Every checkout action shall be operable by keyboard alone | 0 actions unreachable in a keyboard walkthrough | inspect | Must | user |
+
+Strict row of a ui-design bug fix:
+
+| ID | Sub-characteristic | Before (must not return) | After (exact) | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-IC-4 | Operability | Removing the last Item sends the Customer to the home page | The cart page stays open and shows the empty-cart state with a link to the catalog (places CHK-2.3) | test | Must | user |
+
+## Staleness pitfalls
+
+- A component name ("drawer", a library's modal): name the role (dialog, panel).
+- Layout beyond placement (two columns, sticky header): drop it unless a strict row requires it.
+- Wording copied from today's UI: state the information the message carries.
+- "The new button" or "now shows": state the placement timelessly.
+- Screens the task does not touch: leave them out; this section is not a UI inventory.

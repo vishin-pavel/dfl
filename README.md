@@ -1,12 +1,15 @@
 # dfl – development flow manager for coding agents
 
 `dfl` turns your team's development process into a **flow**: an ordered state machine of
-steps (spec → plan → implement → verify → review → ship, or whatever your team does). Each
-step is an [Agent Skill](https://agentskills.io/specification) rendered from a Handlebars
-template and installed into the project-level skill folders of your coding agents, so every
-step is a slash command (`/plan-feature`) in Claude Code, Cursor, Codex, Gemini CLI, Copilot,
-OpenCode, Windsurf/Devin, Kiro and Antigravity.
+steps (classify → requirements → tech design → implement → verify → ship, or whatever your team
+does). Each step is an [Agent Skill](https://agentskills.io/specification) rendered from a
+Handlebars template and installed into the project-level skill folders of your coding agents, so
+every step is a slash command (`/classify-task`) in Claude Code, Cursor, Codex, Gemini CLI,
+Copilot, OpenCode, Windsurf/Devin, Kiro and Antigravity.
 
+- **A default flow for requirements-driven development**, [`dev`](#the-dev-flow): every task is
+  classified first, settles its business and technical requirements as deep as it needs, is
+  implemented test-first against them, verified independently and shipped as a pull request.
 - **Flows live in your repo** (`.df/`), are reviewed like code and shared over git.
 - **Skills are rendered per developer** from templates with project and personal variables.
 - **A built-in MCP server** (`dfl mcp`) tells the agent where the flow is, which events it can
@@ -23,6 +26,7 @@ Linux machine.
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [The `dev` flow](#the-dev-flow)
 - [How it works](#how-it-works)
 - [The `.df/` directory](#the-df-directory)
 - [Flows and steps](#flows-and-steps)
@@ -34,6 +38,7 @@ Linux machine.
 - [Supported agents](#supported-agents)
 - [Sharing flows over git](#sharing-flows-over-git)
 - [Keeping flows safe: updates, export, backups](#keeping-flows-safe-updates-export-backups)
+- [Upgrading from the sample flows](#upgrading-from-the-sample-flows)
 - [Tracking tasks in Jira](#tracking-tasks-in-jira)
 - [Windows](#windows)
 - [Command reference](#command-reference)
@@ -92,34 +97,154 @@ For a per-project install, commit a project `.npmrc` with only the registry line
 
 ```sh
 cd my-project
-dfl install                     # wizard: pick flows, agents and whether to register the MCP server
+dfl install                     # wizard: pick agents and whether to register the MCP server
 # or, non-interactively:
-dfl install --yes --agents claude,cursor --flow feature
+dfl install --yes --agents claude,cursor
 ```
 
-Then, in your agent, run the first step's command, e.g. `/spec-feature` (Codex: `$spec-feature`).
-Each step skill starts by calling the `get_status` MCP tool and ends by calling `complete_step`
-with the event that matches the outcome. You can drive the flow from the terminal too:
+In a project without flows, `dfl install` creates the flow `dev` from the prebuilt template of the
+same name and makes it the team default.
+
+**Before the first task**, on the default branch:
+
+1. If the default branch is not `main`, tell the flow: `dfl vars set mainBranch <branch>` (tasks
+   branch from it and pull requests target it). Set `requirementsDir` and `taskNotesDir` now too if
+   you want other folders than `docs/requirements` and `docs/tasks`: the steps look only there (see
+   [the variables](#the-dev-flow)).
+2. Commit `.df/` and the MCP config files `dfl install` listed, and push:
+
+   ```sh
+   git add .df .mcp.json            # and any other MCP config file listed, e.g. .cursor/mcp.json
+   git commit -m "Add the dev flow"
+   git push
+   ```
+
+   Every step expects a clean working tree, and Dev QA counts files on the task branch that no
+   requirement needs as out of bounds, so the flow's own files belong on the default branch, not
+   in the first task.
+
+Then, in your agent, start a task with the first step's command and what you want done, e.g.
+`/classify-task Let customers export their orders as CSV` (Codex: `$classify-task …`). Each step
+skill starts by calling the `get_status` MCP tool and ends by calling `complete_step` with the event
+that matches the outcome; when a step ends it names the next command. Run `/verify-task` (Dev QA)
+in a fresh session. You can drive the flow from the terminal too:
 
 ```sh
 dfl status                      # where am I, which events can I fire, are my skills up to date
 dfl next                        # complete the current step (fires NEXT)
 dfl next FAILED                 # fire another event
-dfl goto implement-feature      # jump anywhere
+dfl goto implement-task         # jump anywhere
 dfl flow view                   # full-screen graph of the flow
 ```
 
-Commit `.df/` and the MCP config files, and your teammates get the same flow with
+Once `.df/` and the MCP config files are committed, your teammates get the same flow with
 `dfl install` (see [Sharing flows over git](#sharing-flows-over-git)).
+
+## The `dev` flow
+
+`dev` (*Requirements-driven development*) is the flow dfl ships. Requirements are the source of
+truth: each feature has business rules in Gherkin with a glossary, readable by every stakeholder,
+and long-lived technical requirements; when code and an accepted rule disagree, the code is fixed.
+Every task is classified first, and the classification decides how deep the flow goes.
+
+| Step | Command | What it does |
+|------|---------|--------------|
+| Classify | `/classify-task` | Records the request word for word in the task brief, finds the affected features and how well their requirements cover the touched behavior, classifies the task and proposes a route; waits for your explicit yes, then creates the task branch (a Jira task already has one) |
+| Behavior | `/define-behavior` | Writes or updates the features' business requirements: rules and scenarios with IDs (`CHK-1`, `CHK-1.2`) and a glossary; you accept them and they are committed on their own |
+| Tech design | `/design-tech` | Screens the quality attributes (ISO/IEC 25010 codes such as `PERF`, `SEC`, `MAINT`) and writes the applicable technical requirements, each measurable or simply verifiable: logical data, interfaces, UI placement, operations, engineering, and the few decisions that are expensive to reverse |
+| Implement | `/implement-task` | Test-first against the accepted requirements; tests name the scenario IDs they prove. A settled requirement changes only through a change request you decide (options, pros and cons, a recommendation), and every one is listed at the end |
+| Dev QA | `/verify-task` | Checks the committed code: every in-scope requirement has a passing test naming it, every hunk of the diff maps to a requirement, tests and checks pass against a baseline, sensitive changes are listed for human review; writes the Dev QA report |
+| Ship | `/ship-task` | Pushes, opens the pull request with the requirement changes, change requests and Dev QA report, watches CI and requests human review of the sensitive changes |
+
+Problems go back to the step that owns them: `RECLASSIFY` (Behavior → Classify),
+`REQUIREMENTS_GAP` (Tech design or Dev QA → Behavior), `DESIGN_GAP` (Dev QA → Tech design),
+`REVISE_REQUIREMENTS` / `REVISE_DESIGN` (Implement → Behavior / Tech design), `FAILED` (Dev QA →
+Implement) and `CHANGES_REQUESTED` (Ship → Implement). A question, estimate, spike or duplicate
+ends in `not-handled` (`OUT_OF_SCOPE`, after you agree); everything else ends in `done`.
+
+**Routes.** Everything after Implement is always Dev QA → Ship.
+
+| Route | Before Implement | Typical task |
+|-------|------------------|--------------|
+| `full` | Behavior, Tech design | a new feature; changed requirements with technical impact |
+| `behavior` | Behavior | a clarified rule; a bug where the requirement was silent or wrong; changed requirements without technical impact |
+| `design` | Tech design | a new quality target, infrastructure, CI or storage requirement; a UI design correction |
+| `code` | nothing | a bug that violates an accepted scenario, cited by ID; a refactor, dependency bump or chore within the requirements |
+
+Classification asks whether any business rule changes as stakeholders see it (then Behavior runs),
+and whether a changed rule or objective touches persisted data, an interface, UI placement or a
+quality target (then Tech design runs too; Behavior repeats this check and may switch between
+`full` and `behavior`). When the touched behavior has no accepted requirements yet, a task that
+changes or relies on a business rule goes through Behavior first: a bug can only "violate a
+requirement" whose ID it cites. The requester's label ("bug", "small tweak") never decides, and
+you confirm the class and route before anything is written.
+
+**Files on disk:**
+
+```
+<repo>/
+  docs/requirements/           requirementsDir
+    README.md                  index: feature, ID prefix, purpose, coverage
+    GLOSSARY.md                terms several features share
+    TECH_DESIGN.md             project baseline (SYS- IDs), created when first needed
+    checkout/                  one folder per feature
+      REQUIREMENTS.md          rules and scenarios in Gherkin (CHK-1, CHK-1.2), the feature's glossary
+      TECH_DESIGN.md           technical requirements (CHK-PERF-1) and decisions (CHK-DEC-1)
+  docs/tasks/                  taskNotesDir
+    ABC-123.md                 the task brief, named by the ticket key (or a slug without Jira)
+```
+
+The task brief carries the task through every step: the original request (quoted verbatim, never
+copied into requirement or tech design files), the classification, the quality attribute
+screening, change requests, work sent back, the implementation checklist, the Dev QA report and the
+hand-off to the QA team. It is committed on the task branch and kept after the merge.
+
+**Variables** (set them with [`dfl vars set`](#variables)):
+
+| Name | Scope | Default | Meaning |
+|------|-------|---------|---------|
+| `requirementsDir` | project | `docs/requirements` | one folder per feature, plus the index, `GLOSSARY.md` and the baseline tech design |
+| `requirementsFile` | project | `REQUIREMENTS.md` | file name of a feature's business requirements |
+| `techDesignFile` | project | `TECH_DESIGN.md` | file name of a feature's technical requirements; at the root of `requirementsDir`, the project baseline |
+| `taskNotesDir` | project | `docs/tasks` | task briefs |
+| `mainBranch` | project | `main` | where task branches start and pull requests go |
+| `testCommand` | project | none | the full test suite; when empty, the flow finds it, asks you and saves it |
+| `checkCommand` | project | none | the other checks CI runs (lint, type check, build), chained with `&&`; found the same way |
+| `sensitivePaths` | project | none | comma-separated globs whose changes always need human review (`auth/**,migrations/**`) |
+| `featureBranchPrefix` | personal | `feature/` | prefix of your feature branches |
+| `fixBranchPrefix` | personal | `fix/` | prefix of your bug fix branches |
+| `reviewer` | personal | none | GitHub handle to request pull request reviews from |
+
+**Dev QA is independent.** Run `/verify-task` in a fresh session, ideally with another agent or
+model: it refuses to verify in the conversation that wrote the code unless you override it, and
+the override is recorded in the report. It never fixes anything; it sends the task back.
+
+**Shipping ends with an open pull request.** `/ship-task` never merges and completes on the task
+branch. `done` means Dev QA passed and the pull request is open with CI green (or the hand-off says
+what is not available): the task is ready for the QA team. Merging and the QA team's checks happen
+outside the flow; the brief's hand-off says what to test and how to clean up after the merge.
+
+**New and existing projects.** Each step decides the context from the code first. In a
+*greenfield* project (no product code yet) the first task creates the requirements folder, index
+and glossary, asks a few questions for the project baseline, and its first increment sets up tests
+and CI. In *adoption* (product code, but no requirements for the behavior a task touches) the flow
+writes requirements only for that behavior and the rules it depends on, each confirmed by you,
+because existing code can contain bugs that must not become requirements; requirements grow task by
+task. In *brownfield* (both exist) accepted requirements win over the code of the features a task
+touches, and conflicts in other features become follow-ups.
+
+`dev` is a copy in `.df/dev/` that your team owns: change it like any other flow (see
+[Flows and steps](#flows-and-steps)). Its template has shared partials and reference files next to
+each step's skill; [browse it on GitHub](https://github.com/vishin-pavel/dfl/tree/main/templates/flows/dev).
 
 ## How it works
 
 ```
-.df/feature/flow.json                     ─┐
-.df/feature/steps/plan-feature/SKILL.md.hbs ├─ dfl install / flow-update ─┬─> .claude/skills/plan-feature/SKILL.md
-.df/config.json + .df/local.json (vars)   ─┘                             ├─> .cursor/skills/plan-feature/SKILL.md
-                                                                          ├─> .agents/skills/plan-feature/SKILL.md (Codex, Antigravity)
-                                                                          └─> .mcp.json, .cursor/mcp.json, … (dfl MCP server)
+.df/dev/flow.json                          ─┐
+.df/dev/steps/classify-task/SKILL.md.hbs    ├─ dfl install / flow-update ─┬─> .claude/skills/classify-task/SKILL.md
+.df/config.json + .df/local.json (vars)    ─┘                             ├─> .cursor/skills/classify-task/SKILL.md
+                                                                           ├─> .agents/skills/classify-task/SKILL.md (Codex, Antigravity)
+                                                                           └─> .mcp.json, .cursor/mcp.json, … (dfl MCP server)
 ```
 
 1. A flow (`.df/<flow>/flow.json`) is an [xstate v5](https://stately.ai/docs/xstate) machine
@@ -212,26 +337,17 @@ removes it (lines you added are kept).
 
 ## Flows and steps
 
-### Prebuilt flow templates
+### Prebuilt flow template
 
-| Template | Steps | Other events |
-|----------|-------|--------------|
-| `feature` | `spec-feature` → `plan-feature` → `implement-feature` → `verify-feature` → `review-feature` → `ship-feature` | `BACK`, `FAILED` (verify → implement), `CHANGES_REQUESTED` (review/ship → implement) |
-| `bugfix` | `reproduce-bug` → `diagnose-bug` → `fix-bug` → `verify-fix` → `ship-fix` | `BACK`, `FAILED` (verify → fix), `CHANGES_REQUESTED` (ship → fix) |
-| `quick` | `plan-change` → `make-change` → `check-change` | `BACK`, `FAILED` (check → make) |
-
-Their variables: `mainBranch` and `testCommand` (project); `feature` also has `specsDir` (where
-specs are written) and the personal `featureBranchPrefix` and `reviewer`; `bugfix` has `bugNotesDir`
-(default `docs/bugs`: each bug gets a notes file with its reproduction, diagnosis and verification,
-committed as the flow goes) and the personal `fixBranchPrefix` and `reviewer`. Diffs and logs in the
-steps compare against `origin/<mainBranch>`.
-
-`dfl flow templates` lists them; `dfl flow create <name> --from <template>` copies one into
-`.df/<name>/` (`dfl flow create feature --from feature --use` also activates it), and
-`dfl flow create <name> --steps a,b,c` creates a blank linear flow. The copy is yours to change:
-upgrading dfl never touches it, and `dfl flow pull` updates it from the template (or git repository,
-or directory) it came from only when you ask, showing which of your changes an update would replace,
-see [Keeping flows safe](#keeping-flows-safe-updates-export-backups).
+dfl ships one template, `dev` (see [The `dev` flow](#the-dev-flow)); earlier versions also
+shipped `feature`, `bugfix` and `quick` (see
+[Upgrading from the sample flows](#upgrading-from-the-sample-flows)). `dfl flow templates` lists
+it; `dfl flow create <name> --from dev` copies it into `.df/<name>/` (`dfl flow create dev --from
+dev --use` also activates it), and `dfl flow create <name> --steps a,b,c` creates a blank linear
+flow. The copy is yours to change: upgrading dfl never touches it, and `dfl flow pull` updates it
+from the template (or git repository, or directory) it came from only when you ask, showing which
+of your changes an update would replace, see
+[Keeping flows safe](#keeping-flows-safe-updates-export-backups).
 
 ### flow.json
 
@@ -242,7 +358,7 @@ see [Keeping flows safe](#keeping-flows-safe-updates-export-backups).
   "description": "From spec to shipped PR.",
   "version": "1.0.0",
   "skillPrefix": "",
-  "source": { "type": "template", "ref": "feature", "files": { "flow.json": "77caab347d357129", "steps/spec-feature/SKILL.md.hbs": "d1db6b335b8ee37d" } },
+  "source": { "type": "git", "ref": "https://github.com/acme/dev-flows.git", "path": "flows/feature", "commit": "3f2a9c1…", "files": { "flow.json": "77caab347d357129", "steps/spec-feature/SKILL.md.hbs": "d1db6b335b8ee37d" } },
   "vars": {
     "mainBranch": { "description": "Default branch PRs target", "default": "main", "scope": "project" },
     "reviewer": { "description": "Your GitHub handle for review requests", "scope": "personal", "required": false }
@@ -288,10 +404,10 @@ re-installed when the flow is active and you ran `dfl install`.
 
 ```sh
 dfl step list
-dfl step add qa-check --after verify-feature --title "QA check" --description "Run the QA checklist. Use after verification passes."
+dfl step add qa-check --after verify-task --title "QA check" --description "Run the QA checklist. Use after Dev QA passes."
 dfl step edit qa-check --rename qa --template-file ./qa.md.hbs
-dfl step edit spec-feature --initial
-dfl step transition qa REJECTED implement-feature --description "The QA checklist found problems"
+dfl step edit classify-task --initial
+dfl step transition qa REJECTED implement-task --description "The QA checklist found problems"
 dfl step transition qa REJECTED --remove
 dfl step remove qa --yes
 dfl flow validate
@@ -346,7 +462,9 @@ section: the step's position, the step it comes after and the steps that send wo
 to finish with (`complete_step` with the right event, plus CLI fallbacks). The MCP calls name the
 flow, so a skill keeps working on its own flow even when another flow is active. Put your own
 partials (or an override of `flow-context`) in `.df/<flow>/partials/<name>.hbs` and use them as
-`{{> name}}`.
+`{{> name}}` in any template of the flow, reference files included. The `dev` flow keeps the rules
+its steps share there (`{{> brief}}`, `{{> requirements-rules}}`, …) and long guides in
+`steps/<step>/references/*.md.hbs`, which each `SKILL.md` links and says when to open.
 
 **Rules**
 
@@ -386,8 +504,9 @@ dfl vars unset reviewer
 ```
 
 Stored values are shared by all flows of the project: a variable with the same name means the same
-thing in every flow (the prebuilt flows use `featureBranchPrefix` and `fixBranchPrefix` rather than
-one `branchPrefix`). `dfl install` asks for required variables that have no value. Guard optional
+thing in every flow (`dev` uses `featureBranchPrefix` and `fixBranchPrefix` rather than one
+`branchPrefix`, and keeps the names the earlier sample flows used, so values you stored for them
+still apply). `dfl install` asks for required variables that have no value. Guard optional
 ones in templates with `{{#if vars.reviewer}}…{{/if}}`. Because rendered skills can contain personal
 values, they are git-ignored.
 
@@ -510,7 +629,7 @@ A flow is just files, so the normal way to share it is to commit `.df/` (dfl's o
 
 ```sh
 git add .df .mcp.json .cursor/mcp.json
-git commit -m "Add the feature flow"
+git commit -m "Add the dev flow"
 ```
 
 Installed skill folders ignore themselves, so `git status` never shows them, and the committed
@@ -552,8 +671,8 @@ skills. When a prebuilt template changed since your flow was created from it (or
 say so and leave the flow alone:
 
 ```
-· Template "feature" has changed since flow "feature" was created or last pulled. The flow was not
-  changed; review the update with `dfl flow pull feature --dry-run`.
+· Template "dev" has changed since flow "dev" was created or last pulled. The flow was not
+  changed; review the update with `dfl flow pull dev --dry-run`.
 ```
 
 **Updating a flow** from its template, repository or directory:
@@ -561,7 +680,7 @@ say so and leave the flow alone:
 ```sh
 dfl flow pull --dry-run               # the active flow: only show what would change
 dfl flow pull                         # show the changes, ask, then update (a backup is saved first)
-dfl flow pull bugfix --yes            # without asking, when it discards none of your changes
+dfl flow pull dev --yes               # without asking, when it discards none of your changes
 dfl flow pull --yes --discard-local   # without asking, even if it replaces your changes
 dfl flow pull --rev v2                # git sources: another branch, tag or commit
 ```
@@ -570,9 +689,9 @@ Because dfl records the version each flow came from (`source.files`), the previe
 changes apart from the changes your team made to the flow, and marks every change that would be lost:
 
 ```
-Changes to flow feature from template "feature":
-  ~ steps/ship-feature/SKILL.md.hbs
-  ~ steps/plan-feature/SKILL.md.hbs ▲ edited here – your edits are lost
+Changes to flow dev from template "dev":
+  ~ steps/ship-task/SKILL.md.hbs
+  ~ steps/design-tech/references/grill.md.hbs ▲ edited here – your edits are lost
   − steps/qa/SKILL.md.hbs ▲ added here – it is deleted
   ▲ It would discard edits made in this project to 2 files (marked above).
 ```
@@ -594,18 +713,18 @@ flow, dfl writes a copy of it to `.df/.dfl-backups/<flow>-<time>.dfl.json` (git-
 dfl) and prints how to restore it:
 
 ```sh
-dfl flow import .df/.dfl-backups/feature-20261001T153000Z.dfl.json --force
+dfl flow import .df/.dfl-backups/dev-20261001T153000Z.dfl.json --force
 ```
 
 **Export and import.** `dfl flow export` writes flows to one file, to keep a copy or to move a flow to
 another project or team:
 
 ```sh
-dfl flow export                       # the active flow → ./feature.dfl.json
-dfl flow export bugfix -o backups/    # → backups/bugfix.dfl.json
+dfl flow export                       # the active flow → ./dev.dfl.json
+dfl flow export hotfix -o backups/    # → backups/hotfix.dfl.json
 dfl flow export --all -o all.dfl.json # every flow of the project
-dfl flow export -o - > feature.dfl.json
-dfl flow import feature.dfl.json      # in this or another project (--name, --force, --dry-run, --use)
+dfl flow export -o - > dev.dfl.json
+dfl flow import dev.dfl.json          # in this or another project (--name, --force, --dry-run, --use)
 ```
 
 An export is a snapshot: importing it restores the flow exactly as exported, including its `source`,
@@ -613,6 +732,70 @@ so a customized default flow keeps updating from its template and its customizat
 as such. It holds the flow's own files only: never rendered skills (they can contain personal values),
 hand-written `.md` files under `steps/` (dfl warns about them) or OS junk. Existing files are only
 overwritten with `--force`, and an export is never written into a flow directory.
+
+## Upgrading from the sample flows
+
+Earlier dfl versions shipped three sample templates, `feature`, `bugfix` and `quick`. They were
+replaced by [`dev`](#the-dev-flow), and dfl no longer ships them.
+
+- **Your flows keep working.** A flow created from a sample lives in `.df/<flow>/`, and upgrading
+  dfl never changes it: syncs, `dfl next`, `flow use`, `flow validate`, export and import work as
+  before, and Jira tickets in progress keep their step. It only gets no template updates.
+- **A notice after the upgrade.** The first `dfl install` or `dfl flow-update` (also `--dry-run`)
+  by the new dfl version prints one line per such flow:
+
+  ```
+  · Flow "feature" was created from the template "feature", which dfl no longer ships (replaced by
+    "dev"). The flow keeps working unchanged; to try the new default flow run `dfl flow create dev --from dev`.
+  ```
+
+  When the project already has a flow named `dev`, it suggests `dfl flow use dev` instead. The
+  notice is shown until a sync records the new version: a dry run does not, and a sync started by
+  another command or by the MCP `sync` tool does so without printing it.
+- **`TEMPLATE_RETIRED`.** `dfl flow pull` of such a flow, `dfl flow create <name> --from feature`
+  (or `bugfix`, `quick`) and `dfl install --flow feature` in a project without a flow of that name
+  fail with this code and change nothing. The message names the replacement, and the hint says how
+  to start `dev` and how to reuse the old flow in another project. For `dfl install --flow feature`
+  it suggests `dfl install --flow dev`, which also works in a project without `.df/` (and leaves out
+  the reuse part when the project has no flows); the other commands suggest
+  `dfl flow create dev --from dev`, or `dfl flow use dev` when the project has it.
+- **A flow named after a sample that the project does not have.** `dfl flow use feature` (also
+  `export`, `pull`, `delete`) fails with `FLOW_NOT_FOUND`; the hint suggests `dfl flow use dev`, or
+  `dfl flow create dev --from dev --use` when the project has no `dev`.
+
+To move a project to `dev`:
+
+```sh
+dfl flow create dev --from dev        # next to the old flow
+dfl tracker map --flow dev            # Jira only: a status for each step
+# Jira only: set "flowSelect": { "default": "dev" } in .df/tracker.json and remove "byIssueType"
+dfl flow use dev --project            # the team default
+dfl flow delete feature --yes         # once its tickets are finished; a backup is written first
+```
+
+For the Jira statuses see [The `dev` flow in Jira](#the-dev-flow-in-jira). A ticket keeps the flow
+it was started in: to finish one that started in `feature`, run `dfl flow use feature` (dfl tells
+you so when you continue the ticket) and switch back afterwards.
+
+Values you stored for `mainBranch`, `testCommand`, `featureBranchPrefix`, `fixBranchPrefix` and
+`reviewer` apply to `dev` too. `dev` has no default `testCommand` (the samples assumed `npm test`):
+if none is stored, the flow finds the command on first use and asks you to save it. Specs and bug
+notes the samples wrote stay where they are; `dev` writes requirements for a feature when a task
+first touches it.
+
+To keep using an old flow in another project, export it here and import it there before running
+`dfl install` there: in a project without flows, `dfl install` creates `dev` and makes it the team
+default. An imported flow is not activated (`--use` only makes it your personal flow):
+
+```sh
+dfl flow export feature               # → ./feature.dfl.json
+
+# in another project without .df/ (flow import needs a .df/ directory):
+mkdir .df && dfl flow import feature.dfl.json && dfl install    # the only flow becomes the team default
+
+# in another project that already uses dfl:
+dfl flow import feature.dfl.json && dfl flow use feature --project
+```
 
 ## Tracking tasks in Jira
 
@@ -623,8 +806,8 @@ Without a tracker, each developer's checkout has one position per flow. With Jir
   `ABC-123-export-orders-as-csv` from `origin/main`, records the task at the first step of the flow
   and moves the ticket to the Jira status you mapped to that step.
 - Every completed step (`complete_step` in a skill, `dfl next` in the terminal) moves the task, and
-  the ticket to the status mapped to the next step. Steps can record values for later steps (a spec
-  path, a pull request URL) and write them to Jira fields.
+  the ticket to the status mapped to the next step. Steps can record values for later steps (the
+  task's route, a pull request URL) and write them to Jira fields.
 - The ticket key in the branch name identifies the task: a teammate who checks out the branch
   continues at the same step, on any machine.
 
@@ -636,9 +819,10 @@ supports **Jira Cloud** with classic API tokens.
 ### How tracking works
 
 - **The position is a hidden record in the ticket**, an issue property (`dfl.run`) with the flow,
-  the step, the task's params (branch, slug, spec path, …) and a short history. It needs the Browse
-  projects and Edit issues permissions (plus Transition issues to move the status), no Jira admin
-  and no custom field, and it keeps the exact step even when several steps share one Jira status.
+  the step, the task's params (branch, slug, route, pull request URL, …) and a short history. It
+  needs the Browse projects and Edit issues permissions (plus Transition issues to move the
+  status), no Jira admin and no custom field, and it keeps the exact step even when several steps
+  share one Jira status.
   The record is readable by everyone who can see the ticket, so never put secrets into params.
   Anyone who can edit the ticket can also change it, so dfl accepts only what it writes itself (step
   ids, single-line params, plain relative paths, a branch name of letters, digits and `._/+-`) and
@@ -664,7 +848,7 @@ dfl tracker init                 # asks for the Jira site and project key(s); wr
 dfl tracker login                # your email and API token, saved in your user config (never in the project)
 dfl tracker map                  # wizard: a Jira status, or none, for each step of the active flow
 dfl tracker check                # checks the config, your token, the projects, the mapped statuses and fields
-git add .df/tracker.json && git commit -m "Track the feature flow in Jira"
+git add .df/tracker.json && git commit -m "Track the dev flow in Jira"
 ```
 
 Optionally store the task branch in a Jira field: `dfl tracker field branch <field>` (see
@@ -689,12 +873,12 @@ Optionally store the task branch in a Jira field: `dfl tracker field branch <fie
 ```sh
 dfl tracker map                              # in a terminal: the wizard; otherwise the step → status table
 dfl tracker map --list                       # the table; --json: { flow, tracked, statuses }
-dfl tracker map review-feature "In Review"   # a status name (checked against Jira, stored as Jira spells it in English)
-dfl tracker map review-feature id:10004      # a status id
-dfl tracker map verify-feature none          # no status change at this step (same as --none or --unset)
+dfl tracker map verify-task "In Review"      # a status name (checked against Jira, stored as Jira spells it in English)
+dfl tracker map verify-task id:10004         # a status id
+dfl tracker map design-tech none             # no status change at this step (same as --none or --unset)
 dfl tracker map --none                       # no status change at any step of the flow
 dfl tracker map --remove                     # stop tracking the flow (asks first; --yes without a terminal)
-dfl tracker map --flow bugfix reproduce-bug "In Progress"
+dfl tracker map --flow hotfix fix-bug "In Progress"   # a flow other than the active one
 ```
 
 - The wizard goes through the steps in flow order (the final state too) and offers, for each one,
@@ -707,8 +891,9 @@ dfl tracker map --flow bugfix reproduce-bug "In Progress"
   moves the status, for teams whose board is driven by people or automation.
 - A flow is tracked as soon as `tracker.json` has an entry for it, even one that maps no step; any
   `dfl tracker map` edit creates it. `--remove` deletes the entry: the flow goes back to local state.
-- The final state (`done`) is mapped like any step. Map it to *Done* only when nothing else closes
-  tickets; leave it none when a pull-request merge automation does.
+- Final states are mapped like any step. Map one to *Done* only when nothing else closes tickets;
+  leave it none when a pull-request merge automation does. In `dev`, `done` means "ready for the QA
+  team" (see [below](#the-dev-flow-in-jira)).
 - Every move projects the mapping, backward moves too: `FAILED`, `CHANGES_REQUESTED`, `dfl goto` and
   `dfl reset` move the ticket back to the status of the step they lead to.
 - An unknown status name fails with `TRACKER_STATUS_UNKNOWN` and suggests close matches; `--no-check`
@@ -738,10 +923,10 @@ a warning (a name cannot be looked up then). `dfl tracker field --list` lists th
 The field's context in Jira must include the projects and issue types of your tickets; dfl cannot
 see that without admin rights, so `dfl tracker check` warns about it when you track several
 projects or issue types, and a refused field write says so. `start_task` sets the params `branch`
-and `slug`; steps record others (the shipped ship steps record `prUrl`, the pull request URL), and
-the agent is told which params reach Jira fields. Every move writes each mapped field whose Jira
-value differs from the task's param, so a field mapped later, or a write that failed, is filled on
-the next move.
+and `slug`; steps record others (in `dev`, `classify-task` records `taskClass` and `route`, and
+`ship-task` records `prUrl`, the pull request URL), and the agent is told which params reach Jira
+fields. Every move writes each mapped field whose Jira value differs from the task's param, so a
+field mapped later, or a write that failed, is filled on the next move.
 
 ### `.df/tracker.json`
 
@@ -752,19 +937,20 @@ the next move.
   "jira": { "baseUrl": "https://acme.atlassian.net", "projectKeys": ["ABC"], "defaultProjectKey": "ABC" },
   "branch": { "template": "{key}-{slug}", "from": "origin/main", "protected": ["main", "master", "develop"], "fetch": true },
   "fields": { "branch": "customfield_10042", "prUrl": "customfield_10077" },
-  "flowSelect": { "byIssueType": { "Bug": "bugfix" }, "default": "feature" },
+  "flowSelect": { "default": "dev" },
   "flows": {
-    "feature": {
-      "branchTemplate": "feature/{key}-{slug}",
+    "dev": {
       "statuses": {
-        "spec-feature": "In Progress",
-        "implement-feature": "In Development",
-        "verify-feature": null,
-        "review-feature": "In Review",
-        "done": { "status": "Done", "fields": { "resolution": { "name": "Done" } } }
+        "classify-task": "In Analysis",
+        "define-behavior": "In Analysis",
+        "design-tech": "In Analysis",
+        "implement-task": "In Progress",
+        "verify-task": "In Review",
+        "ship-task": "In Review",
+        "done": "Ready for QA",
+        "not-handled": { "status": "Won't Do", "fields": { "resolution": { "name": "Won't Do" } } }
       }
-    },
-    "bugfix": { "statuses": {} }
+    }
   }
 }
 ```
@@ -776,10 +962,10 @@ the next move.
 | `jira.defaultProjectKey` | expands bare numbers (`123`, `#123`) when starting a task or showing its status |
 | `jira.property` | the issue property that holds the record (default `dfl.run`); change it only when two repositories work on the same tickets |
 | `branch.template` | name of new task branches: `{key}` (required, with a separator such as `-` or `/` on both sides: `{key}{slug}` is refused) and `{slug}` (from the ticket summary). Default `{key}-{slug}`; a flow's `branchTemplate` wins |
-| `branch.from` | where new task branches start (default `origin/<mainBranch>`; fetched first unless `fetch` is false). A plain ref: no `:`, `*`, `?`, `[`, `^`, `~`, `\`, `..`, `@{`, leading `+` or `-`, or spaces |
+| `branch.from` | where new task branches start (default `origin/<mainBranch>`; fetched first unless `fetch` is false; a repository without a remote sets the local main branch, e.g. `"main"`). A plain ref: no `:`, `*`, `?`, `[`, `^`, `~`, `\`, `..`, `@{`, leading `+` or `-`, or spaces |
 | `branch.protected` | branches a task is never recorded on; starting a ticket there creates a branch (default `main`, `master`, `develop` and the flow's `mainBranch`) |
 | `fields` | task param → Jira custom field id |
-| `flowSelect` | which flow `/init-task` uses: by issue type, else `default`, else the active flow |
+| `flowSelect` | which flow `/init-task` uses: by issue type (`"byIssueType": { "Bug": "hotfix" }`), else `default`, else the active flow |
 | `flows.<flow>.statuses` | step → status name, `{ "id": "…" }`, `{ "status", "fields", "reopen" }`, or `null` (none) |
 | `flows.<flow>.requireTask` | `false` lets a branch without a ticket key use the local position (default `true`) |
 
@@ -807,16 +993,16 @@ In your agent:
 
 Then run the steps as usual: each skill calls `get_status` (which returns the ticket, its Jira status
 and its params) and `complete_step` (which moves the task and the ticket). The skills tell the agent
-to take the slug and paths from the task's params instead of deriving them, and to pass the values
-later steps need (the ship step records the pull request URL as `prUrl`). A ticket summary without
-Latin letters gives the branch `ABC-123` and the slug `abc-123`. In the terminal:
+to take the slug and other inputs from the task's params instead of deriving them, and to pass the
+values later steps need (`dev`'s ship step records the pull request URL as `prUrl`). A ticket
+summary without Latin letters gives the branch `ABC-123` and the slug `abc-123`. In the terminal:
 
 ```sh
 dfl task start ABC-123                 # same as /init-task (also 123, "#123" or the ticket's URL)
 dfl status                             # the ticket of this branch: step, Jira status, params
 dfl next                               # complete the current step; the ticket follows the mapping
 dfl next --set prUrl=https://github.com/acme/app/pull/42   # record a param (prUrl= deletes it)
-dfl goto implement-feature             # move the task (and the ticket) to a step
+dfl goto implement-task                # move the task (and the ticket) to a step
 dfl status --task ABC-123              # name the ticket, e.g. on main after finishing it (also 123 with a default project)
 ```
 
@@ -833,9 +1019,10 @@ question). After you switch back to `main` at the end of a task, `dfl status` an
 the ticket of the previous branch, even when the cleanup deleted that branch, so a forgotten last
 step can still be completed.
 
-- **Flows by issue type**: with `flowSelect`, a *Bug* can start in the `bugfix` flow. One flow is
-  active per checkout: when a ticket belongs to another flow, dfl asks you to run `dfl flow use
-  <flow>` first (and to restart your agent if it does not pick up the new skills).
+- **Flows by issue type**: with `flowSelect.byIssueType`, a *Bug* can start in another flow of the
+  project (`dev` handles every kind of task itself and needs only `default`). One flow is active
+  per checkout: when a ticket belongs to another flow, dfl asks you to run `dfl flow use <flow>`
+  first (and to restart your agent if it does not pick up the new skills).
 - **Params** are short single-line strings (up to 1,000 characters, 30 per task). Names that look
   like secrets (`token`, `password`, …) are refused, path params (`specPath`, `notesDir`) must be
   relative (no `..`, `~` or `.git`), `branch` uses letters, digits and `._/+-`, and `slug` is one
@@ -843,6 +1030,26 @@ step can still be completed.
 - **No ticket on the branch**: `dfl status` says how to start one, and moves fail with
   `TASK_REQUIRED`. Set `"requireTask": false` on the flow to let such branches use the local
   position instead.
+
+### The `dev` flow in Jira
+
+The `tracker.json` example above is a setup for [`dev`](#the-dev-flow):
+
+- **`flowSelect`** needs only `"default": "dev"`: one flow handles features, bugs and technical
+  work. The task branch exists before classification runs, so tracked tasks all get
+  `branch.template` (the personal branch prefixes apply only to untracked tasks).
+- **Statuses**, set with `dfl tracker map --flow dev`: Classify, Behavior and Tech design → *In
+  Analysis*; Implement → *In Progress*; Dev QA and Ship → *In Review*; `done` → *Ready for QA*, not
+  *Done* (the pull request is open and the QA team checks next); `not-handled` → *Won't Do* with a
+  resolution. Each status must exist in the workflow of every issue type you track, or the move
+  warns.
+- **Starting is manual**: a developer picks the ticket and runs `/init-task ABC-123`, or
+  `/classify-task ABC-123` directly (the agent asks, then starts the ticket). dfl does not fetch the
+  ticket description: Classify asks you to paste it and quotes it in the brief, `ABC-123.md`.
+- **QA rejects the work**: `dfl goto implement-task --task ABC-123` moves the task and the ticket
+  back; note what QA found in the brief's `## Rework` section so the step addresses it.
+- **No remote**: set `"branch": { "from": "main" }` (the local main branch); the default
+  `origin/main` does not exist, and starting a ticket would fail with `TASK_BRANCH_BASE_MISSING`.
 
 ### Teammates
 
@@ -887,7 +1094,7 @@ params. One person works on a ticket at a time; dfl does not merge concurrent mo
 | `TASK_BRANCH_MISMATCH` | the ticket you named is not the branch's: switch branches, or leave out `--task` |
 | `TASK_FLOW_NOT_ACTIVE`, `TASK_FLOW_MISMATCH` | `dfl flow use <flow>` (the message names it) |
 | `TASK_STEP_UNKNOWN`, `TASK_RECORD_INVALID` | the flow lost the task's step, or the record is damaged or was edited outside dfl (the message names the fields): `dfl goto <step> --task <key>` repairs it |
-| `TASK_DONE` | the ticket finished the flow; `dfl goto <first step> --task <key>` restarts it |
+| `TASK_DONE` | the ticket finished the flow; `dfl goto <step> --task <key>` moves it back to the step to resume at (in `dev`: `implement-task` when the QA team rejects the work) |
 | "was moved to '…' outside dfl" | someone moved the ticket to a status the flow does not map; move it back by hand, or leave it |
 | "No transition from '…' to '…'" | the Jira workflow has no direct path, or the transition needs fields: move the ticket by hand, add `fields` to the mapping, or change it with `dfl tracker map` |
 | "dfl could not write … to the Jira fields" | check `fields` with `dfl tracker check`: each must be a single-line text or URL field whose field context includes the ticket's project and issue type (a Jira admin can extend it); the next move writes it again |
@@ -948,7 +1155,7 @@ Warnings go to stderr, so `--json` output can be piped. Tables fit the terminal 
 | `dfl tracker map [step] [status \| id:<id> \| none] [--flow <f>] [--none] [--unset] [--remove] [--list] [--json] [--no-check] [-y]` | map steps to Jira statuses: the wizard (in a terminal) or the table; one step; `--none` for every step; `--remove` stops tracking the flow |
 | `dfl tracker field [param] [field \| none] [--none] [--list] [--json] [--no-check]` | write a task param to a Jira custom field (by id or name), remove it, or list them |
 | `dfl flow list` / `ls [--json]` | flows of the project |
-| `dfl flow templates` | prebuilt templates |
+| `dfl flow templates` | prebuilt templates (`dev`) |
 | `dfl flow use <name> [--project] [--no-sync]` | make a flow active (personal, or team default with `--project`); an invalid flow is refused, and a failed sync restores the previous flow |
 | `dfl flow create <name> [--from <template> \| --steps a,b] [--title] [--description] [--use] [--no-sync]` | create a flow |
 | `dfl flow export [names...] [--all] [-o <file\|dir\|->] [--force]` | write flows to one file (default: the active flow → `<flow>.dfl.json`) |
@@ -989,7 +1196,8 @@ npm run check          # all of the above
 
 - Source is TypeScript ESM in `src/` (`core/` flow model, rendering, sync; `agents/` tool
   adapters and MCP config editors; `mcp/` server; `tui/` viewer; `commands/` and `ui/` CLI),
-  bundled to `dist/` with tsdown. Templates ship in `templates/`.
+  bundled to `dist/` with tsdown. Templates ship in `templates/`; the retired sample flows are
+  test fixtures in `test/fixtures/flows/`.
 - [docs/ARCHITECTURE.md](https://github.com/vishin-pavel/dfl/blob/main/docs/ARCHITECTURE.md)
   describes the design and module contracts;
   [docs/AGENTS.md](https://github.com/vishin-pavel/dfl/blob/main/docs/AGENTS.md) the per-agent
