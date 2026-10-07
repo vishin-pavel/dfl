@@ -7,8 +7,8 @@ decides whether the work moves on to review (`NEXT`) or goes back to implementat
 ## Inputs
 
 - The spec with its acceptance criteria and implementation plan: `{{vars.specsDir}}/<slug>.md`
-  (slug from the branch name `{{vars.featureBranchPrefix}}<slug>` or the text the user typed
-  after the command).
+  (slug from `task.params.slug` when `get_status` returned a task, else from the branch name
+  `{{vars.featureBranchPrefix}}<slug>` or the text the user typed after the command).
 - The feature branch with all implementation work committed.
 
 ## Procedure

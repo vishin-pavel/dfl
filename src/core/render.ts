@@ -11,6 +11,7 @@ import { SKILL_TEMPLATE_FILE, defaultStepTemplate, skillNameFor, skillSteps } fr
 import { exists, listDirs, readJsonIfExists, readText, relPosix, removeEmptyDirsUpTo, removePath, walkFiles, writeText } from './fsx.js';
 import { isValidId, titleCase, toId } from './ids.js';
 import { DF_DIR, builtinPartialsDir, builtinSkillsDir, packageVersion } from './paths.js';
+import { INIT_TASK_SKILL } from './tracker/instructions.js';
 import type {
   FlowModel,
   FlowTransition,
@@ -633,7 +634,21 @@ export function renderFlowSkills(
 }
 
 /**
- * Renders the built-in skills from `<pkg>/templates/skills/<name>/` in memory (never written into `.df`).
+ * Built-in skills that only some projects get. `init-task` starts tasks of flows tracked in Jira, so
+ * it is rendered only when `.df/tracker.json` exists (computeSyncFingerprint hashes the same check).
+ */
+const CONDITIONAL_BUILTIN_SKILLS = new Map<string, (paths: ProjectPaths) => boolean>([
+  [INIT_TASK_SKILL, (paths) => exists(paths.trackerFile)],
+]);
+
+/** Whether the built-in skill `name` is rendered for this project (see CONDITIONAL_BUILTIN_SKILLS). */
+export function builtinSkillEnabled(paths: ProjectPaths, name: string): boolean {
+  return CONDITIONAL_BUILTIN_SKILLS.get(name)?.(paths) ?? true;
+}
+
+/**
+ * Renders the built-in skills from `<pkg>/templates/skills/<name>/` in memory (never written into `.df`):
+ * the ones builtinSkillEnabled allows for this project.
  * `model` is the active flow (may be undefined when the project has no flow yet).
  * `options.dir` replaces the built-in skills directory (tests).
  */
@@ -644,7 +659,7 @@ export function renderBuiltinSkills(
   options?: { dir?: string | undefined },
 ): RenderedSkill[] {
   const root = options?.dir ?? builtinSkillsDir();
-  const names = builtinSkillNames(root);
+  const names = builtinSkillNames(root).filter((name) => builtinSkillEnabled(paths, name));
   if (names.length === 0) return [];
   const hb = createHandlebars();
   const context = buildTemplateContext(paths, model, vars);

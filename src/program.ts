@@ -10,6 +10,8 @@ import { registerMcpCommand } from './commands/mcp.js';
 import type { CliContext } from './commands/shared.js';
 import { registerStateCommands } from './commands/state.js';
 import { registerStepCommands } from './commands/step.js';
+import { registerTaskCommands } from './commands/task.js';
+import { registerTrackerCommands } from './commands/tracker.js';
 import { registerVarsCommands } from './commands/vars.js';
 import { packageVersion } from './core/paths.js';
 
@@ -32,9 +34,11 @@ export function buildProgram(): Command {
 
   registerInstallCommands(program, ctx);
   registerStateCommands(program, ctx);
+  registerTaskCommands(program, ctx);
   registerFlowCommands(program, ctx);
   registerStepCommands(program, ctx);
   registerVarsCommands(program, ctx);
+  registerTrackerCommands(program, ctx);
   registerAgentsCommand(program, ctx);
   registerMcpCommand(program, ctx);
   return program as unknown as Command;

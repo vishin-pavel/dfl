@@ -30,6 +30,7 @@ const TOOL_NAMES = [
   'get_step',
   'goto_step',
   'list_flows',
+  'start_task',
   'sync',
   'transition',
   'update_step',
@@ -1106,6 +1107,22 @@ describe('guide', () => {
     expect(guide).not.toMatch(/(^|[^x] )`dfl (vars|flow)/m);
     expect(AUTHORING_GUIDE).toBe(authoringGuide('dfl'));
     expect(AUTHORING_GUIDE).toContain('"description": "Tests failed"');
+  });
+
+  it('explains flows tracked in Jira: task data arrives at runtime and is never templated', () => {
+    const guide = authoringGuide('npx --no-install dfl');
+    const start = guide.indexOf('\n## 10. Flows tracked in Jira\n');
+    expect(start).toBeGreaterThan(guide.indexOf('\n## 9. Workflow\n'));
+    const section = guide.slice(start).replace(/\s+/g, ' ');
+    expect(section).toContain('`get_status` returns it in `task`');
+    expect(section).toContain('There is no `task` in the template context: never template it.');
+    expect(section).toContain('records it with `params` of `complete_step`');
+    expect(section).toContain('`npx --no-install dfl next <EVENT> --from <step> --task <key> --set specPath=docs/specs/csv-export.md`');
+    expect(section).toContain('`start_task` (the built-in `/init-task` skill, CLI `npx --no-install dfl task start <ticket>`)');
+    expect(section).toContain('"If `get_status` returned a task with a branch, you are already on the working branch: skip this step."');
+    expect(section).toContain('`npx --no-install dfl tracker map`');
+    // The guide's only Handlebars example stays the one of section 8.
+    expect(guide.match(/```handlebars/g)).toHaveLength(1);
   });
 });
 

@@ -39,14 +39,27 @@ export function success(message: string): void {
   print(`${c.green(sym.ok)} ${message}`);
 }
 
-export function warning(message: string): void {
-  printErr(`${c.yellow(sym.warn)} ${c.yellow(message)}`);
+/** C0/C1 control characters except tab and line feed: terminal escapes (ESC, BEL, CSI, OSC …). */
+const CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+
+/**
+ * `text` with its control characters (except tab and line feed) replaced by `�`, so text from Jira
+ * or a task record (titles, branch names, params, status names, error messages) cannot send escape
+ * sequences to the terminal. Apply it before colouring: the colour codes are added afterwards.
+ */
+export function plain(text: string): string {
+  return text.replace(CONTROL_RE, '\uFFFD');
 }
 
-/** `✖ message` plus a dimmed hint on the next line (stderr). */
+/** `▲ message` on stderr (control characters replaced: warnings may quote Jira or a record). */
+export function warning(message: string): void {
+  printErr(`${c.yellow(sym.warn)} ${c.yellow(plain(message))}`);
+}
+
+/** `✖ message` plus a dimmed hint on the next line (stderr; control characters replaced). */
 export function failure(message: string, hint?: string): void {
-  printErr(`${c.red(sym.fail)} ${message}`);
-  if (hint) printErr(c.dim(`  ${hint}`));
+  printErr(`${c.red(sym.fail)} ${plain(message)}`);
+  if (hint) printErr(c.dim(`  ${plain(hint)}`));
 }
 
 /** Visible width of a string (ANSI codes ignored, wide characters counted twice). */
@@ -54,9 +67,9 @@ export function width(text: string): number {
   return stringWidth(text);
 }
 
-/** Truncates plain (uncoloured) text to `max` columns with an ellipsis. */
+/** Truncates plain (uncoloured) text to `max` columns with an ellipsis (whitespace collapsed, control characters replaced). */
 export function truncate(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
+  const flat = plain(text.replace(/\s+/g, ' ').trim());
   if (max <= 0) return '';
   if (stringWidth(flat) <= max) return flat;
   let out = '';

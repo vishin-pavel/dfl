@@ -119,7 +119,7 @@ arguments fall back to the property of the same name); \`{{this.title}}\` is the
   (step n of total), the steps it comes after or is also reached from (with their slash commands and
   conditions), the instruction to call \`get_status\` before starting, the outgoing events with their
   targets and descriptions, and the instruction to call \`complete_step\` with the chosen event when
-  done (with CLI fallbacks). End
+  done (with CLI fallbacks), passing the ticket along in flows tracked in Jira (section 10). End
   every step template with it, on the last line, and do not write your own version of these
   instructions.
 - \`.df/<flow>/partials/<name>.hbs\` defines a partial \`{{> name}}\` for all steps of that flow
@@ -245,6 +245,30 @@ ready (\`NEXT\`) or needs more work (\`CHANGES_REQUESTED\`).
    (\`template\`, \`title\`, \`description\`, \`on\`). dfl validates, writes and re-installs the skills.
 3. Check the result: \`get_step\` returns the rendered SKILL.md; \`validate_flow\` lists problems.
 4. Tell the user to commit \`.df/<flow>\` so the team gets the change.
+
+## 10. Flows tracked in Jira
+
+When \`.df/tracker.json\` tracks a flow, every ticket has its own position in the flow, stored in the
+ticket; a rendered skill serves all of them.
+
+- Task data reaches the agent at runtime only: \`get_status\` returns it in \`task\` (key, title,
+  branch, \`params\` such as \`slug\`, and \`instructions\` for the agent). There is no \`task\` in the
+  template context: never template it. Write prose instead, for example "use \`task.params.slug\`
+  when \`get_status\` returned a task; otherwise derive the slug from the branch name".
+- \`{{> flow-context}}\` already tells the agent to pass the ticket to \`get_status\`, to follow
+  \`task.instructions\` and to pass \`"task"\` to \`complete_step\` / \`goto_step\`; do not repeat it.
+- A step that produces a value later steps need (a spec path, a pull request URL) records it with
+  \`params\` of \`complete_step\`, for example \`{"specPath": "docs/specs/csv-export.md"}\` (CLI:
+  \`${cli} next <EVENT> --from <step> --task <key> --set specPath=docs/specs/csv-export.md\`). Params
+  are short single-line strings (no line breaks); names that look like secrets are refused, and
+  params that \`.df/tracker.json\` maps in \`fields\` (e.g. \`branch\`, \`prUrl\`) are also written to
+  those Jira fields.
+- \`start_task\` (the built-in \`/init-task\` skill, CLI \`${cli} task start <ticket>\`) creates and
+  checks out the task's branch. A step that creates a branch should say "If \`get_status\` returned
+  a task with a branch, you are already on the working branch: skip this step."
+- The Jira status each step moves the ticket to is configured in \`.df/tracker.json\`
+  (\`${cli} tracker map\`), never in templates. A step named \`init-task\` replaces the built-in
+  \`/init-task\` skill.
 `;
 }
 

@@ -6,8 +6,9 @@ and, if needed, stopped at any point.
 
 ## Inputs
 
-- The spec at `{{vars.specsDir}}/<slug>.md`. Find the slug in the text the user typed after the
-  command, or derive it from the current branch (`git branch --show-current`, then strip the
+- The spec at `{{vars.specsDir}}/<slug>.md`. Use `task.params.slug` when `get_status` returned
+  a task. Otherwise find the slug in the text the user typed after the command, or derive it
+  from the current branch (`git branch --show-current`, then strip the
   `{{vars.featureBranchPrefix}}` prefix), or ask the user.
 - The code base, in particular the modules the spec touches and their tests.
 

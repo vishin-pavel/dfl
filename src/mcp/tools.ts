@@ -18,10 +18,25 @@ import {
   readFlowDefinition,
 } from '../core/flow.js';
 import { readTextIfExists, relPosix, walkFiles } from '../core/fsx.js';
+import { withProjectLock } from '../core/lock.js';
 import { gotoStep, loadRuntimeState, sendEvent } from '../core/machine.js';
 import { addStep, readStepTemplate, removeStep, updateStep, type StepPlacement, type TransitionInput } from '../core/steps.js';
 import { NOT_INSTALLED_MESSAGE, checkFlowSyncState, isInstalledForUser, syncProject, type SyncState } from '../core/sync.js';
 import { titleCase } from '../core/ids.js';
+import {
+  isTracked,
+  startTask,
+  syncTrackedViewNote,
+  taskMove,
+  taskStatus,
+  type BoundTaskView,
+  type StartTaskArgs,
+  type StartTaskResult,
+  type TaskMoveArgs,
+  type TaskMoveView,
+  type TaskView,
+  type WithLock,
+} from '../core/tracker/runtime.js';
 import { validateFlow } from '../core/validate.js';
 import { resolveVars } from '../core/vars.js';
 import type {
@@ -54,6 +69,12 @@ export interface ToolContext {
   commandPrefix?: CommandPrefix | undefined;
   /** How to run the dfl CLI in this project (dflLauncher). Default: computed from the project. */
   cli?: string | undefined;
+  /**
+   * Runs the Jira writes of a tracked flow under the project lock. The server passes a pass-through
+   * for tools it already runs under the lock (it is not re-entrant) and the real lock for start_task,
+   * whose git work and reads run outside it. Default: takes the project lock.
+   */
+  withLock?: WithLock | undefined;
 }
 
 /** `$` for Codex clients (their skills have no slash commands), `/` for everything else. */
@@ -128,6 +149,10 @@ export interface FlowView {
   steps: StepSummary[];
   vars: Array<{ name: string; description: string; scope: VarScope; required: boolean; hasValue: boolean }>;
   skills: SkillsStatus;
+  /** Set when the flow is tracked in Jira: `current` is then the local position of this checkout, not a task's. */
+  tracked?: true;
+  /** Set with `tracked`: the ticket of the current branch, and that get_status has the task's step. */
+  note?: string;
   /** Set when the flow is not a valid state machine: why, and how to repair it. */
   problem?: string;
   /** The validation errors of a broken flow (same as validate_flow). */
@@ -185,6 +210,31 @@ export interface TransitionOutcome {
   next: { id: string; title: string; command: string | null };
   /** Set when the stored step no longer existed and the flow was reset to its initial step first. */
   repaired?: string;
+}
+
+/** `task` of a result when the call named a ticket but the flow is not tracked in Jira. */
+export interface UntrackedTaskNote {
+  tracked: false;
+  message: string;
+}
+
+/** `get_status`: StatusView plus, for a flow tracked in Jira, its task (absent otherwise unless a ticket was passed). */
+export interface StatusToolResult extends StatusView {
+  task?: TaskView | UntrackedTaskNote;
+}
+
+/** `transition`, `complete_step`, `goto_step`. */
+export interface TransitionToolResult extends TransitionOutcome {
+  /** Tracked flows: the ticket's status before and after the move, the task params and warnings. */
+  task?: TaskMoveView | UntrackedTaskNote;
+  /** The same move had already been made by this server (a retried call): nothing was written again. */
+  replayed?: true;
+}
+
+/** `start_task`: the status of the started (or resumed) task and its branch. */
+export interface StartTaskToolResult extends StatusView {
+  task: BoundTaskView;
+  branch: StartTaskResult['branch'];
 }
 
 /** Compact SyncReport for mutating tool results. */
@@ -260,6 +310,7 @@ export function describeFlow(paths: ProjectPaths, flow?: string, ctx: ToolContex
       hasValue: !isEmptyValue(values[name]),
     })),
     skills: skillsStatus(paths, model.name, cli),
+    ...trackedFlowNote(paths, model, cli),
     ...(broken ?? {}),
   };
 }
@@ -282,12 +333,36 @@ export function listFlowsInfo(paths: ProjectPaths): FlowList {
   return { active: getActiveFlowName(paths) ?? null, flows };
 }
 
-/** `get_status` */
+/** `get_status` of an untracked flow (the local position in `.df/state.json`). */
 export function describeStatus(paths: ProjectPaths, flow?: string, ctx: ToolContext = {}): StatusView {
+  const model = loadToolFlow(paths, flow);
+  return statusView(paths, model, loadRuntimeState(paths, model), ctx);
+}
+
+/**
+ * `get_status`: for a flow tracked in Jira, the position of its task and the ticket (`task`, with
+ * `instructions` for the agent; see core/tracker/runtime.ts taskStatus); otherwise describeStatus.
+ * A `task` passed for an untracked flow is not used, and the result says so.
+ */
+export async function statusTool(
+  paths: ProjectPaths,
+  args: { flow?: string | undefined; task?: string | undefined },
+  ctx: ToolContext = {},
+): Promise<StatusToolResult> {
+  const model = loadToolFlow(paths, args.flow);
+  if (isTracked(paths, model.name)) {
+    const tracked = await taskStatus(paths, model, { task: args.task }, { commandPrefix: ctx.commandPrefix });
+    // Undefined: no ticket bound and the flow does not require one (the local position applies).
+    if (tracked) return { ...statusView(paths, model, tracked.state, ctx), task: localizeTask(tracked.task, ctx.cli ?? cliFor(paths)) };
+    return statusView(paths, model, loadRuntimeState(paths, model), ctx);
+  }
+  return { ...statusView(paths, model, loadRuntimeState(paths, model), ctx), ...untrackedTaskNote(model, args.task) };
+}
+
+/** StatusView of `state` (local or a task's). */
+function statusView(paths: ProjectPaths, model: FlowModel, state: FlowRuntimeState, ctx: ToolContext): StatusView {
   const cli = ctx.cli ?? cliFor(paths);
   const prefix = ctx.commandPrefix ?? '/';
-  const model = loadToolFlow(paths, flow);
-  const state: FlowRuntimeState = loadRuntimeState(paths, model);
   const step = getStep(model, state.current);
   return {
     flow: model.name,
@@ -397,21 +472,19 @@ export function skillsStatus(paths: ProjectPaths, flowName: string, cli: string 
 // Runtime tools
 // ---------------------------------------------------------------------------
 
-/** `transition` */
+/** `transition` of an untracked flow. */
 export function fireEvent(
   paths: ProjectPaths,
   args: { event?: string | undefined; from?: string | undefined; flow?: string | undefined },
   ctx: ToolContext = {},
 ): TransitionOutcome {
-  const model = loadToolFlow(paths, args.flow);
-  const repaired = repairedState(paths, model);
-  return transitionOutcome(model, sendEvent(paths, model, args.event ?? NEXT_EVENT, { from: args.from }), ctx, repaired);
+  return localEvent(paths, loadToolFlow(paths, args.flow), args.event, args.from, ctx);
 }
 
 /**
- * `complete_step` – fails with `NOT_CURRENT` unless `step` is the current step. When the step is
- * unknown or not current and the installed skills are out of date (a stale skill after a pull or a
- * flow switch), the hint says so.
+ * `complete_step` of an untracked flow – fails with `NOT_CURRENT` unless `step` is the current step.
+ * When the step is unknown or not current and the installed skills are out of date (a stale skill
+ * after a pull or a flow switch), the hint says so.
  */
 export function completeStep(
   paths: ProjectPaths,
@@ -421,28 +494,79 @@ export function completeStep(
   const model = loadToolFlow(paths, args.flow);
   try {
     getStep(model, args.step);
-    const repaired = repairedState(paths, model);
-    return transitionOutcome(model, sendEvent(paths, model, args.event ?? NEXT_EVENT, { from: args.step }), ctx, repaired);
+    return localEvent(paths, model, args.event, args.step, ctx);
   } catch (error) {
-    if (isDflError(error) && (error.code === 'STEP_NOT_FOUND' || error.code === 'NOT_CURRENT')) {
-      const skills = skillsStatus(paths, model.name, ctx.cli ?? cliFor(paths));
-      if (skills.installed && !skills.upToDate && skills.warning) {
-        throw new DflError(error.message, {
-          hint: [error.hint, `The skill you ran may be stale. ${skills.warning}`].filter(Boolean).join(' '),
-          code: error.code,
-          cause: error,
-        });
-      }
-    }
-    throw error;
+    throw withStaleSkillHint(paths, model, ctx, error);
   }
 }
 
-/** `goto_step` */
+/** `goto_step` of an untracked flow. */
 export function jumpToStep(paths: ProjectPaths, args: { step: string; flow?: string | undefined }, ctx: ToolContext = {}): TransitionOutcome {
+  return localGoto(paths, loadToolFlow(paths, args.flow), args.step, ctx);
+}
+
+/** Arguments the runtime tools take for flows tracked in Jira (ignored for untracked flows). */
+export interface TaskToolArgs {
+  /** Ticket key (else the key in the current branch name). */
+  task?: string | undefined;
+  /** Task params to set (`null` deletes one). */
+  params?: Record<string, string | null> | undefined;
+}
+
+/**
+ * `transition`: for a flow tracked in Jira, moves its task (core/tracker/runtime.ts taskMove; `from`
+ * is required there, `TASK_FROM_REQUIRED`); otherwise fireEvent.
+ */
+export async function transitionTool(
+  paths: ProjectPaths,
+  args: { event?: string | undefined; from?: string | undefined; flow?: string | undefined } & TaskToolArgs,
+  ctx: ToolContext = {},
+): Promise<TransitionToolResult> {
   const model = loadToolFlow(paths, args.flow);
-  const repaired = repairedState(paths, model);
-  return transitionOutcome(model, gotoStep(paths, model, args.step), ctx, repaired);
+  const moved = await trackedMove(paths, model, { kind: 'event', event: args.event, from: args.from, task: args.task, params: args.params }, ctx);
+  return moved ?? { ...localEvent(paths, model, args.event, args.from, ctx), ...untrackedTaskNote(model, args.task) };
+}
+
+/** `complete_step`: for a flow tracked in Jira, moves its task from `step`; otherwise completeStep. */
+export async function completeStepTool(
+  paths: ProjectPaths,
+  args: { step: string; event?: string | undefined; flow?: string | undefined } & TaskToolArgs,
+  ctx: ToolContext = {},
+): Promise<TransitionToolResult> {
+  const model = loadToolFlow(paths, args.flow);
+  try {
+    getStep(model, args.step);
+    const moved = await trackedMove(paths, model, { kind: 'event', event: args.event, from: args.step, task: args.task, params: args.params }, ctx);
+    return moved ?? { ...localEvent(paths, model, args.event, args.step, ctx), ...untrackedTaskNote(model, args.task) };
+  } catch (error) {
+    throw withStaleSkillHint(paths, model, ctx, error);
+  }
+}
+
+/** `goto_step`: for a flow tracked in Jira, moves its task (and repairs an unusable record); otherwise jumpToStep. */
+export async function gotoStepTool(
+  paths: ProjectPaths,
+  args: { step: string; flow?: string | undefined } & TaskToolArgs,
+  ctx: ToolContext = {},
+): Promise<TransitionToolResult> {
+  const model = loadToolFlow(paths, args.flow);
+  const moved = await trackedMove(paths, model, { kind: 'goto', step: args.step, task: args.task, params: args.params }, ctx);
+  return moved ?? { ...localGoto(paths, model, args.step, ctx), ...untrackedTaskNote(model, args.task) };
+}
+
+/**
+ * `start_task`: binds a Jira ticket to a git branch (creating the branch when needed), records the
+ * task at its first step and moves the ticket to the mapped status (core/tracker/runtime.ts
+ * startTask). Returns the task's status (like get_status) and its branch.
+ */
+export async function startTaskTool(paths: ProjectPaths, args: StartTaskArgs, ctx: ToolContext = {}): Promise<StartTaskToolResult> {
+  const started = await startTask(paths, args, { withLock: lockFor(paths, ctx), commandPrefix: ctx.commandPrefix });
+  const model = loadFlow(paths, started.state.flow);
+  return {
+    ...statusView(paths, model, started.state, ctx),
+    task: localizeTask(started.task, ctx.cli ?? cliFor(paths)),
+    branch: started.branch,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +739,19 @@ function mcpHintFor(error: DflError): string | undefined {
       return 'Over MCP: call goto_step to jump to a step.';
     case 'EVENT_NOT_ALLOWED':
       return error.hint?.includes('goto') ? 'Over MCP: call goto_step.' : undefined;
+    case 'TASK_REQUIRED':
+    case 'TASK_NOT_STARTED':
+      return 'Over MCP: call start_task with the ticket the user names.';
+    case 'TASK_STEP_UNKNOWN':
+    case 'TASK_RECORD_INVALID':
+      return 'Over MCP: call goto_step with task and the right step.';
+    case 'TASK_DONE':
+      return 'Over MCP: call goto_step with task and the step to restart at, if the user asks to.';
+    case 'TRACKER_AUTH_MISSING':
+    case 'TRACKER_AUTH':
+    case 'TRACKER_CREDENTIALS_INVALID':
+      // Logging in needs the user's token: no tool can do it, and it must not go through the chat.
+      return 'No dfl tool can do this: ask the user to do it themselves.';
     default:
       return undefined;
   }
@@ -689,6 +826,79 @@ function transitionOutcome(model: FlowModel, result: TransitionResult, ctx: Tool
       command: next ? commandFor(next, ctx.commandPrefix ?? '/') : null,
     },
     ...(repaired !== undefined ? { repaired } : {}),
+  };
+}
+
+/** Fires `event` (default NEXT) on the local state of an untracked flow. */
+function localEvent(paths: ProjectPaths, model: FlowModel, event: string | undefined, from: string | undefined, ctx: ToolContext): TransitionOutcome {
+  const repaired = repairedState(paths, model);
+  return transitionOutcome(model, sendEvent(paths, model, event ?? NEXT_EVENT, { from }), ctx, repaired);
+}
+
+/** Jumps the local state of an untracked flow to `step`. */
+function localGoto(paths: ProjectPaths, model: FlowModel, step: string, ctx: ToolContext): TransitionOutcome {
+  const repaired = repairedState(paths, model);
+  return transitionOutcome(model, gotoStep(paths, model, step), ctx, repaired);
+}
+
+/**
+ * `error` with a hint about stale skills when a completed step is unknown or not current and the
+ * installed skills are out of date (a skill of a renamed step after a pull, of the previous flow).
+ */
+function withStaleSkillHint(paths: ProjectPaths, model: FlowModel, ctx: ToolContext, error: unknown): unknown {
+  if (!isDflError(error) || (error.code !== 'STEP_NOT_FOUND' && error.code !== 'NOT_CURRENT')) return error;
+  const skills = skillsStatus(paths, model.name, ctx.cli ?? cliFor(paths));
+  if (!skills.installed || skills.upToDate || !skills.warning) return error;
+  return new DflError(error.message, {
+    hint: [error.hint, `The skill you ran may be stale. ${skills.warning}`].filter(Boolean).join(' '),
+    code: error.code,
+    cause: error,
+  });
+}
+
+/**
+ * Moves the task of a flow tracked in Jira. Undefined when the flow is not tracked, or no ticket is
+ * bound and the flow does not require one: the caller then moves the local state.
+ */
+async function trackedMove(paths: ProjectPaths, model: FlowModel, args: TaskMoveArgs, ctx: ToolContext): Promise<TransitionToolResult | undefined> {
+  if (!isTracked(paths, model.name)) return undefined;
+  const moved = await taskMove(paths, model, args, { withLock: lockFor(paths, ctx), commandPrefix: ctx.commandPrefix });
+  if (!moved) return undefined;
+  const cli = ctx.cli ?? cliFor(paths);
+  return {
+    ...transitionOutcome(model, moved.result, ctx),
+    task: { ...moved.task, warnings: moved.task.warnings.map((warning) => localizeCli(warning, cli)) },
+    ...(moved.replayed ? { replayed: true as const } : {}),
+  };
+}
+
+/** The lock for tracker writes: the server's (see ToolContext.withLock), else the project lock. */
+function lockFor(paths: ProjectPaths, ctx: ToolContext): WithLock {
+  return ctx.withLock ?? (<T>(fn: () => Promise<T>): Promise<T> => withProjectLock(paths, fn));
+}
+
+/** `{ task: … }` saying that a ticket passed for an untracked flow was not used; `{}` when none was passed. */
+function untrackedTaskNote(model: FlowModel, task: string | undefined): { task?: UntrackedTaskNote } {
+  if (task === undefined || task.trim() === '') return {};
+  return { task: { tracked: false, message: `No tracker is configured for flow "${model.name}"; the ticket was not used.` } };
+}
+
+/** A task view with the CLI commands of its warnings and instructions spelled the way this project runs dfl. */
+function localizeTask<T extends { warnings: string[]; instructions: string }>(task: T, cli: string): T {
+  return { ...task, warnings: task.warnings.map((warning) => localizeCli(warning, cli)), instructions: localizeCli(task.instructions, cli) };
+}
+
+/**
+ * get_flow of a flow tracked in Jira: `current` is the local position (`.df/state.json`), not the
+ * task's, so the view says where the task's step is. No network; `{}` for untracked flows.
+ */
+function trackedFlowNote(paths: ProjectPaths, model: FlowModel, cli: string): { tracked?: true; note?: string } {
+  const view = syncTrackedViewNote(paths, model);
+  if (!view) return {};
+  const where = `"current" is the local position of this checkout, not the task's: call get_status for the task's step.`;
+  return {
+    tracked: true,
+    note: view.key !== undefined ? `Tracked in Jira (${view.key}): ${where}` : `${capitalize(localizeCli(view.note, cli))}. ${where}`,
   };
 }
 

@@ -2,17 +2,22 @@ import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadFlow, writeFlowDefinition } from '../src/core/flow.js';
 import {
+  HISTORY_LIMIT,
   availableEvents,
   createFlowMachine,
   gotoStep,
   loadRuntimeState,
   moveCurrentInRuntime,
+  planEvent,
+  planGoto,
+  planReset,
   renameStateInRuntime,
   resetFlow,
+  runtimeFromStored,
   saveRuntimeState,
   sendEvent,
 } from '../src/core/machine.js';
-import type { FlowModel, ProjectPaths, StateFile } from '../src/core/types.js';
+import type { FlowModel, FlowRuntimeState, HistoryEntry, ProjectPaths, StateFile, TransitionResult } from '../src/core/types.js';
 import { cleanupTempDirs, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
 afterEach(cleanupTempDirs);
@@ -229,5 +234,82 @@ describe('moveCurrentInRuntime', () => {
     expect(moveCurrentInRuntime(paths, 'sample', 'build', 'plan')).toBe(false);
     expect(fs.readFileSync(paths.stateFile, 'utf8')).toBe('{ not json');
     expect(before).toContain('"current": "build"');
+  });
+});
+
+describe('pure planners', () => {
+  /** A result with every timestamp replaced, to compare a planned and a persisted outcome. */
+  const normalize = (result: TransitionResult): TransitionResult => ({
+    ...result,
+    state: { ...result.state, updatedAt: 'T', history: result.state.history.map((h) => ({ ...h, at: 'T' })) },
+  });
+  const entry = (from: string, to: string, event: string): HistoryEntry => ({ from, to, event, at: '2026-09-30T10:00:00.000Z' });
+
+  it('runtimeFromStored builds the state without I/O and repairs an unknown step', () => {
+    const { paths, model } = setup();
+    const initial = runtimeFromStored(model, undefined);
+    expect(initial).toMatchObject({ flow: 'sample', current: 'plan', done: false, history: [] });
+    expect(initial.repaired).toBeUndefined();
+
+    const history = [entry('plan', 'review', 'GOTO'), entry('review', 'done', 'NEXT')];
+    const stored = { current: 'done', history, updatedAt: '2026-09-30T10:00:00.000Z' };
+    const state = runtimeFromStored(model, stored);
+    expect(state).toEqual({ flow: 'sample', current: 'done', done: true, history, updatedAt: '2026-09-30T10:00:00.000Z' });
+    expect(state.history).not.toBe(history);
+
+    const repaired = runtimeFromStored(model, { ...stored, current: 'gone' });
+    expect(repaired).toMatchObject({ current: 'plan', done: false, history, updatedAt: '2026-09-30T10:00:00.000Z' });
+    expect(repaired.repaired).toBe('Step "gone" no longer exists in flow "sample"; falling back to the initial step "plan".');
+    expect(fs.existsSync(paths.stateFile)).toBe(false);
+
+    // loadRuntimeState is runtimeFromStored over the state.json entry.
+    gotoStep(paths, model, 'review');
+    expect(loadRuntimeState(paths, model)).toEqual(runtimeFromStored(model, readState(paths).flows['sample']));
+  });
+
+  it('plan the same outcome as sendEvent / gotoStep / resetFlow without writing anything', () => {
+    const { paths, model } = setup();
+    const steps: Array<[(state: FlowRuntimeState) => TransitionResult, () => TransitionResult]> = [
+      [(state) => planEvent(model, state), () => sendEvent(paths, model)],
+      [(state) => planEvent(model, state, 'BACK', { from: 'build' }), () => sendEvent(paths, model, 'BACK', { from: 'build' })],
+      [(state) => planGoto(model, state, 'review'), () => gotoStep(paths, model, 'review')],
+      [(state) => planEvent(model, state, 'CHANGES_REQUESTED'), () => sendEvent(paths, model, 'CHANGES_REQUESTED')],
+      [(state) => planGoto(model, state, 'done'), () => gotoStep(paths, model, 'done')],
+      [(state) => planReset(model, state), () => ({ ...planReset(model, loadRuntimeState(paths, model)), state: resetFlow(paths, model) })],
+    ];
+    for (const [plan, apply] of steps) {
+      const before = fs.existsSync(paths.stateFile) ? fs.readFileSync(paths.stateFile, 'utf8') : undefined;
+      const state = loadRuntimeState(paths, model);
+      const snapshot = structuredClone(state);
+      const planned = plan(state);
+      expect(state).toEqual(snapshot); // the input state is not mutated
+      expect(fs.existsSync(paths.stateFile) ? fs.readFileSync(paths.stateFile, 'utf8') : undefined).toBe(before);
+      expect(planned.state.updatedAt).toBe(planned.state.history.at(-1)!.at);
+      expect(normalize(planned)).toEqual(normalize(apply()));
+    }
+    expect(loadRuntimeState(paths, model).history.map((h) => h.event)).toEqual(['NEXT', 'BACK', 'GOTO', 'CHANGES_REQUESTED', 'GOTO', 'RESET']);
+  });
+
+  it('throw the same errors as the persisting functions', () => {
+    const { model } = setup();
+    const start = runtimeFromStored(model, undefined);
+    expectDflError(() => planEvent(model, start, 'APPROVE'), 'EVENT_NOT_ALLOWED');
+    expectDflError(() => planEvent(model, start, 'NEXT', { from: 'build' }), 'NOT_CURRENT');
+    expectDflError(() => planEvent(model, start, 'NEXT', { from: 'missing' }), 'STEP_NOT_FOUND');
+    expectDflError(() => planGoto(model, start, 'nope'), 'STEP_NOT_FOUND');
+    const done = planGoto(model, start, 'done').state;
+    expect(done.done).toBe(true);
+    expectDflError(() => planEvent(model, done), 'FLOW_DONE');
+    expect(planReset(model, done)).toMatchObject({ from: 'done', to: 'plan', event: 'RESET', done: false });
+  });
+
+  it('cap the history', () => {
+    const { model } = setup();
+    const history = Array.from({ length: HISTORY_LIMIT }, (_, i) => entry('plan', 'plan', `E${i}`));
+    const state = runtimeFromStored(model, { current: 'plan', history, updatedAt: '2026-09-30T10:00:00.000Z' });
+    const next = planEvent(model, state).state;
+    expect(next.history).toHaveLength(HISTORY_LIMIT);
+    expect(next.history[0]!.event).toBe('E1');
+    expect(next.history.at(-1)).toMatchObject({ from: 'plan', to: 'build', event: 'NEXT' });
   });
 });

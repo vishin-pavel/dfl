@@ -69,6 +69,45 @@ MCP settings.
   "mcp"] }` (the agent must start the server in the project root). Native Windows is not covered
   by CI; WSL behaves like Linux.
 
+## Flows tracked in Jira: credentials and network
+
+When `.df/tracker.json` tracks a flow, the `dfl` MCP server itself calls the Jira REST API (in
+`get_status`, `complete_step`, `transition`, `goto_step` and `start_task`); the agent needs no Jira
+MCP server. What that means for the agents:
+
+- **No token in MCP configs.** The committed `dfl` entry is the same for the whole team and never
+  carries a credential (dfl also replaces fields added to it by hand). The server reads the token
+  from the user-level file that `dfl tracker login` writes: `~/.config/dfl/credentials.json`
+  (`%APPDATA%\dfl\credentials.json` on Windows), mode 0600, one entry per Jira site. dfl looks there
+  and not in environment variables or `XDG_CONFIG_HOME` because agents start MCP servers with a
+  reduced environment: Codex passes only a restricted set of variables, Gemini CLI redacts variables
+  whose names look like secrets (`*TOKEN*`), and IDEs started from the macOS GUI have no shell
+  profile. One `dfl tracker login` therefore works for the CLI and every agent.
+- **Environment overrides** (`DFL_CONFIG_DIR`, and `DFL_JIRA_URL` + `DFL_JIRA_EMAIL` +
+  `DFL_JIRA_TOKEN`, used only for the configured site) reach the server only when the agent passes
+  them on; they are meant for CI and headless runs (`claude -p`, `codex exec`), where the
+  environment is under your control.
+- **Agents never handle tokens.** When the credential is missing or rejected, the tool error's hint
+  says that no dfl tool can fix it and that the agent must ask the user to run `dfl tracker login`
+  in their own terminal; the built-in `/init-task` skill says never to ask for a token in the
+  conversation. Results, logs and errors never contain a token.
+- **Network access.** The server needs HTTPS access to the Jira site. Agents that sandbox MCP
+  servers or restrict their network must allow it for `dfl`. Behind a proxy, `HTTPS_PROXY` and
+  `NODE_USE_ENV_PROXY=1` (plus `NODE_EXTRA_CA_CERTS` for a proxy that re-signs TLS) must be in the
+  environment the agent starts the server with. A tracked step cannot be completed while Jira is
+  unreachable (`TRACKER_UNREACHABLE`).
+- **Annotations.** `start_task` and the move tools are non-destructive writes marked
+  `openWorldHint: true` (they reach Jira), and `get_status` is read-only and open-world; clients that
+  ask before every MCP call (Devin) ask for these too.
+- **Starting a ticket.** `/init-task ABC-123` (`$init-task ABC-123` in Codex; `get_status`'s
+  `task.instructions` and the `TASK_REQUIRED` / `TASK_NOT_STARTED` hints use `$init-task` for Codex
+  clients). In Kiro and Copilot chat `#` opens a picker, and in a shell `#123` is a comment: type
+  `ABC-123` or `123`.
+- **Skills.** `/init-task` is installed only in projects with `.df/tracker.json`. After pulling a
+  newly committed `tracker.json`, run `dfl flow-update` (dfl reports the skills as out of date);
+  the per-tool notes below say when each agent picks up a new skill (live, `/skills reload`, or a
+  new session).
+
 ## Detection (`dfl agents`, install pre-selection)
 
 `AGENTS.md`, `.agents/skills/` and `.mcp.json` are shared by several tools and are

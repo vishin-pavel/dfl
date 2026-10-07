@@ -52,7 +52,8 @@ fallbacks at the end.
      as the reason to fire it). Every event other than `NEXT` should have one; when you
      retarget an event, check that its condition still fits.
    - **Id**: a rename changes the slash command, the directory and every transition that
-     targets the step; the current position in the flow is kept.
+     targets the step; the current position in the flow is kept, and so is the step's Jira status
+     mapping in a flow tracked in Jira (dfl renames it in `.df/tracker.json`).
    - **Position**: when a step runs is set by the `NEXT` transitions, so moving a step means
      rewiring (see below); where it is listed and numbered ("step 3 of 6") is the order of the
      states in flow.json.
@@ -126,6 +127,7 @@ and `sync`.
 | `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` (or `{{dfl.cli}} step edit <id> --template-file <file>`) |
 | `update_step` initial | `{{dfl.cli}} step edit <id> --initial` |
 | `validate_flow` | `{{dfl.cli}} flow validate` |
+| `start_task` (flows tracked in Jira) | `{{dfl.cli}} task start <ticket>` |
 
 ## Pitfalls
 

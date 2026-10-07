@@ -556,7 +556,8 @@ const INVALID_MANIFEST_HINT = 'Delete the file and run `dfl install` again (dfl 
 /**
  * sha256 over everything the installed skills are rendered from: dfl version, active flow name, every
  * file under `.df/<flow>/` except rendered `.md` outputs (path + content), the stored vars (defaults,
- * config.json, local.json), selected agents, the MCP preference, the dfl CLI launcher and the project root.
+ * config.json, local.json), selected agents, the MCP preference, the dfl CLI launcher, the project root
+ * and whether `.df/tracker.json` exists (it adds the built-in `init-task` skill, see renderBuiltinSkills).
  *
  * Process-environment overrides (`DFL_VAR_*`, `DFL_ENV_*`) are left out on purpose: they belong to one
  * shell, so an MCP server or a terminal started without them must not report the skills as stale (and
@@ -582,6 +583,7 @@ export function computeSyncFingerprint(paths: ProjectPaths): string {
   field('mcp', String(getMcpEnabled(paths)));
   field('cli', dflLauncher(paths));
   field('root', realpathOrSelf(paths.root));
+  field('tracker', exists(paths.trackerFile) ? '1' : '0');
   return hash.digest('hex');
 }
 
@@ -641,7 +643,7 @@ export function checkSyncState(paths: ProjectPaths): SyncState {
     return {
       installed: true,
       upToDate: false,
-      reason: `the flow "${active}" (templates, flow.json), variables or install settings changed since the skills were installed`,
+      reason: `the flow "${active}" (templates, flow.json), variables, install settings or the presence of .df/tracker.json changed since the skills were installed`,
     };
   }
   const skipped = manifest.skippedDirs ?? [];

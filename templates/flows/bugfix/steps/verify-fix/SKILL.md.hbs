@@ -8,8 +8,8 @@ to shipping (`NEXT`) or back to fixing (`FAILED`).
 
 - The fix commits on `{{vars.fixBranchPrefix}}<slug>`, including the reproduction test.
 - The `## Reproduction` (manual steps) and `## Diagnosis` (blast radius) sections of
-  `{{vars.bugNotesDir}}/<slug>.md`; the slug is the current branch name without the
-  `{{vars.fixBranchPrefix}}` prefix.
+  `{{vars.bugNotesDir}}/<slug>.md`; the slug is `task.params.slug` when `get_status` returned a
+  task, else the current branch name without the `{{vars.fixBranchPrefix}}` prefix.
 - Anything extra to check from the text the user typed after the command.
 
 ## Procedure

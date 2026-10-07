@@ -39,8 +39,9 @@ export function lstatOrUndefined(p: string): fs.Stats | undefined {
   }
 }
 
-export function ensureDir(p: string): void {
-  fs.mkdirSync(p, { recursive: true });
+/** `mkdir -p`. `mode` applies to the directories it creates (minus the umask); existing ones keep theirs. */
+export function ensureDir(p: string, mode?: number): void {
+  fs.mkdirSync(p, mode === undefined ? { recursive: true } : { recursive: true, mode });
 }
 
 export function readText(p: string): string {
@@ -64,14 +65,28 @@ export interface WriteOptions {
    * A dangling link is always replaced.
    */
   followSymlink?: boolean | undefined;
+  /**
+   * Permission bits of a newly created file (default: 0666 minus the umask). An existing file keeps
+   * its own bits unless `forceMode` is set. Applied exactly (the umask does not apply).
+   */
+  mode?: number | undefined;
+  /**
+   * Apply `mode` to an existing file too – also when the content is unchanged (only the bits are
+   * then changed). For files that must stay private whatever happened to them (credentials).
+   */
+  forceMode?: boolean | undefined;
+  /** Mode of the parent directories created for the file (minus the umask); existing ones are not changed. */
+  dirMode?: number | undefined;
 }
 
 /**
  * Writes a text file atomically (temp file + rename), creating parent dirs.
- * Returns false (and does not touch the file) when the content is unchanged.
+ * Returns false (and does not touch the file) when the content is unchanged (and, with
+ * `forceMode`, so is the mode).
  *
  * - An existing file keeps its permission bits (and, when possible, its owner); the temp file
- *   is created 0600 so restrictive content is never readable in between.
+ *   is created 0600 so restrictive content is never readable in between. `mode` sets the bits of
+ *   a new file, and with `forceMode` of an existing one (see {@link WriteOptions}).
  * - A symlink at `p` is replaced by a regular file (the link target is never written), unless
  *   `followSymlink` is set (see {@link WriteOptions}).
  * - Throws DflError `NOT_A_FILE` when `p` is a directory or another non-regular file.
@@ -92,9 +107,14 @@ export function writeText(p: string, content: string, options: WriteOptions = {}
   if (st && !st.isFile()) {
     throw new DflError(`Cannot write ${p}: it is not a regular file.`, { code: 'NOT_A_FILE' });
   }
-  if (st && fs.readFileSync(target, 'utf8') === content) return false;
-  ensureDir(path.dirname(target));
-  atomicWrite(target, content, st);
+  const forced = options.forceMode && options.mode !== undefined ? options.mode & 0o7777 : undefined;
+  if (st && fs.readFileSync(target, 'utf8') === content) {
+    if (forced === undefined || (st.mode & 0o7777) === forced) return false;
+    fs.chmodSync(target, forced);
+    return true;
+  }
+  ensureDir(path.dirname(target), options.dirMode);
+  atomicWrite(target, content, st, st ? forced : options.mode);
   return true;
 }
 
@@ -309,14 +329,16 @@ function realpathOrUndefined(p: string): string | undefined {
 
 /**
  * Writes `content` to a fresh temp file next to `target` (O_EXCL, 0600), applies the mode
- * (existing file's mode, `mode`, or the umask default) and owner, then renames it over `target`.
+ * (`mode`, else the existing file's mode, else the umask default) and the existing file's owner,
+ * then renames it over `target`.
  */
 function atomicWrite(target: string, content: string | Buffer, existing: fs.Stats | undefined, mode?: number): void {
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  const finalMode = mode ?? (existing ? existing.mode & 0o7777 : undefined);
   try {
-    fs.writeFileSync(tmp, content, { flag: 'wx', mode: existing || mode !== undefined ? 0o600 : 0o666 });
+    fs.writeFileSync(tmp, content, { flag: 'wx', mode: finalMode !== undefined ? 0o600 : 0o666 });
+    if (finalMode !== undefined) fs.chmodSync(tmp, finalMode);
     if (existing) {
-      fs.chmodSync(tmp, existing.mode & 0o7777);
       const uid = process.getuid?.();
       const gid = process.getgid?.();
       if ((uid !== undefined && existing.uid !== uid) || (gid !== undefined && existing.gid !== gid)) {
@@ -326,8 +348,6 @@ function atomicWrite(target: string, content: string | Buffer, existing: fs.Stat
           // not permitted: keep our own ownership
         }
       }
-    } else if (mode !== undefined) {
-      fs.chmodSync(tmp, mode);
     }
     fs.renameSync(tmp, target);
   } catch (error) {

@@ -1224,6 +1224,56 @@ describe('staleness (C0, D7, D8)', () => {
     write(paths, '.df/local.json', JSON.stringify({ vars: local['vars'], agents: ['claude', 'cursor'], version: 1 }));
     expect(computeSyncFingerprint(paths)).toBe(fingerprint);
   });
+
+  it('installs the built-in init-task skill only while .df/tracker.json exists, and the file makes the skills stale', async () => {
+    const paths = sampleProject();
+    const first = await syncProject(paths, { agents: ['claude'] });
+    expect(first.skills.map((skill) => skill.name)).not.toContain('init-task');
+    expect(has(paths, '.claude/skills/init-task')).toBe(false);
+    const fingerprint = computeSyncFingerprint(paths);
+
+    // Existence is what counts: the file is not parsed by the sync.
+    write(paths, '.df/tracker.json', '{}\n');
+    expect(computeSyncFingerprint(paths)).not.toBe(fingerprint);
+    expect(checkSyncState(paths).upToDate).toBe(false);
+    const tracked = await syncProject(paths);
+    expect(tracked.skills).toContainEqual({ name: 'init-task', dir: '.claude/skills/init-task', agents: ['claude'], kind: 'builtin' });
+    const skill = splitSkill(read(paths, '.claude/skills/init-task/SKILL.md'));
+    expect(skill.data['metadata']).toEqual({ 'dfl-builtin': 'true' });
+    expect(skill.body).toContain('`start_task`');
+    expect(hasMarker(paths, '.claude/skills/init-task')).toBe(true);
+    expect(tracked.warnings.filter((w) => /init-task/.test(w))).toEqual([]);
+    expect(checkSyncState(paths)).toEqual({ installed: true, upToDate: true });
+
+    fs.rmSync(paths.trackerFile);
+    expect(computeSyncFingerprint(paths)).toBe(fingerprint);
+    expect(checkSyncState(paths).upToDate).toBe(false);
+    const untracked = await syncProject(paths);
+    expect(untracked.removed).toContain('.claude/skills/init-task');
+    expect(has(paths, '.claude/skills/init-task')).toBe(false);
+    expect(checkSyncState(paths)).toEqual({ installed: true, upToDate: true });
+  });
+
+  it('a flow step named init-task wins over the built-in init-task skill', async () => {
+    const paths = makeTempProject();
+    const def = sampleFlowDefinition();
+    def.machine.initial = 'init-task';
+    def.machine.states = {
+      'init-task': { description: 'Start the ticket', meta: { title: 'Init task' }, on: { NEXT: 'plan' } },
+      ...def.machine.states,
+    };
+    writeSampleFlow(paths, def);
+    setVar(paths, 'reviewer', 'octocat', 'personal');
+    write(paths, '.df/tracker.json', '{}\n');
+    const report = await syncProject(paths, { agents: ['claude'] });
+    expect(report.skills.filter((skill) => skill.name === 'init-task')).toEqual([
+      { name: 'init-task', dir: '.claude/skills/init-task', agents: ['claude'], kind: 'step' },
+    ]);
+    expect(splitSkill(read(paths, '.claude/skills/init-task/SKILL.md')).data['metadata']).toEqual({
+      'dfl-flow': 'sample',
+      'dfl-step': 'init-task',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

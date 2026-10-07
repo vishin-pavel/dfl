@@ -57,14 +57,18 @@ bug, its root cause and how the fix was verified, so reviewers can check the rea
    No default reviewer is configured, so ask the user whom to request. They can set a personal
    default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.
 {{/if}}
+   When you call `complete_step` in this step, pass `{"prUrl": "<pull request URL>"}` in
+   `params` (CLI: `--set prUrl=<url>`).
 6. **Watch CI** (`gh pr checks --watch` when available). Pipeline-only problems can be fixed
    here; failing tests or requested code changes go back with `CHANGES_REQUESTED`, so the change
    is fixed and verified again before it returns here.
 7. **Merge** when checks are green, the review is approved and the user asks you to, using the
    repository's merge method.
-8. **After the merge**: `git switch {{vars.mainBranch}}`, `git pull`, and
-   `git branch -d {{vars.fixBranchPrefix}}<slug>`. Remind the user about backports, the data
-   repair run, closing the issue and informing the reporter, if any apply.
+8. **After the merge**, first complete this step (see "When done" below), then clean up:
+   `git switch {{vars.mainBranch}}`, `git pull`, and `git branch -d` the fix branch
+   (`{{vars.fixBranchPrefix}}<slug>`, or `task.branch` when `get_status` returned a task).
+   Remind the user about backports, the data repair run, closing the issue and informing the
+   reporter, if any apply.
 
 ## Outputs
 

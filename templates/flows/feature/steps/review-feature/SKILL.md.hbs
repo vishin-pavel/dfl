@@ -10,8 +10,9 @@ problems, scope creep and code that will be hard to maintain.
   `git diff origin/{{vars.mainBranch}}...HEAD` and the commit list
   `git log --oneline origin/{{vars.mainBranch}}..HEAD` (only this branch's commits, even when
   the local `{{vars.mainBranch}}` is out of date).
-- The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md` (slug from the branch
-  name `{{vars.featureBranchPrefix}}<slug>`).
+- The spec, plan and verification report in `{{vars.specsDir}}/<slug>.md` (slug from
+  `task.params.slug` when `get_status` returned a task, else from the branch name
+  `{{vars.featureBranchPrefix}}<slug>`).
 - Any focus areas mentioned in the text the user typed after the command.
 
 ## Procedure

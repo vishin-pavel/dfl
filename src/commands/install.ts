@@ -44,6 +44,7 @@ import {
   storeVarAnswers,
   syncWithDiff,
   templateUpdateLines,
+  trackedViewNote,
   warnRepairedState,
   type CliContext,
   type SyncRun,
@@ -244,7 +245,8 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
     agents.length > 0 && ready.length === 0
       ? c.yellow(`${sym.warn} No skills were installed for ${agentNames(agents)}: see the warning about the symbolic link.`)
       : nextLine(paths, model, ready.length > 0 ? ready : agents);
-  const repaired = loadRuntimeState(paths, model).repaired;
+  // A flow tracked in Jira does not use its local state: no repair warning about it.
+  const repaired = trackedViewNote(paths, model.name) ? undefined : loadRuntimeState(paths, model).repaired;
   const warnings = [...run.report.warnings, ...(repaired ? [repaired] : [])];
   const updates = templateUpdateLines(paths);
   if (updates.length > 0) lines.push('', ...updates);
@@ -393,6 +395,11 @@ function installSummary(
 }
 
 function nextLine(paths: ProjectPaths, model: FlowModel, agents: readonly AgentId[]): string {
+  // Tracked in Jira: the task's step lives there (the local position is stale).
+  const tracked = trackedViewNote(paths, model.name);
+  if (tracked?.key !== undefined) return `Next: run ${c.cyan('dfl status')} ${c.dim(`(flow "${model.name}" is tracked in Jira: ${tracked.key})`)}`;
+  if (tracked?.invalid) return `Next: ${tracked.note}`;
+  if (tracked) return `Next: start a ticket with ${c.cyan('dfl task start <ticket>')} ${c.dim(`(flow "${model.name}" is tracked in Jira; no ticket on this branch)`)}`;
   const state = loadRuntimeState(paths, model);
   const step = model.byId.get(state.done ? model.initial : state.current);
   if (!step || step.final) return `Next: run ${c.cyan('dfl status')}`;

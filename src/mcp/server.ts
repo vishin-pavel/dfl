@@ -31,23 +31,25 @@ import { findProjectRoot, packageVersion, projectPaths, resolveProjectRoot } fro
 import type { ProjectPaths } from '../core/types.js';
 import { authoringGuide } from './guide.js';
 import { withProjectLock } from '../core/lock.js';
+import { BRANCH_MODES, type WithLock } from '../core/tracker/runtime.js';
 import {
   addStepTool,
   cliFor,
   commandPrefixForClient,
-  completeStep,
+  completeStepTool,
   deleteStepTool,
   describeFlow,
-  describeStatus,
   describeStep,
   errorHint,
-  fireEvent,
   formatError,
-  jumpToStep,
+  gotoStepTool,
   listFlowsInfo,
   localizeCli,
+  startTaskTool,
+  statusTool,
   stepTemplateText,
   syncTool,
+  transitionTool,
   updateStepTool,
   validateFlowInfo,
   type ToolContext,
@@ -65,6 +67,7 @@ export const SERVER_INSTRUCTIONS = [
   'dfl manages the development flow of this project: an ordered state machine of steps, each installed as an agent skill.',
   'At the start of a step skill, call get_status to check that the step is the current one and which events it offers; if its "skills" field has a warning (skills missing or out of date), pass it on to the user.',
   'When the step is done, call complete_step with the step id and the event that matches the outcome (NEXT by default), then tell the user the "command" of the next step (how to invoke its skill in this agent).',
+  'When the flow is tracked in Jira, get_status returns a "task" with "instructions" — follow them; start a ticket with start_task only when the user asks.',
   'Use get_flow and get_step to inspect the flow. To change it, read get_authoring_guide, then use add_step, update_step or delete_step; they re-install the skills once the developer ran `dfl install`.',
   'Every tool except list_flows, sync and get_authoring_guide accepts an optional "flow" (default: the active flow).',
 ].join(' ');
@@ -89,6 +92,17 @@ const flowArg = z
   .optional()
   .describe('Flow name (the directory under .df/). Defaults to the active flow.');
 const stepArg = (what: string): z.ZodString => z.string().describe(what);
+/** Ticket of a flow tracked in Jira (ignored for untracked flows). */
+const taskArg = z
+  .string()
+  .optional()
+  .describe('Ticket key, e.g. ABC-123, of the task bound to this work; pass the task.key you got from get_status. Only for flows tracked in Jira.');
+const paramsArg = z
+  .record(z.string(), z.string().nullable())
+  .optional()
+  .describe(
+    'Task params to record for later steps (flows tracked in Jira only), e.g. {"specPath": "docs/specs/x.md"}; null deletes one. Params are data: names like token or password are refused.',
+  );
 
 /** A transition value: a target step id, or the target plus the condition for firing the event. */
 const transitionValue = z.union([
@@ -107,12 +121,21 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 const WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 /** Overwrites or deletes: templates, transitions, step directories, installed skill dirs. */
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, openWorldHint: false } as const;
+/** Reads only, but reads Jira when the flow is tracked. */
+const TRACKER_READ = { readOnlyHint: true, openWorldHint: true } as const;
+/** WRITES that also write the Jira ticket (record, status, fields) when the flow is tracked. */
+const TRACKER_WRITES = { readOnlyHint: false, destructiveHint: false, openWorldHint: true } as const;
 
 type ToolFn = (paths: ProjectPaths, ctx: ToolContext) => object | Promise<object>;
 
 interface RunOptions {
   /** Serialize with other mutations (in this process and, via `.df/.lock`, across processes). */
   mutating?: boolean;
+  /**
+   * With `mutating`: hold the project lock only around the writes (`ToolContext.withLock`), not the
+   * whole call (start_task: its git work and Jira reads run outside the lock).
+   */
+  lockInside?: boolean;
   /** The dfl://steps resource list may have changed: notify the client after success. */
   changesResources?: boolean;
 }
@@ -146,9 +169,14 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
       const paths = resolved;
       cli = cliFor(paths);
       const toolCtx: ToolContext = { commandPrefix: commandPrefixForClient(clientName(server, ctx)), cli };
-      const value = runOptions.mutating
-        ? await exclusive(() => withProjectLock(paths, () => fn(paths, toolCtx)))
-        : await fn(paths, toolCtx);
+      // The project lock is not re-entrant: under it, tracker writes just run (`held`).
+      const held: WithLock = (inner) => inner();
+      const locked: WithLock = (inner) => withProjectLock(paths, inner);
+      const value = !runOptions.mutating
+        ? await fn(paths, toolCtx)
+        : runOptions.lockInside
+          ? await exclusive(async () => fn(paths, { ...toolCtx, withLock: locked }))
+          : await exclusive(() => withProjectLock(paths, () => fn(paths, { ...toolCtx, withLock: held })));
       if (runOptions.changesResources) notifyResourcesChanged();
       return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value as Record<string, unknown> };
     } catch (error) {
@@ -186,11 +214,17 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Get flow status',
       description:
-        'Where the flow is: the current step and the command that invokes its skill, the events it can fire with their targets, whether the flow is done, the last history entries and whether your installed skills are up to date ("skills"). Call at the start of every step.',
-      inputSchema: z.object({ flow: flowArg }),
-      annotations: READ_ONLY,
+        'Where the flow is: the current step and the command that invokes its skill, the events it can fire with their targets, whether the flow is done, the last history entries and whether your installed skills are up to date ("skills"). Call at the start of every step. When the flow is tracked in Jira, the position is that of the task\'s ticket and "task" has the ticket, its params and "instructions" to follow.',
+      inputSchema: z.object({
+        flow: flowArg,
+        task: z
+          .string()
+          .optional()
+          .describe('Ticket key, e.g. ABC-123, when the user named one (default: the key in the current git branch name). Only for flows tracked in Jira.'),
+      }),
+      annotations: TRACKER_READ,
     },
-    async ({ flow }, ctx) => run(ctx, (paths, toolCtx) => describeStatus(paths, flow, toolCtx)),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => statusTool(paths, args, toolCtx)),
   );
 
   server.registerTool(
@@ -247,15 +281,17 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Fire flow event',
       description:
-        'Fires an event (default NEXT) from the current step and returns the new current step with the command that invokes its skill. Pass "from" to fail unless that step is current.',
+        'Fires an event (default NEXT) from the current step and returns the new current step with the command that invokes its skill. Pass "from" to fail unless that step is current (required when the flow is tracked in Jira).',
       inputSchema: z.object({
         event: z.string().optional().describe('Event to fire, e.g. NEXT, BACK, FAILED, CHANGES_REQUESTED. Default NEXT.'),
         from: z.string().optional().describe('Expected current step id; the call fails if the flow is elsewhere.'),
         flow: flowArg,
+        task: taskArg,
+        params: paramsArg,
       }),
-      annotations: WRITES,
+      annotations: TRACKER_WRITES,
     },
-    async (args, ctx) => run(ctx, (paths, toolCtx) => fireEvent(paths, args, toolCtx), { mutating: true }),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => transitionTool(paths, args, toolCtx), { mutating: true }),
   );
 
   server.registerTool(
@@ -263,26 +299,52 @@ export function createDflMcpServer(options?: DflMcpOptions): McpServer {
     {
       title: 'Complete step',
       description:
-        'Marks a step as done by firing an event (default NEXT) from it; fails if the step is not the current one. Returns the next step and the command that invokes its skill.',
+        'Marks a step as done by firing an event (default NEXT) from it; fails if the step is not the current one. Returns the next step and the command that invokes its skill. When the flow is tracked in Jira, it also moves the ticket to the status of the next step.',
       inputSchema: z.object({
         step: stepArg('Id of the step that was completed (must be the current step).'),
         event: z.string().optional().describe('Event matching the outcome, e.g. NEXT, FAILED, CHANGES_REQUESTED. Default NEXT.'),
         flow: flowArg,
+        task: taskArg,
+        params: paramsArg,
       }),
-      annotations: WRITES,
+      annotations: TRACKER_WRITES,
     },
-    async (args, ctx) => run(ctx, (paths, toolCtx) => completeStep(paths, args, toolCtx), { mutating: true }),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => completeStepTool(paths, args, toolCtx), { mutating: true }),
   );
 
   server.registerTool(
     'goto_step',
     {
       title: 'Go to step',
-      description: 'Jumps to any step of the flow (recorded as event GOTO), regardless of transitions.',
-      inputSchema: z.object({ step: stepArg('Id of the step to make current.'), flow: flowArg }),
-      annotations: WRITES,
+      description:
+        'Jumps to any step of the flow (recorded as event GOTO), regardless of transitions. When the flow is tracked in Jira, it moves the task (and repairs an unusable task record).',
+      inputSchema: z.object({ step: stepArg('Id of the step to make current.'), flow: flowArg, task: taskArg, params: paramsArg }),
+      annotations: TRACKER_WRITES,
     },
-    async (args, ctx) => run(ctx, (paths, toolCtx) => jumpToStep(paths, args, toolCtx), { mutating: true }),
+    async (args, ctx) => run(ctx, (paths, toolCtx) => gotoStepTool(paths, args, toolCtx), { mutating: true }),
+  );
+
+  server.registerTool(
+    'start_task',
+    {
+      title: 'Start task',
+      description:
+        'Starts (or resumes) work on a Jira ticket in a flow tracked in Jira: binds the ticket to a git branch (creating and checking out the branch when needed), records the task at the first step and moves the ticket to the mapped status. Returns the status like get_status plus "branch". Only call it when the user asked to start or continue a ticket; if it fails with TASK_BRANCH_CHOICE, ask the user.',
+      inputSchema: z.object({
+        task: z.string().describe('The ticket as the user wrote it: ABC-123, 123, #123 or a ticket URL.'),
+        flow: flowArg.describe('Flow to start the task in. Default: the flow .df/tracker.json selects for the ticket type, else the active flow.'),
+        step: z.string().optional().describe('Step to start at. Default: the initial step of the flow.'),
+        branch: z
+          .enum(BRANCH_MODES)
+          .optional()
+          .describe(
+            'auto (default): use the checked-out branch when its name contains the key, create a new branch when on a protected branch such as main, else fail and ask; create: create a new branch; current: use the checked-out branch.',
+          ),
+        slug: z.string().optional().describe('Words for the new branch name (default: from the ticket summary).'),
+      }),
+      annotations: TRACKER_WRITES,
+    },
+    async (args, ctx) => run(ctx, (paths, toolCtx) => startTaskTool(paths, args, toolCtx), { mutating: true, lockInside: true }),
   );
 
   // --- Authoring tools ------------------------------------------------------

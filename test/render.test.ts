@@ -7,6 +7,7 @@ import { loadFlow } from '../src/core/flow.js';
 import { packageVersion } from '../src/core/paths.js';
 import {
   buildTemplateContext,
+  builtinSkillEnabled,
   builtinSkillNames,
   createHandlebars,
   dflCliCommand,
@@ -509,6 +510,23 @@ describe('renderFlowSkills', () => {
     const review = flowContextSection(skillFile(skills.find((s) => s.name === 'review')!, 'SKILL.md'));
     expect(review).toContain('no outgoing events');
     expect(review).not.toContain('complete_step');
+    expect(review).toContain('pass `"task": "<task.key>"` to `goto_step` (CLI: `--task <key>`).');
+  });
+
+  it('tells the agent to pass a ticket the user named on to get_status and the moves (flows tracked in Jira)', () => {
+    const paths = sampleProject();
+    for (const skill of renderFlowSkills(paths, loadFlow(paths, 'sample'), {})) {
+      const section = flowContextSection(skillFile(skill, 'SKILL.md'));
+      const paragraph =
+        'If the user named a ticket after the command, pass the ticket key (e.g. `ABC-123`) as `"task"` to `get_status`. ' +
+        'If the result has a `task`, follow `task.instructions` and pass `"task": "<task.key>"` to `complete_step` / `goto_step` ' +
+        '(CLI: `--task <key>`).';
+      expect(section).toContain(`\n\n${paragraph}\n\n`);
+      // Between "Before you start" and "When done".
+      expect(section.indexOf(paragraph)).toBeGreaterThan(section.indexOf('**Before you start:**'));
+      expect(section.indexOf(paragraph)).toBeLessThan(section.indexOf('**When done:**'));
+      expect(section.split('\n').length).toBeLessThanOrEqual(25);
+    }
   });
 });
 
@@ -571,6 +589,34 @@ describe('renderBuiltinSkills', () => {
 
   it('lists the packaged built-in skills', () => {
     expect(Array.isArray(builtinSkillNames())).toBe(true);
+  });
+
+  it('renders the packaged init-task skill only when the project has .df/tracker.json', () => {
+    const paths = sampleProject();
+    const model = loadFlow(paths, 'sample');
+    expect(builtinSkillNames()).toContain('init-task');
+    expect(builtinSkillEnabled(paths, 'init-task')).toBe(false);
+    expect(builtinSkillEnabled(paths, 'add-flow-step')).toBe(true);
+    expect(renderBuiltinSkills(paths, model, {}).map((skill) => skill.name)).not.toContain('init-task');
+
+    // Existence is enough (the file is parsed only by the tracker commands and tools).
+    write(paths.trackerFile, '{}\n');
+    expect(builtinSkillEnabled(paths, 'init-task')).toBe(true);
+    const init = renderBuiltinSkills(paths, model, {}).find((skill) => skill.name === 'init-task');
+    expect(init).toMatchObject({ kind: 'builtin', description: expect.stringMatching(/^Start or continue work on a Jira ticket: /) });
+    const text = skillFile(init!, 'SKILL.md');
+    expect(splitSkill(text).data).toEqual({ name: 'init-task', description: init!.description, metadata: { 'dfl-builtin': 'true' } });
+    expect(text).toContain('`start_task` tool of the `dfl` MCP server');
+    expect(text).toContain('`dfl task start "<ticket>"`');
+    expect(text).toContain('Active flow at the last sync: **Sample flow** (`sample`).');
+    expect(text).not.toContain('## Flow context');
+    expect(slashCommandTokens(text)).toEqual([]);
+    expectNoSlashCommandTokens(text);
+
+    // A fixture dir without init-task is not affected.
+    const dir = makeTempDir('dfl-builtins-');
+    write(path.join(dir, 'other', 'SKILL.md.hbs'), '# Other\n');
+    expect(renderBuiltinSkills(paths, model, {}, { dir }).map((skill) => skill.name)).toEqual(['other']);
   });
 });
 

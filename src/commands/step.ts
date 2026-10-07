@@ -13,7 +13,7 @@ import { skillInvocations } from '../ui/format.js';
 import { plural, print, printJson, printLines, success, sym, terminalWidth, warning } from '../ui/output.js';
 import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
-import { confirmDestructive, locked, lockedSyncAfterChange, projectFor, readTemplateFile, type CliContext } from './shared.js';
+import { confirmDestructive, locked, lockedSyncAfterChange, projectFor, readTemplateFile, trackedViewNote, type CliContext } from './shared.js';
 
 export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContext): void {
   const step = program.command('step').description('Manage the steps of a flow');
@@ -29,11 +29,14 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
       const model = loadFlowOrActive(paths, opts.flow);
       const current = currentOf(paths, model);
       const agents = getSelectedAgents(paths);
+      // Tracked in Jira: the task's step lives there; the local `current` is this checkout's (stale) position.
+      const tracked = trackedViewNote(paths, model.name);
       if (opts.json) {
         printJson({
           flow: model.name,
           initial: model.initial,
           current,
+          ...(tracked ? { tracked: true, note: tracked.note } : {}),
           steps: model.steps.map((s) => ({
             id: s.id,
             title: s.title,
@@ -47,17 +50,18 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
         });
         return;
       }
-      print(`${c.bold(model.title)} ${c.dim(`(${model.name})`)}`);
+      print(`${c.bold(model.title)} ${c.dim(`(${model.name})`)}${tracked ? `  ${c.dim(tracked.note)}` : ''}`);
+      const marked = tracked ? undefined : current;
       let number = 0;
       const rows = model.steps.map((s) => {
-        const marker = s.id === current ? c.cyan(sym.current) : ' ';
+        const marker = s.id === marked ? c.cyan(sym.current) : ' ';
         const transitions = { text: s.transitions.map((t) => `${t.event} ${sym.arrow} ${t.target}`).join(', ') };
         if (s.final) return [marker, '', c.dim(s.id), c.dim(s.title), c.dim('(final)'), transitions];
         number += 1;
         return [
           marker,
           c.dim(String(number)),
-          s.id === current ? c.bold(s.id) : s.id,
+          s.id === marked ? c.bold(s.id) : s.id,
           s.title,
           c.cyan(skillInvocations(s.skillName, agents).join(' ')),
           transitions,
@@ -120,7 +124,7 @@ export function registerStepCommands(program: CommandUnknownOpts, ctx: CliContex
     .argument('<id>', 'step id')
     .option('--title <title>', 'new title')
     .option('--description <text>', 'new description')
-    .option('--rename <new-id>', 'rename the step (transitions, directory and runtime state follow)')
+    .option('--rename <new-id>', 'rename the step (transitions, directory, runtime state and its Jira status mapping follow)')
     .option('--template-file <path>', 'replace SKILL.md.hbs with this file')
     .option('--initial', 'make it the initial step')
     .option('--flow <name>', 'flow (default: the active flow)')
