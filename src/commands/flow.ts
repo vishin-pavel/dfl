@@ -16,6 +16,7 @@ import {
   loadActiveFlow,
   loadFlow,
   loadFlowOrActive,
+  retiredTemplateReplacement,
   skillSteps,
 } from '../core/flow.js';
 import { isDir, relPosix, writeText } from '../core/fsx.js';
@@ -47,6 +48,7 @@ import { isInteractive } from '../ui/prompts.js';
 import { table } from '../ui/table.js';
 import {
   confirmDestructive,
+  launcherText,
   locked,
   lockedSwitchActiveFlow,
   lockedSyncAfterChange,
@@ -510,20 +512,35 @@ async function deleteAndResync(
   );
 }
 
+/**
+ * FLOW_NOT_FOUND unless `name` is a flow of the project. The hint names a template of that name, or the
+ * flow that replaced a retired one (switch to it when the project has it: creating it would fail with
+ * FLOW_EXISTS), with the project's launcher.
+ */
 function requireFlow(paths: ProjectPaths, name: string): void {
   if (flowExists(paths, name)) return;
   assertValidFlowName(name);
   const flows = listFlows(paths);
-  const template = listFlowTemplates().some((t) => t.name === name)
+  const templates = listFlowTemplates();
+  const replacement = retiredTemplateReplacement(name, templates);
+  const template = templates.some((t) => t.name === name)
     ? `"${name}" is a prebuilt template: create a flow from it with \`dfl flow create ${name} --from ${name} --use\`.`
-    : undefined;
+    : replacement !== undefined
+      ? `"${name}" was a prebuilt template that dfl no longer ships; it was replaced by "${replacement}": ` +
+        (flowExists(paths, replacement)
+          ? `switch to it with \`dfl flow use ${replacement}\`.`
+          : `create a flow from that with \`dfl flow create ${replacement} --from ${replacement} --use\`.`)
+      : undefined;
   throw new DflError(`Flow "${name}" not found.`, {
-    hint: [
-      template,
-      flows.length > 0 ? `Flows: ${flows.join(', ')}.` : 'This project has no flows yet: run `dfl install` or `dfl flow create <name>`.',
-    ]
-      .filter(Boolean)
-      .join(' '),
+    hint: launcherText(
+      paths,
+      [
+        template,
+        flows.length > 0 ? `Flows: ${flows.join(', ')}.` : 'This project has no flows yet: run `dfl install` or `dfl flow create <name>`.',
+      ]
+        .filter(Boolean)
+        .join(' '),
+    ),
     code: 'FLOW_NOT_FOUND',
   });
 }

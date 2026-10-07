@@ -10,6 +10,9 @@ import { CancelledError } from '../src/ui/exit.js';
 import { nodeVersionError } from '../src/ui/node-version.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
+// The flow templates dfl shipped before "dev" (feature, bugfix, quick) are test fixtures now.
+vi.mock('../src/core/paths.js', async (original) => (await import('./helpers/fixture-templates.js')).fixtureTemplatesPaths(original));
+
 /** Lets a test replace the clack text prompt (the rest of the prompt module stays real). */
 const promptControl = vi.hoisted(() => ({ text: undefined as undefined | (() => Promise<string>) }));
 vi.mock('../src/ui/prompts.js', async (importOriginal) => {
@@ -138,9 +141,10 @@ describe('dfl install', () => {
     expect(stdout).toMatch(/Next: run .*\/spec-feature.* in your agent/);
   });
 
-  it('defaults to the feature template and claude, and honours --no-mcp and --project-agents', async () => {
+  // The default template ("dev", the only one dfl ships) is tested with the real templates in retired-templates.test.ts.
+  it('defaults to claude, and honours --no-mcp and --project-agents', async () => {
     const root = makeTempDir();
-    await ok(root, 'install', '--yes', '--no-mcp', '--project-agents');
+    await ok(root, 'install', '--yes', '--flow', 'feature', '--no-mcp', '--project-agents');
     expect(has(root, '.df/feature/flow.json')).toBe(true);
     expect(has(root, '.claude/skills/spec-feature/SKILL.md')).toBe(true);
     expect(has(root, '.mcp.json')).toBe(false);
@@ -605,7 +609,7 @@ describe('MCP preference (install --no-mcp / --mcp)', () => {
     const root = makeTempDir();
     const original = '{"mcpServers":{"github":{"command":"gh"}}}\n';
     fs.writeFileSync(path.join(root, '.mcp.json'), original);
-    const install = await ok(root, 'install', '--yes', '--agents', 'claude,codex', '--no-mcp');
+    const install = await ok(root, 'install', '--yes', '--agents', 'claude,codex', '--flow', 'feature', '--no-mcp');
     expect(install.stdout).toContain('MCP server not registered (run `dfl install --mcp` to add it)');
     expect(readJsonFile(root, '.df/local.json').mcp).toBe(false);
 
@@ -690,7 +694,7 @@ describe('uninstall sticks until dfl install', () => {
 
   it('also sticks with team-default agents after uninstall --purge', async () => {
     const root = makeTempDir();
-    await ok(root, 'install', '--yes', '--project-agents');
+    await ok(root, 'install', '--yes', '--flow', 'feature', '--project-agents');
     await ok(root, 'uninstall', '--purge', '--yes');
     const add = await ok(root, 'step', 'add', 'x');
     expect(add.stdout).not.toContain('Synced');
@@ -851,7 +855,7 @@ describe('project root resolution', () => {
   it('install in a git repository nested in a dfl project sets up the nested repository', async () => {
     const outer = makeTempDir();
     gitInit(outer);
-    await ok(outer, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    await ok(outer, 'install', '--yes', '--agents', 'claude', '--flow', 'feature', '--no-mcp');
     const before = { local: read(outer, '.df/local.json'), config: read(outer, '.df/config.json'), skills: fs.readdirSync(path.join(outer, '.claude/skills')) };
     const inner = path.join(outer, 'vendor', 'inner');
     fs.mkdirSync(inner, { recursive: true });

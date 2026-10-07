@@ -1,0 +1,79 @@
+# Engineering section guide
+
+Use this guide for section 7, Engineering, of a feature's `{{vars.techDesignFile}}`: code
+organization, testability, required test levels, pipeline gates and developer experience, as
+requirements the code base must meet, not a plan of files and classes. Write only what differs
+from the project baseline, `{{vars.requirementsDir}}/{{vars.techDesignFile}}`: a code screened as
+Baseline gets no row here, and a refinement cites the baseline ID it refines.
+
+## When and which codes
+
+Testability is applicable by default, so consider this section on every task, but write rows
+only for what the baseline does not already require (often nothing).
+
+| Code | Covers here |
+|---|---|
+| MAINT | modularity (module boundaries, dependency direction), reusability, analysability (finding the cause of a failure), modifiability (changes that must stay cheap), testability |
+| CICD | a pipeline gate the feature needs beyond the baseline's |
+| DX | local setup, fakes and seed data for services the feature adds, time to a green test run |
+
+Write each requirement once; elsewhere cite its ID.
+
+## What to write
+
+Rows in the [requirement format](../requirement-format.md). Refinements end the Requirement cell
+with `(refines SYS-<CODE>-n)`.
+
+- **Module boundaries:** which capability must not depend on which, in logical names (features
+  from the index, glossary terms, roles such as "the payment provider's client"). Verify by
+  `static` (an architecture or import rule) or `inspect`.
+- **Modifiability:** the likely change the design must keep cheap, as a change scenario of the
+  requirement format: the change, what it may touch, what it must not.
+- **Testability:** what tests must be able to control or observe: time, randomness, external
+  services replaced by fakes, seed data for every scenario's starting state.
+- **Test levels:** which IDs need which level when the baseline does not settle it: rules at unit
+  level, DCONS rows against the real store, section 4 contracts by contract tests, PERF rows by a
+  bench, the main journey end to end.
+- **Pipeline gates:** a new gate only (contract tests block merge, a bench runs on the main branch).
+- **Developer experience:** running the feature locally with its new dependencies faked, time from
+  clone to a green run, data to demonstrate the scenarios.
+
+## Never write
+
+- Folder, package, file, class or function names; design patterns to use; layering recipes.
+- Frameworks, test runners, linters or versions, unless a constraint (`CON-n`).
+- Coverage percentages that no gate checks; style rules the linter already enforces.
+- A refactoring plan for today's code: a follow-up in the brief's hand-off.
+- The list of tests this task adds: that is the implementation plan in the brief.
+
+## Greenfield, adoption, brownfield
+
+- **Greenfield:** the baseline sets the test levels, gates and local setup that the first
+  implementation increment builds. Ask with proposed defaults (tests, type check, lint and
+  dependency audit block merge; one command from clone to green tests); they become baseline rows
+  with the user's consent. This section adds only feature-specific needs.
+- **Adoption and brownfield:** for the touched area only, read lint and architecture rule
+  configuration, the test setup and the levels it has, CI workflows and required checks, local
+  setup scripts and docs, and how the touched code is organized today (to state boundaries in
+  logical terms). Record the tools in use as `CON-n`; under adoption without a baseline, seed the
+  baseline gates from the CI configuration with the user's consent. A test level the feature
+  needs but the project lacks is a requirement, not a gap to accept.
+- **Editing an existing section:** change rows in place, keep IDs, move removed or replaced rows to
+  section 8, Retired IDs.
+
+## Example
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-MAINT-1 | Modularity | Checkout rules shall not depend on the payment provider's client | 0 such dependencies | static | Must | user |
+| CHK-MAINT-2 | Testability | Rules that depend on dates (CHK-4) shall be testable at any date without waiting | tests set the date; no test waits for real time | inspect | Must | user |
+| CHK-MAINT-3 | Modifiability | When a payment method is added, the change shall touch only the payment capability and its tests | 0 checkout rules changed | inspect | Should | user |
+| CHK-CICD-1 | Gates | The order-placed contract test shall block merge when it fails (refines SYS-CICD-1) | required check | inspect | Must | user |
+| CHK-DX-1 | Local setup | A developer shall run checkout locally with the payment provider faked | one command, ≤ 5 min from clone | inspect | Should | user |
+
+## Staleness pitfalls
+
+- Paths and type names in a boundary rule: use the logical names of capabilities.
+- A tool version or a framework idiom: a constraint at most, never a requirement.
+- "Currently untested", "needs cleanup": follow-ups in the brief's hand-off.
+- Rows that hold for every feature: they belong to the baseline; propose moving them.

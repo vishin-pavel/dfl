@@ -1,0 +1,140 @@
+# Design the technical requirements
+
+Turn the accepted business requirements, or the confirmed objectives of a technical change, into
+long-lived, measurable technical requirements. Screen every quality attribute, write only the
+applicable ones into the feature's `{{vars.techDesignFile}}`, grill them with the user and get them
+accepted. State what the system must achieve, never how to build it: the implementation decides that.
+
+## Inputs
+
+- The brief: `## Original request` (context: a number, platform, store or integration it names is
+  a candidate requirement the user confirms, `Source: user` once confirmed, its wording never
+  copied), the header (`Route`, `Modifiers`, `Tech design sections`, `Context`, `Features`), the
+  objectives `OBJ-n` in `## Classification`, `## Quality attribute screening` when re-entered, and
+  the latest open `## Rework` entry (`REVISE_DESIGN` from Implement, `DESIGN_GAP` from Dev QA).
+- The accepted `{{vars.requirementsFile}}` of each feature and `{{vars.requirementsDir}}/GLOSSARY.md`.
+- Each feature's `{{vars.techDesignFile}}` and the baseline `{{vars.requirementsDir}}/{{vars.techDesignFile}}`.
+- Adoption or brownfield: the code, manifests and configuration of the touched area.
+
+## Procedure
+
+1. **Read the brief and pick the mode.** Route not `full` or `design`: when a Rework entry sent the
+   work here, or the user states design requirements (`ui-design`), propose the corrected route,
+   update the header once the user confirms (Task brief section) and continue; otherwise stop and
+   say so. Back from a requirements gap: re-apply the `dfl-td-draft` stash (step 7). Address the
+   open items you own in the latest Rework entry first and mark them done; keep confirmed verdicts
+   and accepted sections unless an open item reopens them. Every mode screens every catalog row.
+
+   | Situation | Draft |
+   |---|---|
+   | New feature | every section with an Applicable code |
+   | Requirements changed, technical change | the brief's `Tech design sections` (`baseline:<key>` is that section of the baseline), plus any the screening adds |
+   | `ui-design` | section 5 with strict rows, plus the above |
+   | `revert` | restore what the reverted change's tech design acceptance replaced; retire the IDs it added |
+   | Re-entered (Rework) | the sections the open items name |
+
+2. **Baseline and constraints.**
+   - No baseline yet and the task needs a project-wide item (runtime, hosting, deployment, CI gates,
+     code organization): ask consent to create it with `SYS-` IDs; declined: only the feature's file.
+   - Greenfield: ask in one message, each with a proposed default (what the request states, if it
+     does): runtime and hosting, data store, users and scale, sensitive data, CI host. The answers
+     become baseline entries, with the test levels and CI gates the first implementation increment sets up.
+   - Adoption or brownfield: extract constraints `CON-n` for the touched area only (manifests,
+     compose files, migrations, Dockerfile and IaC, CI workflows, lint and architecture configs,
+     logging and metrics setup). Project-wide ones seed the baseline, the rest go to the feature.
+     Each names the technology or limit and why it binds, never the file you found it in.
+3. **Screen every row of the Quality attribute catalog below**, skipping none: a missing row reads
+   as forgotten, and Dev QA checks the diff against these verdicts. Write one table per feature (or
+   one for the baseline alone) to the brief's `## Quality attribute screening`: `| Code | Verdict | Reason |`.
+   - `Applicable`: this task adds, changes or retires requirements for it; name the sub-characteristics.
+   - `Baseline SYS-n`: a baseline requirement covers it; the feature needs nothing of its own.
+   - `N/A`: neither; a one-line reason (for an existing feature, the IDs that still hold).
+
+   MAINT (testability) and SEC (integrity) start as Applicable and may only become Baseline. Under
+   `sensitive`, ask about SEC, PRIV, SAFE and COMPL explicitly. Present the table in one message
+   and get the user's confirmation before drafting.
+
+4. **Draft each applicable section, one at a time,** in the [requirement format](references/requirement-format.md),
+   placed per the [document skeleton](references/document-skeleton.md), with measures from
+   [quality attributes](references/quality-attributes.md). Open a section guide only for a section
+   the screening or the brief put in:
+
+   | Key | Section | Guide | Open when |
+   |---|---|---|---|
+   | `data` | 3 Data | [data](references/sections/data.md) | an entity, stored attribute, retention or copy of data changes; DCONS or PRIV Applicable |
+   | `interfaces` | 4 Interfaces and communication | [interfaces](references/sections/interfaces.md) | an API, event, webhook, file exchange or contract is added or changed |
+   | `ui` | 5 UI appearance | [UI](references/sections/ui.md) | a scenario is reached through a UI or CLI and placement changes, or `ui-design` |
+   | `operations` | 6 Deployment and operations | [operations](references/sections/operations.md) | REL, FLEX, OBS, DEPLOY or COST need more than the baseline |
+   | `engineering` | 7 Engineering | [engineering](references/sections/engineering.md) | MAINT, DX or CICD need more than the baseline |
+
+   Sections 1 (`context`) and 2 (`quality`) need no guide. At most about 3 requirements per
+   sub-characteristic; drop any that would not change an implementation choice or a check.
+
+5. **Record decisions only when expensive to reverse,** as `DEC-n` in section 1 (3 to 5 lines:
+   context, decision, alternatives, consequences): the system of record and storage when not
+   given, sync or async across a boundary, the deployment unit, a public contract and its
+   versioning, data ownership and tenancy. Offer options with a recommendation; the user decides.
+   Everything else (libraries, patterns, layout, algorithms) is left to the implementation.
+
+6. **Grill each section right after drafting it** with the [grill](references/grill.md), and iterate
+   here until the user accepts it. Every requirement gets a priority (Must or Should); every
+   conflicting pair goes under Trade-offs in section 2 with the user's choice. In the screening
+   section keep `Progress:` (sections accepted) and `Open items:` (questions the user deferred).
+
+7. **Requirements gap.** A business rule or glossary term the design needs is missing or wrong:
+   never invent it here. Append a Rework entry (`REQUIREMENTS_GAP`, design-tech, numbered items:
+   what is missing, which design item needs it; note "drafts in stash dfl-td-draft"), run
+   `git stash push --include-untracked -m dfl-td-draft -- <tech design files>` (on return apply that
+   entry of `git stash list`, then drop it), commit only the brief
+   (`docs(task): requirements gap for <task>`) and fire `REQUIREMENTS_GAP`.
+
+8. **Write the files.** Edit `{{vars.requirementsDir}}/<feature>/{{vars.techDesignFile}}` in place
+   (create it from the skeleton) and the baseline when `SYS-` items change, in the language of the
+   requirement files. Reworded IDs keep their ID; replaced or removed ones move to Retired IDs.
+   Existing code that misses a requirement never lowers it: ask whether this task meets it or it
+   becomes a follow-up (ID and gap) under **Follow-ups and known gaps** in the hand-off.
+9. **Get acceptance and commit.** Summarize per file: IDs added, changed and retired, decisions,
+   trade-offs, open items, follow-ups. Wait for an explicit yes; silence is not approval. Commit
+   only the tech design files (`docs(td): accept <PREFIX> tech design for <task>`; several features
+   `CHK, ACC`; the baseline counts as `SYS`; no file changed: `--allow-empty`), write the sha into
+   `Accepted: … tech design <sha>` (replacing an older one), add the key of every section you edited
+   to `Tech design sections` (`baseline:<key>` for the baseline), commit the brief
+   (`docs(task): tech design accepted for <task>`) and fire `NEXT`.
+
+## Quality attribute catalog
+
+Screen every row in step 3; details per code are in [quality attributes](references/quality-attributes.md).
+
+{{> quality-catalog}}
+
+## Outputs
+
+- Each feature's `{{vars.techDesignFile}}`, and the baseline when `SYS-` items changed: applicable
+  requirements only, with constraints, decisions, trade-offs and retired IDs.
+- Brief: the screening with progress and open items, follow-ups in the hand-off, the tech design
+  sha in `Accepted:`, Rework items marked done. Two commits: tech design files alone, then the brief.
+
+## Exit criteria
+
+- Every catalog code of every feature has a verdict the user confirmed.
+- Every drafted section passed the grill and the user accepted it; no `Source: proposed` remains;
+  conflicts have a trade-off the user chose; deferred questions are open items, not requirements.
+- The user explicitly accepted the summary; the acceptance commit holds only tech design files,
+  its sha is in the committed brief, and the tree is clean.
+- `REQUIREMENTS_GAP`: the Rework entry is committed in the brief and drafts are stashed by name.
+
+## Pitfalls
+
+- Implementation in disguise: libraries, classes, file layout, cache or queue products. Name a
+  technology only as a `CON-n` or a `DEC-n`.
+- Padding: generic rows every system has, the catalog copied into the document, N/A sections.
+- Invented numbers: a plausible p95 nobody confirmed. Ask, and keep `proposed` until confirmed.
+- Lowering a requirement to match today's code; restating scenarios as technical rows.
+- Screening only the obvious codes: security, privacy and recoverability are the usual omissions.
+- Ticket keys, request sentences, names, task progress or N/A verdicts in the tech design files.
+
+{{> brief}}
+
+{{> requirements-rules}}
+
+{{> flow-context}}

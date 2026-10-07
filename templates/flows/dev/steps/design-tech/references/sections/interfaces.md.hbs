@@ -1,0 +1,110 @@
+# Interfaces and communication section guide
+
+Use this guide for section 4, Interfaces and communication, of a feature's `{{vars.techDesignFile}}`:
+every boundary the feature's requests or data cross (its own clients, other features, other
+systems, files), the communication pattern of each and the measures each must meet. Contracts are
+stated at the business level; the implementation writes the schemas, routes and clients.
+
+## When and which codes
+
+Write it when the feature provides or consumes an API, an event or message, a webhook, a file
+import or export, a scheduled exchange, or a command other programs call, or when the task changes
+one.
+
+| Code | Covers here |
+|---|---|
+| COMP | interoperability: contract content, compatibility and versioning rules, consumers that must keep working |
+| FLEX | replaceability: a counterpart that must be swappable without changing its callers |
+| PERF, REL, SEC, DCONS | a measure of one interface: latency budget, timeout and retry outcome, caller authentication and rate limit, idempotency, ordering and delivery |
+
+End-to-end targets of a whole user journey stay in section 2; limits on shared hosts and quotas are
+co-existence in section 6. Write each requirement once; elsewhere cite its ID.
+
+## What to write
+
+**Interface inventory.** Under `### Interface inventory`, one table row per boundary. Interfaces
+have no ID; the requirements and decisions about them do.
+
+| Column | Write |
+|---|---|
+| Interface | a name by business purpose (place order, order placed, charge payment) |
+| Direction | provided or consumed |
+| Counterpart | who is on the other side, by role (shop web client, invoicing, payment provider) |
+| Pattern | request-response (synchronous), event or command message (asynchronous), webhook, file batch, scheduled poll, stream |
+| Contract | what crosses, in glossary terms with business types; required or optional; outcomes, including business rejections with their scenario IDs |
+| Compatibility | allowed changes without a new version, support period of an old version, or the `CON-n` that fixes it |
+
+**Requirements.** Under `### Interface requirements`, one table in the
+[requirement format](../requirement-format.md), per interface where it applies:
+
+- **Latency budget**: a percentile at a stated load, with what is excluded (a counterpart's time).
+- **Timeouts and retries**: for a consumed interface, the limit and the outcome when it is reached,
+  as a business outcome with its scenario ID; a retry count only when a counterpart's terms fix it.
+- **Idempotency**: which requests or messages may arrive twice, and that one effect results.
+- **Ordering and delivery**: at most once, at least once or effectively once; whether order matters
+  per entity.
+- **Limits**: payload size, rate per caller, page size, and what happens above them.
+- **Trust**: who may call, what is validated at the boundary, sensitive data in transit.
+- **Versioning**: the rule for breaking changes and how consumers learn about deprecation.
+
+Use the six-part scenario of the requirement format for a counterpart that fails, is slow or
+misbehaves.
+
+**Decisions.** Synchronous or asynchronous across a boundary, and a public contract with its
+versioning scheme, are `DEC-n` entries in section 1 when they are expensive to reverse.
+
+## Never write
+
+- Paths, methods, status codes, header, topic, queue or field names, serialization details, unless
+  a counterpart already fixed them: then they are a `CON-n`, cited, not redesigned.
+- Client libraries, brokers, gateways or their versions, unless a constraint or a decision; file,
+  class or handler names.
+- A copy of an API description: the implementation owns the schema; this section states its rules.
+- Tuning values (retry back-off, pool sizes) when the real requirement is the outcome and the
+  absence of duplicate effects.
+
+## Greenfield, adoption, brownfield
+
+- **Greenfield:** derive the boundaries from the scenarios: each actor in the glossary that is a
+  system, each import, export or notification. Propose the pattern: request-response when a person
+  waits for the answer, asynchronous when nobody waits or the counterpart may be down. Proposed
+  patterns and numbers need the user's confirmation.
+- **Adoption and brownfield:** for the touched interfaces only, read route and handler definitions,
+  API description files, clients of external services with their timeout and retry configuration,
+  message producers and consumers, webhooks and scheduled import or export jobs. Record existing
+  public contracts and their known consumers as `CON-n`; write observed timeouts or limits as rows
+  with `Source: existing` only when the user confirms they are the requirement. Unknown consumers:
+  ask before calling a change compatible.
+- **Editing an existing section:** a change that breaks a consumer needs a versioning row or a
+  `DEC-n`; never change a published contract silently. Removed or replaced rows go to section 8,
+  Retired IDs.
+
+## Example
+
+Under `### Interface inventory`:
+
+| Interface | Direction | Counterpart | Pattern | Contract | Compatibility |
+|---|---|---|---|---|---|
+| Place order | provided | shop web client | request-response | in: Cart; out: Order number, or "Cart is empty" (CHK-1.2) | additive changes only |
+| Order placed | provided | invoicing | event, at least once | Order number, Customer, total, placed at | additive only; removal needs a new version (CHK-DEC-2) |
+| Charge payment | consumed | payment provider | request-response | Order number, amount → paid or declined (CHK-5.1, CHK-5.2) | fixed by the provider (CHK-CON-3) |
+
+Under `### Interface requirements`:
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-PERF-2 | Time behaviour | When a Customer places an Order, the shop shall answer | p95 ≤ 800 ms at 20 orders per second, excluding the payment provider | bench | Must | user |
+| CHK-REL-2 | Fault tolerance | When the payment provider does not answer within 3 s, the shop shall keep the Order unpaid and tell the Customer that payment is pending (CHK-5.3) | answer ≤ 5 s; 0 duplicate charges | test | Must | user |
+| CHK-DCONS-3 | Idempotency | When the same place-order request arrives twice, the shop shall place one Order | 1 Order per request | test | Must | user |
+| CHK-COMP-1 | Interoperability | The order-placed event shall stay readable by consumers built for an earlier version | contract test against the previous version passes | test | Must | user |
+
+## Staleness pitfalls
+
+- A latency without a percentile and a load is not measurable: add both or drop it.
+- "Calls the provider synchronously": if it is a one-way door, write a `DEC-n`; otherwise leave it
+  to the implementation.
+- A counterpart's version number: only as a `CON-n` with its reason; review it when the counterpart
+  changes.
+- "New", "now" or "no longer" in a contract description: state it timelessly in glossary terms.
+- Under adoption, an interface the task does not touch: leave it out; the section grows with the
+  tasks and is not a system inventory.

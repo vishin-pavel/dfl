@@ -269,6 +269,8 @@ describe('read tools', () => {
     expect(result['sync']).not.toBeNull();
     const rendered = result['step']['rendered'] as string;
     expect(rendered).toContain('git diff main...HEAD');
+    // A variable without a default is guarded: never an empty command.
+    expect(rendered).toContain('2. Run the tests (ask the user for the test command) and note any failure.');
     expect(rendered).toContain('## Flow context');
     expect(rendered).not.toMatch(/\$ARGUMENTS|\$\d|^!`|@\w/m);
   });
@@ -1117,7 +1119,7 @@ describe('guide', () => {
     expect(section).toContain('`get_status` returns it in `task`');
     expect(section).toContain('There is no `task` in the template context: never template it.');
     expect(section).toContain('records it with `params` of `complete_step`');
-    expect(section).toContain('`npx --no-install dfl next <EVENT> --from <step> --task <key> --set specPath=docs/specs/csv-export.md`');
+    expect(section).toContain('`npx --no-install dfl next <EVENT> --from <step> --task <key> --set route=full`');
     expect(section).toContain('`start_task` (the built-in `/init-task` skill, CLI `npx --no-install dfl task start <ticket>`)');
     expect(section).toContain('"If `get_status` returned a task with a branch, you are already on the working branch: skip this step."');
     expect(section).toContain('`npx --no-install dfl tracker map`');

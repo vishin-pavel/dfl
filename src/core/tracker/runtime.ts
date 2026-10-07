@@ -868,7 +868,7 @@ async function bindBranch(
 function assertNotDone(model: FlowModel, key: string, record: TaskRecord): void {
   if (!model.byId.get(record.step)?.final) return;
   throw new DflError(`${key} is already done (flow "${model.name}" is at its final step "${record.step}").`, {
-    hint: `To work on it again, restart it with \`dfl goto ${model.initial} --task ${key}\`.`,
+    hint: `To work on it again, move it back to the step to resume at with \`dfl goto <step> --task ${key}\` (the first step is \`${model.initial}\`: \`dfl goto ${model.initial} --task ${key}\`).`,
     code: 'TASK_DONE',
   });
 }

@@ -5,6 +5,9 @@ import type { FlowDefinition, ValidationIssue } from '../src/core/types.js';
 import { assertFlowValid, diffDefinitionErrors, validateDefinition, validateFlow } from '../src/core/validate.js';
 import { cleanupTempDirs, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
+// The flow templates dfl shipped before "dev" (feature, bugfix, quick) are test fixtures now.
+vi.mock('../src/core/paths.js', async (original) => (await import('./helpers/fixture-templates.js')).fixtureTemplatesPaths(original));
+
 afterEach(cleanupTempDirs);
 
 const errors = (issues: ValidationIssue[]): string[] => issues.filter((i) => i.level === 'error').map((i) => i.message);

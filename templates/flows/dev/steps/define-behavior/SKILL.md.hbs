@@ -1,0 +1,138 @@
+{{!--
+  dev flow, Behavior step. Writes the business requirements (Gherkin rules plus glossary) of the
+  touched features. IDs are the first word of Rule and Scenario names, never Gherkin tags.
+--}}
+# Define the behavior
+
+Write or update the business requirements of the features this task touches: Gherkin rules with
+stable IDs plus a glossary, readable by every stakeholder. Once accepted they are the source of
+truth that implementation and Dev QA check against, so state business outcomes, never UI steps or
+technology.
+
+## Inputs
+
+- The brief: the original request (context only), `Class`, `Modifiers`, `Route`, `Context`,
+  `Features` (prefix, new or existing, coverage), and the latest open `## Rework` entry when Tech
+  design or Dev QA sent `REQUIREMENTS_GAP` or Implement sent `REVISE_REQUIREMENTS`.
+- `{{vars.requirementsDir}}/README.md` (index), `GLOSSARY.md`, each affected feature's
+  `{{vars.requirementsFile}}`, and its `{{vars.techDesignFile}}` (for the no-technical-impact check).
+- Adoption, or coverage partial or none: the code, tests and existing docs of the touched behavior
+  (old specs such as `docs/specs`, PRDs, `.feature` files, test names).
+
+## Procedure
+
+1. **Check the route.** Continue when `Route:` is `full` or `behavior`. Reached on a `design` or
+   `code` route through a Rework entry: propose the corrected class and route (for example Bug fix /
+   requirements improved), and once the user confirms, update the header as the Task brief section
+   says and continue; go to step 11 only when that needs a full classification (other features, a
+   split, out of scope). Otherwise stop and tell the user which step the route runs next.
+   Re-entered: address the open items you own in the latest Rework entry; keep accepted work.
+2. **Bootstrap missing structure** from the
+   [requirements skeleton](references/requirements-skeleton.md): greenfield, or no
+   `{{vars.requirementsDir}}/` yet → the folder, `README.md` and `GLOSSARY.md`. A new feature → its
+   folder, `{{vars.requirementsFile}}` and index row, with the prefix from the brief; if the index
+   already uses that prefix, agree another one with the user and correct the brief's `Features:`.
+3. **Baseline first** (adoption, or coverage partial or none): describe only the touched behavior
+   and the rules it depends on, from existing docs and test names before code. These extracted
+   rules form their own group in the summary, the user confirms each one and step 10 records their
+   IDs. Current behavior that looks wrong becomes a question whose default answer is "follow-up":
+   leave it out of the rules and add it under **Follow-ups and known gaps** in
+   `## Hand-off to the QA team`.
+4. **Write the change** in the [Gherkin style](references/gherkin-style.md) (open it before the
+   first scenario) and the file layout of the skeleton, in the language the existing requirements
+   use (English by default):
+
+   | Outcome | Edit | IDs |
+   |---|---|---|
+   | New requirements | new Rules and Scenarios | next free numbers |
+   | Requirements changed | only the affected Rules and Scenarios | kept while it answers the same business question (new wording or a new answer); retired and replaced for another rule, a split or a merge |
+   | Requirements clarified | wording, glossary, added scenarios that pin existing behavior for a silent case; no outcome of an existing scenario changes | existing kept; an added scenario gets the next number |
+   | Requirements improved (bug) | only the case the bug exposed | a corrected scenario keeps its ID; an added one gets the next number |
+
+   Before writing, list per rule its boundary (at and just past a limit), what it rejects, who may
+   act, and the business outcome of a failure. Ask the user about gaps only, at most 3 questions at
+   a time, each with options and a recommended default; never invent a rule. An edit the class does
+   not allow (a clarification that changes an outcome, a bug fix that rewrites other cases) means
+   the class is wrong: correct the header with the user as in step 1, or step 11. Under `revert`,
+   undo the reverted change's requirement edits and retire the IDs it added. Retired IDs go to the
+   file's `## Retired IDs` list; numbers are never reused.
+5. **Glossary.** The local glossary lists every domain term its file uses: Term | Kind (subject,
+   object, event, state, value) | Meaning | Avoid. A term used by several features lives in
+   `GLOSSARY.md`; local rows copy its Meaning word for word and link to it. When a second feature
+   starts using a local term, move it to `GLOSSARY.md` and turn both rows into copies. Name every
+   other feature file you touch, and every feature a changed shared Meaning affects, in the summary.
+6. **Leakage check** on every file you edited. Failures, fix them: ticket keys (a key whose prefix
+   is not in the index), requester names, sentences copied from `## Original request`. Warnings,
+   each with a proposed fix or "keep" for the summary: change-relative words (new, now, no longer,
+   currently, will) and the flagged vocabulary of the Gherkin style. Every sentence must read
+   correctly to someone who never saw the request.
+7. **No-technical-impact check.** For each added (not extracted), changed or retired ID: does it
+   change persisted data, an interface or integration, UI placement, or a target in the quality
+   catalog? Also search the feature's `{{vars.techDesignFile}}` for these IDs: a row citing one is a hit.
+   - Any hit, or the `ui-design` modifier → `NEXT`: set `Route: full` and list the hit sections in
+     `Tech design sections:` with the keys of the Task brief section (`data`, `interfaces`, `ui`,
+     `quality (<codes>)`).
+   - No hit → `NO_TECH_IMPACT`: set `Route: behavior` and `Tech design sections: none`. It is a
+     forward event: no Rework entry.
+   - A route switch (full ↔ behavior) also gets one dated line, with the hits or their absence, in
+     the reclassification log of `## Classification`. Once the brief records an accepted tech
+     design, `Route: full` stays: the check only decides whether this revision needs it again.
+8. **Gate checklist.** Every item holds before you present the summary:
+   - [ ] IDs well formed (`<PREFIX>-<n>`, `<PREFIX>-<n>.<m>`, prefix in the index), unique, never
+     reused: a new number is the highest in the file, Retired IDs included, plus 1.
+   - [ ] Every Rule has at least one Scenario, plus a negative one when it rejects, forbids or
+     limits something; every Rule and Scenario passes the checklists of the Gherkin style.
+   - [ ] Every domain term resolves to exactly one glossary row; shared copies match `GLOSSARY.md`.
+   - [ ] No two rules contradict each other, in the file or with the rules it cites.
+   - [ ] No leakage failure; every warning has a proposed resolution.
+   - [ ] Index row, `Coverage:` and `Related rules:` lines current.
+9. **Get acceptance.** Present the IDs added, changed, reworded, retired and extracted (each with
+   its name), glossary changes, warnings with your proposals, follow-ups, and the event with its
+   tech design sections. Wait for an explicit yes in this conversation; silence or approval of one part is not
+   acceptance. On any change: edit, rerun steps 5 to 8, present again. Iterate here until accepted.
+10. **Commit.** Stage only the requirement files you changed and commit them alone:
+    `docs(req): <PREFIX> requirements for <task>` (several features: `docs(req): CHK, ACC
+    requirements for <task>`). Write its sha into the header (`Accepted: … requirements <sha>`,
+    replacing an older one); when step 3 extracted rules, append their IDs, keeping those listed
+    before: `requirements <sha> (extracted: CHK-1, CHK-1.1)`. Mark the Rework items done, commit
+    the brief: `docs(task): requirements accepted for <task>`. Then fire the event chosen in step 7.
+11. **Reclassify** when the class or route no longer fits (steps 1 and 4) or the task turns out to
+    be out of scope: tell the user why and get agreement, append a Rework entry (`RECLASSIFY`,
+    define-behavior, numbered: what you found and the class you suggest), commit only the brief
+    (`docs(task): reclassify <task>`), name the requirement drafts left uncommitted, fire
+    `RECLASSIFY`.
+
+## Outputs
+
+- `{{vars.requirementsDir}}/<feature>/{{vars.requirementsFile}}` for every feature of the brief;
+  `README.md` and `GLOSSARY.md` when created or changed.
+- Brief: `Route:`, `Tech design sections:` and `Accepted: … requirements <sha>` (with the extracted
+  IDs) in the header; Rework items marked done; a reclassification log line when the route
+  switched; follow-ups in the hand-off.
+- Two commits: the requirement files alone, then the brief.
+
+## Exit criteria
+
+- `NEXT` or `NO_TECH_IMPACT`: the gate checklist passes and the user explicitly accepted the
+  summary, warnings included, in this conversation; the requirements commit holds only
+  requirement files, its sha is in the committed brief, and the tree is clean.
+- The event matches step 7: `NEXT` with the sections listed; `NO_TECH_IMPACT` only with no hit and
+  no `ui-design`.
+- `RECLASSIFY`: the user agreed and the Rework entry is committed in the brief.
+
+## Pitfalls
+
+- UI scripts or technical design in rules (screens, endpoints, tables, response times): placement
+  and metrics belong to the tech design, everything else to the code.
+- Request leakage: story narratives, "the client asked", ticket keys, solution wording.
+- Baselining the whole feature, or writing a suspected bug down as a rule.
+- Renumbering, reusing or deleting IDs instead of retiring them.
+- Choosing `NO_TECH_IMPACT` to save a step: one hit means the route includes Tech design.
+- Rules nobody confirmed: ideas of your own are questions in the summary, not requirements.
+- Editing code or tests here; committing requirements together with the brief.
+
+{{> brief}}
+
+{{> requirements-rules}}
+
+{{> flow-context}}

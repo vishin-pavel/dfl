@@ -1,0 +1,123 @@
+# Requirements file skeletons
+
+Three files hold the business requirements: one `{{vars.requirementsFile}}` per feature folder, the
+index `README.md` and the shared `GLOSSARY.md` at the root of `{{vars.requirementsDir}}/`. Copy the
+skeletons when a file is missing; never invent other sections.
+
+## Feature file: `{{vars.requirementsDir}}/<feature>/{{vars.requirementsFile}}`
+
+````markdown
+# <Feature name>
+
+<Purpose: 2 to 4 timeless sentences: who uses the capability and what it lets them achieve.>
+
+**Coverage:** complete | partial. **Related rules:** <IDs of other features' rules this one relies on | none>
+
+## Rules
+
+### <PREFIX>-1 <Rule statement>
+
+```gherkin
+Rule: <PREFIX>-1 <Rule statement>
+  Scenario: <PREFIX>-1.1 <outcome>
+    Given <situation>
+    When <event>
+    Then <observable outcome>
+```
+
+## Glossary
+
+| Term | Kind | Meaning | Avoid |
+|---|---|---|---|
+
+## Retired IDs
+
+- <ID> <former name>: replaced by <ID> | removed
+````
+
+| Part | Rule |
+|---|---|
+| H1 | The feature's name: the folder's kebab-case noun in words ("Checkout"). |
+| Purpose | Timeless and request-free: no "will", "new", ticket keys or requester names. |
+| Coverage | `complete` when every known behavior of the feature is described; `partial` otherwise (usual after an adoption baseline). The index row says the same. |
+| Related rules | IDs only, never copied text; `none` when there are none. |
+| Rules | One H3 and one fenced `gherkin` block per Rule, ordered by ID. The H3 repeats the Rule line without the keyword. A new rule gets the highest rule number ever used in the file plus 1, retired ones included; a new scenario gets the highest number ever used in its rule plus 1. |
+| Glossary | Every domain term the file uses, alphabetical. Kind: subject (an actor), object (a thing), event (something that happens), state (a condition), value (an amount, date or quantity). Avoid: synonyms not to use. A term with two meanings gets a qualifier ("Billing Account", "Login Account"). |
+| Shared term | Meaning copied word for word from `GLOSSARY.md`, followed by `Shared: [GLOSSARY.md](../GLOSSARY.md)`. |
+| Retired IDs | Added with the first retirement; one line per retired rule (its scenarios retire with it) or scenario; lines are never deleted. |
+
+## Index: `{{vars.requirementsDir}}/README.md`
+
+```markdown
+# Requirements
+
+Business requirements of {{project.name}}, one folder per feature. The rules in each feature's
+{{vars.requirementsFile}} are the source of truth for its behavior. Terms used by several features
+are defined in [GLOSSARY.md](GLOSSARY.md).
+
+| Feature | Prefix | Purpose | Coverage |
+|---|---|---|---|
+| [<feature>](<feature>/{{vars.requirementsFile}}) | <PREFIX> | <one line> | <complete or partial> |
+```
+
+- One row per feature, sorted by feature name. Purpose is one line; a cross-cutting feature (access
+  control, audit, notifications) starts it with "Cross-cutting:".
+- A prefix has 2 to 5 capital letters, is unique in the index, is never `SYS` (the tech design
+  baseline) and should not equal a ticket project key of the team: IDs would look like ticket keys.
+
+## Shared glossary: `{{vars.requirementsDir}}/GLOSSARY.md`
+
+```markdown
+# Glossary
+
+Terms used by more than one feature. Each feature's glossary copies the Meaning of the terms it
+uses word for word and links here.
+
+| Term | Kind | Meaning | Avoid | Used by |
+|---|---|---|---|---|
+```
+
+`Used by` lists the features whose glossaries copy the term: all of them change when its Meaning
+changes.
+
+## Filled example: `{{vars.requirementsDir}}/checkout/{{vars.requirementsFile}}`
+
+````markdown
+# Checkout
+
+Lets a Customer turn the Items of a Cart into a placed Order. Who may place Orders is decided by
+the accounts feature.
+
+**Coverage:** partial. **Related rules:** ACC-2
+
+## Rules
+
+### CHK-1 An Order can be placed only for a Cart with at least one Item
+
+```gherkin
+Rule: CHK-1 An Order can be placed only for a Cart with at least one Item
+  Scenario: CHK-1.1 A Customer places an Order for a Cart with Items
+    Given a Customer has a Cart with 2 Items
+    When the Customer places an Order
+    Then an Order with the 2 Items is placed
+  Scenario: CHK-1.3 A Customer cannot place an Order for an empty Cart
+    Given a Customer has an empty Cart
+    When the Customer tries to place an Order
+    Then no Order is placed
+    And the Customer is told that the Cart is empty
+```
+
+## Glossary
+
+| Term | Kind | Meaning | Avoid |
+|---|---|---|---|
+| Cart | object | The Items a Customer has chosen but not yet ordered | Basket |
+| Customer | subject | A person who places Orders. Shared: [GLOSSARY.md](../GLOSSARY.md) | Client, User |
+| Item | object | Something for sale, in the quantity the Customer chose | Line, Product |
+| Order | object | A Customer's binding request to buy the Items of a Cart | Purchase |
+
+## Retired IDs
+
+- CHK-1.2 A Customer places an Order without signing in: removed
+- CHK-2 Orders under 10 USD are rejected: removed
+````

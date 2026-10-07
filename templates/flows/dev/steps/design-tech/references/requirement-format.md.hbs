@@ -1,0 +1,103 @@
+# Requirement format
+
+How to write one technical requirement, in every section of a `{{vars.techDesignFile}}`. Read it
+before drafting the first section; the grill and Dev QA check each row against it.
+
+## One-liner
+
+`[While <state>,] [When <trigger>,] <subject> shall <response> <measure>.`
+
+- **Subject**: the product or a part of it by its glossary term or role (the export, the order
+  store, the payment provider's client); never a class, file or library.
+- **State, trigger**: optional, observable conditions (While an import runs; When a user exports
+  up to 100 000 orders). For an unwanted event: `If <event>, then <subject> shall <response>`.
+- **Response**: what the system achieves or guarantees, not how.
+- **Measure**: statistic, threshold and unit, plus the conditions it holds under (load, data size,
+  environment, where it is measured): `p95 ≤ 300 ms at 50 requests/s, measured at the server`.
+
+One requirement per row: split an "and" whose parts can fail separately.
+
+## Table
+
+Every section that holds requirements uses one table with these columns, rows sorted by ID:
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+
+| Column | Rule |
+|---|---|
+| ID | `<PREFIX>-<CODE>-<n>` with the catalog code it serves (`SYS-` in the baseline); a reworded row keeps its ID |
+| Sub-characteristic | the ISO name from the quality attributes reference (Time behaviour); for an Extra code, a short topic (Alerts, Rollback, Retention) |
+| Requirement | the one-liner without its measure, which goes to Measure; it ends with `(refines SYS-<CODE>-n)` when it applies or tightens a baseline row, `(places <scenario ID>)` for a UI placement |
+| Measure | the number with its conditions, or the yes/no rule |
+| Verify by | `test` automated test · `bench` load or performance run · `static` lint, architecture rule, dependency or secret scan · `inspect` a reviewer reads code or configuration (say what to look for) · `ops` only production shows it (Dev QA checks that the alert, SLO or budget alarm exists) |
+| Priority | `Must`: the task is not done until it holds · `Should`: wanted; may give way only through a trade-off the user chose, and a miss is reported, never hidden |
+| Source | `user` stated or confirmed by the user · `existing` current behavior, contract or configuration the user confirmed as the requirement · `baseline` the value comes from the SYS row the Requirement names, applied to this feature · `proposed` your suggestion: it becomes `user` only after explicit confirmation, and acceptance is blocked while one remains |
+
+A feature never loosens a baseline row silently: a weaker target is an exception the user approves
+and the Trade-offs list records.
+
+## Quality attribute scenario (SEI)
+
+For failure, attack, peak-load and change situations a one-liner hides the conditions. Keep the
+row (short Requirement, the response measure in Measure) and add the six parts of the scenario of
+Bass, Clements and Kazman as one line under the table:
+
+| Part | Answer |
+|---|---|
+| Source | who or what causes it: user, attacker, dependency, operator, developer |
+| Stimulus | the event: fault, burst of requests, attack, change request |
+| Environment | the conditions: normal, peak, degraded, during a deployment |
+| Artifact | what is affected: a capability, a store, an interface, the code base |
+| Response | what the system does |
+| Response measure | how the response is judged: time, count, share, effort |
+
+`CHK-REL-2`: source payment provider · stimulus no answer within 3 s · environment normal
+operation at peak load · artifact placing an Order · response the Order stays unpaid and the
+Customer is told that payment is pending (CHK-5.3) · response measure answer within 5 s, 0
+duplicate charges.
+
+A change scenario measures effort or reach: `CHK-MAINT-3`: source developer · stimulus a new
+payment method · environment development · artifact the payment capability · response added with
+its tests · response measure no checkout rule changes.
+
+## Vague words
+
+Beyond the adjectives the grill rejects, these fail unless a number or a yes/no rule follows:
+efficient, flexible, easy, simple, quick, responsive, real-time, highly available, minimal, optimal,
+adequate, appropriate, reasonable, as needed, if possible, where applicable, etc., and/or, best
+practice, industry standard, state of the art, and "supports" (supports large files: how large?).
+
+## Verifiable without a number
+
+Allowed when anyone can answer yes or no:
+- An absolute rule: every write is authorized on the server side; no personal data in logs.
+- Conformance to a named standard and level: WCAG 2.2 AA; OWASP ASVS level 2 for sign-in.
+- The presence of a capability or artifact: an alert exists for failed payments; every action is
+  reachable by keyboard; a rollback is one command.
+- A structural rule a tool can check: checkout rules depend on nothing in the payment provider's
+  client.
+
+## Long-lived and decision-relevant
+
+The grill's Long-lived and Decision-relevant questions apply to every row. Typical rewrites:
+
+| Fails | Why | Rewrite |
+|---|---|---|
+| Orders are cached in Redis for 60 s | names the implementation | Repeated reads of an order within 60 s answer in p95 ≤ 50 ms |
+| The order export service streams rows | a component and the how | An export of 1 000 000 rows uses at most 256 MB of memory |
+| Uses the HTTP client library in version 4 | a library version | drop it, or a `CON-n` when a counterpart requires it |
+| The system logs errors | true of any system; changes no choice | When an export fails, the failure is recorded with its cause and alerts after 3 in 10 min |
+| Must be fast | adjective | p95 ≤ 300 ms at 50 requests/s |
+| Currently takes 4 s; must improve | describes today's code, goes stale | p95 ≤ 1 s at 20 requests/s |
+| The new export button | change-relative word | The export action appears in the order list (places ORD-2.1) |
+
+## Examples
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| ORD-PERF-1 | Time behaviour | When a user exports up to 100 000 orders, the download shall start | p95 ≤ 2 s to first byte | bench | Must | user |
+| ORD-PERF-2 | Time behaviour | Order search shall answer within the baseline target at its own peak load (refines SYS-PERF-1) | p95 ≤ 500 ms at 30 requests/s | bench | Should | baseline |
+| ORD-SEC-1 | Confidentiality | An export shall contain only orders of the requester's tenant | 0 foreign rows | test | Must | existing |
+| ORD-REL-2 | Recoverability | If the order store is lost, orders shall be restored from a backup | RPO ≤ 5 min, RTO ≤ 1 h | ops | Must | user |
+| ORD-IC-1 | Operability | Every export action shall be reachable by keyboard alone | yes/no | inspect | Should | user |

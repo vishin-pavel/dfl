@@ -18,12 +18,12 @@ import {
   setActiveFlow,
 } from '../core/config.js';
 import { DflError, errorMessage } from '../core/errors.js';
-import { loadFlow } from '../core/flow.js';
+import { loadFlow, replacementFlowCommand } from '../core/flow.js';
 import { exists, isFile, readText, readTextIfExists, removePath, writeText } from '../core/fsx.js';
 import { withProjectLock } from '../core/lock.js';
 import { loadRuntimeState } from '../core/machine.js';
-import { findProjectRoot, projectPaths, resolveProjectRoot } from '../core/paths.js';
-import { templateUpdates } from '../core/import.js';
+import { findProjectRoot, packageVersion, projectPaths, resolveProjectRoot } from '../core/paths.js';
+import { retiredTemplateFlows, templateUpdates } from '../core/import.js';
 import { isInstalledForUser, readManifest, syncProject, type SyncOptions } from '../core/sync.js';
 import { syncTrackedViewNote, type TrackedViewNote } from '../core/tracker/runtime.js';
 import type { FlowDefinition, FlowVarDef, ProjectPaths, SyncReport, VarScope } from '../core/types.js';
@@ -195,6 +195,40 @@ export function templateUpdateLines(paths: ProjectPaths): string[] {
     c.cyan(
       `${sym.dot} Template "${template}" has changed since flow "${flow}" was created or last pulled. The flow was not changed; ` +
         `review the update with \`${cli} flow pull ${flow} --dry-run\`.`,
+    ),
+  );
+}
+
+/**
+ * True when `.df/installed.json` is missing, unreadable or was written by another dfl version: the
+ * coming sync is this developer's first with the running dfl. Read it before syncing (the sync
+ * rewrites the manifest).
+ */
+export function firstSyncByThisVersion(paths: ProjectPaths): boolean {
+  try {
+    return readManifest(paths).dflVersion !== packageVersion();
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * One line per flow created from a prebuilt template that dfl no longer ships (retiredTemplateFlows).
+ * `install` and `flow-update` show them on the first sync by a dfl version (firstSyncByThisVersion).
+ */
+export function retiredTemplateLines(paths: ProjectPaths): string[] {
+  let flows: ReturnType<typeof retiredTemplateFlows>;
+  let cli: string;
+  try {
+    flows = retiredTemplateFlows(paths);
+    cli = dflLauncher(paths);
+  } catch {
+    return []; // a notice only: never let it break the command
+  }
+  return flows.map(({ flow, template, replacement }) =>
+    c.cyan(
+      `${sym.dot} Flow "${flow}" was created from the template "${template}", which dfl no longer ships (replaced by "${replacement}"). ` +
+        `The flow keeps working unchanged; to try the new default flow run \`${replacementFlowCommand(cli, replacement, paths)}\`.`,
     ),
   );
 }

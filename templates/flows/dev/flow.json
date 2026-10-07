@@ -1,0 +1,132 @@
+{
+  "name": "dev",
+  "title": "Requirements-driven development",
+  "description": "Classify a task, settle its business and technical requirements as deep as it needs, implement against them, verify independently and open a pull request ready for QA.",
+  "version": "1.0.0",
+  "skillPrefix": "",
+  "vars": {
+    "requirementsDir": {
+      "description": "Directory (relative to the project root) with one folder of requirements per feature, plus the index, shared glossary and project tech design baseline; must not contain taskNotesDir",
+      "default": "docs/requirements",
+      "scope": "project"
+    },
+    "requirementsFile": {
+      "description": "File name of a feature's business requirements (Gherkin rules and glossary) inside its folder",
+      "default": "REQUIREMENTS.md",
+      "scope": "project"
+    },
+    "techDesignFile": {
+      "description": "File name of a feature's technical requirements inside its folder; the same name at the root of the requirements directory is the project baseline",
+      "default": "TECH_DESIGN.md",
+      "scope": "project"
+    },
+    "taskNotesDir": {
+      "description": "Directory (relative to the project root) for task briefs: the original request, classification, change requests and the Dev QA report; must lie outside requirementsDir",
+      "default": "docs/tasks",
+      "scope": "project"
+    },
+    "mainBranch": {
+      "description": "Default branch that task branches start from and pull requests target",
+      "default": "main",
+      "scope": "project"
+    },
+    "testCommand": {
+      "description": "Command that runs the full test suite; leave empty to let the flow find it and ask you on first use",
+      "scope": "project",
+      "required": false
+    },
+    "checkCommand": {
+      "description": "Command that runs the other checks CI runs (lint, type check, build), chained with &&; leave empty to let the flow find it",
+      "scope": "project",
+      "required": false
+    },
+    "sensitivePaths": {
+      "description": "Comma-separated path globs whose changes always need human review (for example auth/**, migrations/**)",
+      "scope": "project",
+      "required": false
+    },
+    "featureBranchPrefix": {
+      "description": "Prefix for your feature branch names",
+      "default": "feature/",
+      "scope": "personal"
+    },
+    "fixBranchPrefix": {
+      "description": "Prefix for your bug fix branch names",
+      "default": "fix/",
+      "scope": "personal"
+    },
+    "reviewer": {
+      "description": "GitHub handle (without the leading @) to request pull request reviews from; leave empty to choose per pull request",
+      "scope": "personal",
+      "required": false
+    }
+  },
+  "machine": {
+    "id": "dev",
+    "initial": "classify-task",
+    "states": {
+      "classify-task": {
+        "description": "Classify a task, record its original request in a task brief and choose how deep the flow goes. Use when starting any task or when a later step sends it back.",
+        "meta": { "title": "Classify" },
+        "on": {
+          "NEXT": { "target": "define-behavior", "description": "The developer confirmed a route that changes business requirements" },
+          "TECH_ONLY": { "target": "design-tech", "description": "The developer confirmed a route that changes no business rule but changes technical requirements or UI placement" },
+          "CODE_ONLY": { "target": "implement-task", "description": "The developer confirmed a route without requirement changes: a cited requirement is violated, or a technical change fits the existing requirements" },
+          "OUT_OF_SCOPE": { "target": "not-handled", "description": "The task will not end in a change to this repository and the developer agreed to close it" }
+        }
+      },
+      "define-behavior": {
+        "description": "Write or update the business requirements of the affected features in Gherkin with a glossary and get them accepted. Use when the route changes business rules.",
+        "meta": { "title": "Behavior" },
+        "on": {
+          "NEXT": { "target": "design-tech", "description": "The developer accepted the requirements and they affect technical requirements" },
+          "NO_TECH_IMPACT": { "target": "implement-task", "description": "The developer accepted the requirements and the no-technical-impact check passed" },
+          "RECLASSIFY": { "target": "classify-task", "description": "The task turned out to need another class or route" }
+        }
+      },
+      "design-tech": {
+        "description": "Screen quality attributes and write the long-lived technical requirements of the affected features, then get them accepted. Use when the route includes tech design.",
+        "meta": { "title": "Tech design" },
+        "on": {
+          "NEXT": { "target": "implement-task", "description": "The developer accepted the tech design" },
+          "REQUIREMENTS_GAP": { "target": "define-behavior", "description": "The design needs a business rule or glossary term the requirements do not have" }
+        }
+      },
+      "implement-task": {
+        "description": "Implement the task test-first against its accepted requirements and tech design, discussing every requirement change. Use when requirements are settled or work was sent back.",
+        "meta": { "title": "Implement" },
+        "on": {
+          "NEXT": { "target": "verify-task", "description": "Every in-scope requirement is implemented and tested, the checks pass and every change request is decided" },
+          "REVISE_REQUIREMENTS": { "target": "define-behavior", "description": "A business requirement change is too big to make in place, or the developer chose to revise it there" },
+          "REVISE_DESIGN": { "target": "design-tech", "description": "A tech design change is too big to make in place, or the developer chose to revise it there" }
+        }
+      },
+      "verify-task": {
+        "description": "Verify independently that every in-scope requirement is met and every change maps to a requirement. Use in a fresh session after implementation.",
+        "meta": { "title": "Dev QA" },
+        "on": {
+          "NEXT": { "target": "ship-task", "description": "Every check passed; sensitive changes are listed for human review" },
+          "FAILED": { "target": "implement-task", "description": "A requirement is not met, a check failed or a change maps to no requirement" },
+          "REQUIREMENTS_GAP": { "target": "define-behavior", "description": "The change needs a business rule the requirements lack, or a user-visible change skipped the behavior step" },
+          "DESIGN_GAP": { "target": "design-tech", "description": "The change needs a technical requirement the tech design lacks, or contradicts the quality attribute screening" }
+        }
+      },
+      "ship-task": {
+        "description": "Push the verified branch and open a pull request carrying the Dev QA report, ready for the QA team. Use when Dev QA passed.",
+        "meta": { "title": "Ship" },
+        "on": {
+          "NEXT": { "target": "done", "description": "The pull request is open and CI is green, or the hand-off says what is not available" },
+          "CHANGES_REQUESTED": { "target": "implement-task", "description": "Pull request reviewers or CI require code changes" }
+        }
+      },
+      "done": {
+        "type": "final",
+        "description": "Dev QA passed and the pull request is open: the task is ready for the QA team."
+      },
+      "not-handled": {
+        "type": "final",
+        "description": "The task was closed without changes."
+      }
+    }
+  }
+}

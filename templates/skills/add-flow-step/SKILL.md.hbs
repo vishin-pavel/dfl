@@ -72,7 +72,8 @@ Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with 
    - No YAML frontmatter: dfl generates `name` and `description` from flow.json. Only
      `allowed-tools` or `license` may appear in frontmatter.
    - Sections: goal, inputs, a numbered procedure, outputs, exit criteria, pitfalls. Use concrete
-     commands with variables, such as `\{{vars.testCommand}}`.
+     commands with variables, such as `\{{vars.mainBranch}}`; guard a variable without a default
+     with `\{{#if vars.<name>}}` ... `\{{/if}}`.
    - Context you can use: `\{{project.name}}`, `\{{flow.title}}`, `\{{step.title}}`,
      `\{{step.description}}`, `\{{vars.<name>}}`, `\{{env.<NAME>}}`, `\{{dfl.cli}}`; conditionals
      like `\{{#if vars.reviewer}}` ... `\{{/if}}`; loops like `\{{#each step.next}}` ... `\{{/each}}`;
@@ -99,7 +100,7 @@ Use the tools of the `{{dfl.mcpServer}}` MCP server (some agents list them with 
 7. **Create the step** with `add_step`: `id`, `title`, `description`, `after` or `before`,
    optionally `event` (the event used to splice the step in, default `NEXT`), `on` for extra
    transitions and `template`. In `on`, map an event to a target step, or to a target with its
-   condition: `{ "FAILED": { "target": "implement-feature", "description": "QA checklist failed" } }`.
+   condition: `{ "FAILED": { "target": "implement-task", "description": "QA checklist failed" } }`.
    dfl writes the files, re-renders and re-installs the skills, and returns the step (with its
    `rendered` skill text), a sync summary and warnings. Read the rendered text and check that
    commands and code samples survived rendering, in particular literal braces.

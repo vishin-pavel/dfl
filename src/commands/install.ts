@@ -14,7 +14,7 @@ import {
   setSelectedAgents,
 } from '../core/config.js';
 import { DflError } from '../core/errors.js';
-import { createFlow, flowExists, listFlowTemplates, listFlows, loadFlow } from '../core/flow.js';
+import { createFlow, flowExists, listFlowTemplates, listFlows, loadFlow, retiredTemplateError, retiredTemplateReplacement } from '../core/flow.js';
 import { loadRuntimeState } from '../core/machine.js';
 import { readManifest, uninstallProject } from '../core/sync.js';
 import { AGENT_IDS, type AgentId, type FlowModel, type ProjectPaths } from '../core/types.js';
@@ -37,10 +37,12 @@ import {
 import {
   askMissingVars,
   confirmDestructive,
+  firstSyncByThisVersion,
   locked,
   mcpChangeLine,
   projectFor,
   promptVarInteractive,
+  retiredTemplateLines,
   storeVarAnswers,
   syncWithDiff,
   templateUpdateLines,
@@ -51,7 +53,7 @@ import {
 } from './shared.js';
 
 /** Template installed when nothing else is chosen. */
-const DEFAULT_TEMPLATE = 'feature';
+const DEFAULT_TEMPLATE = 'dev';
 
 export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliContext): void {
   program
@@ -108,12 +110,18 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
       const paths = projectFor(ctx);
       // Missing required variables are asked for before the lock is taken (a dry run asks nothing).
       const answers = await askMissingVars(paths, { interactive: isInteractive(opts), sync: opts.dryRun !== true, always: true });
+      // Read before the sync rewrites the manifest: the retired-template notice is shown once per dfl version.
+      const firstSync = firstSyncByThisVersion(paths);
       // Without --mcp/--no-mcp the saved preference (`dfl install --no-mcp`) applies.
       const run = await locked(paths, () => {
         storeVarAnswers(paths, answers);
         return syncWithDiff(paths, { mcp: opts.mcp, dryRun: opts.dryRun });
       });
-      printLines([...compactSyncLines(run, opts.dryRun === true), ...templateUpdateLines(paths)]);
+      printLines([
+        ...compactSyncLines(run, opts.dryRun === true),
+        ...templateUpdateLines(paths),
+        ...(firstSync ? retiredTemplateLines(paths) : []),
+      ]);
       for (const message of run.report.warnings) warning(message);
       warnRepairedState(paths, run.report.flow);
     });
@@ -142,6 +150,8 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
   } else {
     print(`${c.bold('dfl install')} ${c.dim(paths.root)}`);
   }
+  // Read before anything is written: the retired-template notice is shown once per dfl version.
+  const firstSync = firstSyncByThisVersion(paths);
 
   // Every question is asked before anything is written, so cancelling leaves the project untouched.
   // Flows: --flow, or templates when the project has none yet.
@@ -248,7 +258,7 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
   // A flow tracked in Jira does not use its local state: no repair warning about it.
   const repaired = trackedViewNote(paths, model.name) ? undefined : loadRuntimeState(paths, model).repaired;
   const warnings = [...run.report.warnings, ...(repaired ? [repaired] : [])];
-  const updates = templateUpdateLines(paths);
+  const updates = [...templateUpdateLines(paths), ...(firstSync ? retiredTemplateLines(paths) : [])];
   if (updates.length > 0) lines.push('', ...updates);
   if (interactive) {
     logMessage(lines);
@@ -261,10 +271,15 @@ async function install(ctx: CliContext, opts: InstallOptions): Promise<void> {
   }
 }
 
-/** `--flow <name>` that is not a flow of the project: it must name a template (created under its own name). */
+/**
+ * `--flow <name>` that is not a flow of the project: it must name a template (created under its own
+ * name). A template dfl no longer ships is TEMPLATE_RETIRED.
+ */
 function templateOrThrow(paths: ProjectPaths, name: string): string {
   const templates = listFlowTemplates();
   if (templates.some((template) => template.name === name)) return name;
+  const replacement = retiredTemplateReplacement(name, templates);
+  if (replacement !== undefined) throw retiredTemplateError(name, replacement, { paths, install: true });
   const flows = listFlows(paths);
   throw new DflError(`Unknown flow or template "${name}".`, {
     hint: [
@@ -286,7 +301,8 @@ async function chooseTemplates(interactive: boolean): Promise<string[]> {
     });
   }
   const defaults = [templates.some((t) => t.name === DEFAULT_TEMPLATE) ? DEFAULT_TEMPLATE : templates[0]!.name];
-  if (!interactive) return defaults;
+  // Nothing to choose from: the only template is used without asking.
+  if (!interactive || templates.length === 1) return defaults;
   return multiselect({
     message: 'Which flows do you want to start with?',
     options: templates.map((t) => ({ value: t.name, label: `${t.title} ${c.dim(`(${t.name})`)}`, hint: plural(t.steps, 'step') })),

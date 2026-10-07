@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { dflLauncher } from '../agents/mcp-config.js';
 import { DflError } from './errors.js';
 import {
   copyDir,
@@ -379,6 +380,69 @@ export interface FlowTemplateInfo {
   dir: string;
 }
 
+/**
+ * Prebuilt templates that earlier dfl versions shipped → the template that replaced them. Flows created
+ * from one keep working (only `dfl flow pull` needs the template); a lookup by such a name throws
+ * TEMPLATE_RETIRED. A name only counts as retired while the package does not ship it.
+ */
+export const RETIRED_FLOW_TEMPLATES: Readonly<Record<string, string>> = { feature: 'dev', bugfix: 'dev', quick: 'dev' };
+
+/** The template that replaced `name`, or undefined when `name` is shipped (`templates`) or was never retired. */
+export function retiredTemplateReplacement(name: string, templates: readonly FlowTemplateInfo[] = listFlowTemplates()): string | undefined {
+  if (!Object.hasOwn(RETIRED_FLOW_TEMPLATES, name) || templates.some((template) => template.name === name)) return undefined;
+  return RETIRED_FLOW_TEMPLATES[name];
+}
+
+/**
+ * The command that moves a project to the flow of the template `replacement`: `<cli> flow use <replacement>`
+ * when the project (`paths`) already has a flow of that name (creating it would fail with FLOW_EXISTS),
+ * otherwise `<cli> flow create <replacement> --from <replacement>`.
+ */
+export function replacementFlowCommand(cli: string, replacement: string, paths?: ProjectPaths): string {
+  return paths !== undefined && flowExists(paths, replacement)
+    ? `${cli} flow use ${replacement}`
+    : `${cli} flow create ${replacement} --from ${replacement}`;
+}
+
+export interface RetiredTemplateContext {
+  /**
+   * Spells the commands of the hint with this project's dfl launcher (dflLauncher); default `dfl`. When
+   * the project already has a flow named after the replacement, the hint says to use it instead of creating it.
+   */
+  paths?: ProjectPaths | undefined;
+  /** The flow created from the template (`dfl flow pull <flow>`), named in the hint. */
+  flow?: string | undefined;
+  /**
+   * Raised by `dfl install --flow <retired>`: the project may have no .df/ yet, where every other command
+   * fails with NO_PROJECT. The hint starts the new flow with `<cli> install --flow <replacement>` (with or
+   * without .df/: it creates and activates the flow, or activates an existing one) and leaves out how to
+   * reuse a flow in another project when the project has no flows.
+   */
+  install?: boolean | undefined;
+}
+
+/** TEMPLATE_RETIRED: `name` is a template dfl no longer ships; the hint says what still works and what to do instead. */
+export function retiredTemplateError(name: string, replacement: string, context: RetiredTemplateContext = {}): DflError {
+  const cli = context.paths ? dflLauncher(context.paths) : 'dfl';
+  const flow = context.flow;
+  const keeps = flow
+    ? `Flow "${flow}" keeps working; it only gets no template updates.`
+    : `Flows created from "${name}" keep working; they only get no template updates.`;
+  const start = context.install ? `${cli} install --flow ${replacement}` : replacementFlowCommand(cli, replacement, context.paths);
+  // Imported flows are not activated (and `--use` is personal): the other project makes it its team default.
+  const reused = flow ?? '<flow>';
+  const reuse =
+    context.install && (context.paths === undefined || listFlows(context.paths).length === 0)
+      ? ''
+      : ` To reuse ${flow ? 'the flow' : `a flow made from "${name}"`} in another project, run \`${cli} flow export ${reused}\` here, ` +
+        `and there \`${cli} flow import <file>\` then \`${cli} flow use ${reused} --project\` ` +
+        '(a project without .df/ needs `mkdir .df` first).';
+  return new DflError(`dfl no longer ships the flow template "${name}"; it was replaced by "${replacement}".`, {
+    hint: `${keeps} Start the new flow with \`${start}\`.${reuse}`,
+    code: 'TEMPLATE_RETIRED',
+  });
+}
+
 /** Prebuilt flow templates shipped in the package (`templates/flows/*`). */
 export function listFlowTemplates(): FlowTemplateInfo[] {
   const root = flowTemplatesDir();
@@ -396,15 +460,20 @@ export function listFlowTemplates(): FlowTemplateInfo[] {
     });
 }
 
-export function getFlowTemplate(name: string): FlowTemplateInfo {
-  const template = listFlowTemplates().find((t) => t.name === name);
-  if (!template) {
-    throw new DflError(`Unknown flow template "${name}".`, {
-      hint: `Available templates: ${listFlowTemplates().map((t) => t.name).join(', ') || '(none)'}`,
-      code: 'TEMPLATE_NOT_FOUND',
-    });
-  }
-  return template;
+/**
+ * The shipped template `name`. Throws TEMPLATE_RETIRED for a template dfl no longer ships
+ * ({@link RETIRED_FLOW_TEMPLATES}; `context` spells its hint) and TEMPLATE_NOT_FOUND for any other name.
+ */
+export function getFlowTemplate(name: string, context: RetiredTemplateContext = {}): FlowTemplateInfo {
+  const templates = listFlowTemplates();
+  const template = templates.find((t) => t.name === name);
+  if (template) return template;
+  const replacement = retiredTemplateReplacement(name, templates);
+  if (replacement !== undefined) throw retiredTemplateError(name, replacement, context);
+  throw new DflError(`Unknown flow template "${name}".`, {
+    hint: `Available templates: ${templates.map((t) => t.name).join(', ') || '(none)'}`,
+    code: 'TEMPLATE_NOT_FOUND',
+  });
 }
 
 /** A flow copied into a hidden staging dir under `.df/`, ready to be moved into place. */
@@ -549,7 +618,7 @@ export function createFlow(paths: ProjectPaths, name: string, options: CreateFlo
     throw new DflError(`Flow "${name}" already exists.`, { code: 'FLOW_EXISTS' });
   }
   if (options.from) {
-    const template = getFlowTemplate(options.from);
+    const template = getFlowTemplate(options.from, { paths });
     const staged = stageFlowCopy(paths, template.dir, name, { type: 'template', ref: template.name });
     try {
       if (options.title || options.description) {
