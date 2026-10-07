@@ -7,7 +7,8 @@ description: Delete a step from the project's active dfl development flow after 
 Deleting a step removes its state from `.df/<flow>/flow.json`, deletes its directory
 `.df/<flow>/steps/<step-id>/` (template and any extra files) and uninstalls its skill from every
 configured coding agent. Transitions that pointed to the step are rewired so the flow stays
-connected, and a transition that would then point back at its own step is removed. This is
+connected, and a transition that would then point back at its own step is removed. In a flow
+tracked in Jira, the step's status mapping is removed from `.df/tracker.json` as well. This is
 destructive, so explain the consequences and get explicit confirmation first.
 
 {{#if flow.name}}
@@ -101,7 +102,8 @@ fallbacks at the end.
 | `update_step` transitions | `{{dfl.cli}} step transition <id> <EVENT> <target>` (or `--remove`) |
 | `update_step` template | edit `.df/<flow>/steps/<id>/SKILL.md.hbs`, then run `{{dfl.cli}} flow-update` |
 | `validate_flow` | `{{dfl.cli}} flow validate` |
-| `goto_step` | `{{dfl.cli}} goto <step>` |
+| `goto_step` | `{{dfl.cli}} goto <step>` (add `--task <key>` in a flow tracked in Jira) |
+| `start_task` (flows tracked in Jira) | `{{dfl.cli}} task start <ticket>` |
 
 The CLI cannot ask for confirmation from an agent's shell, so `step remove` needs `--yes`. Pass it
 only after the user confirmed the deletion in this conversation (step 6); `--yes` does not force a

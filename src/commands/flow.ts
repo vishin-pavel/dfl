@@ -54,6 +54,7 @@ import {
   printAfterChange,
   projectFor,
   syncAfterChange,
+  trackedViewNote,
   type AfterChange,
   type CliContext,
 } from './shared.js';
@@ -85,7 +86,8 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
             row.active ? c.bold(row.name) : row.name,
             row.error ? c.red('invalid') : row.title,
             row.error ? '' : String(row.steps),
-            row.error ? { text: row.error, style: c.red } : row.done ? c.green('done') : (row.current ?? ''),
+            // Tracked flows: the task's step lives in Jira, the local one is stale.
+            row.error ? { text: row.error, style: c.red } : row.note !== undefined ? { text: row.note, style: c.dim } : row.done ? c.green('done') : (row.current ?? ''),
           ]),
           { head: ['', 'FLOW', 'TITLE', 'STEPS', 'CURRENT'], align: ['left', 'left', 'left', 'right'], maxWidth: terminalWidth() },
         ),
@@ -387,7 +389,9 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
     .action(async (name, opts) => {
       const paths = projectFor(ctx);
       const model = loadFlowOrActive(paths, name);
-      const current = model.name === getActiveFlowName(paths) ? currentStep(paths, model) : undefined;
+      // A flow tracked in Jira: the local current step is stale, so none is highlighted.
+      const tracked = trackedViewNote(paths, model.name);
+      const current = !tracked && model.name === getActiveFlowName(paths) ? currentStep(paths, model) : undefined;
       const { runFlowView } = await import('../tui/run-flow-view.js');
       await runFlowView(model, {
         current,
@@ -398,6 +402,7 @@ export function registerFlowCommands(program: CommandUnknownOpts, ctx: CliContex
         direction: opts.lr ? 'LR' : 'TB',
         ascii: opts.ascii,
       });
+      if (tracked && (opts.print || !process.stdin.isTTY || !process.stdout.isTTY)) print(c.dim(`${capitalize(tracked.note)}.`));
     });
 }
 
@@ -411,6 +416,10 @@ interface FlowRow {
   done?: boolean | undefined;
   source?: unknown;
   error?: string | undefined;
+  /** Tracked in Jira: `current`/`done` are this checkout's local position, not a task's. */
+  tracked?: true | undefined;
+  /** With `tracked`: shown instead of the local current step (e.g. `tracked in Jira (ABC-1): run \`dfl status\``). */
+  note?: string | undefined;
 }
 
 function flowRow(paths: ProjectPaths, name: string, active: boolean): FlowRow {
@@ -434,6 +443,11 @@ function flowRow(paths: ProjectPaths, name: string, active: boolean): FlowRow {
     row.done = state.done;
   } catch (error) {
     row.error = errorMessage(error);
+  }
+  const tracked = trackedViewNote(paths, name);
+  if (tracked) {
+    row.tracked = true;
+    row.note = tracked.note;
   }
   return row;
 }

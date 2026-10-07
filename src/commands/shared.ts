@@ -25,6 +25,7 @@ import { loadRuntimeState } from '../core/machine.js';
 import { findProjectRoot, projectPaths, resolveProjectRoot } from '../core/paths.js';
 import { templateUpdates } from '../core/import.js';
 import { isInstalledForUser, readManifest, syncProject, type SyncOptions } from '../core/sync.js';
+import { syncTrackedViewNote, type TrackedViewNote } from '../core/tracker/runtime.js';
 import type { FlowDefinition, FlowVarDef, ProjectPaths, SyncReport, VarScope } from '../core/types.js';
 import { assertFlowValid, validateFlow } from '../core/validate.js';
 import { resolveVars, setVar, varScope } from '../core/vars.js';
@@ -198,8 +199,12 @@ export function templateUpdateLines(paths: ProjectPaths): string[] {
   );
 }
 
-/** Warns (stderr) when the stored step of the active flow no longer exists and the state fell back. */
+/**
+ * Warns (stderr) when the stored step of the active flow no longer exists and the state fell back.
+ * Not for flows tracked in Jira: their position is the task's record, not `.df/state.json`.
+ */
 export function warnRepairedState(paths: ProjectPaths, flow: string): void {
+  if (syncTrackedViewNote(paths, flow)) return;
   try {
     const repaired = loadRuntimeState(paths, loadFlow(paths, flow)).repaired;
     if (repaired) warning(repaired);
@@ -397,6 +402,61 @@ export function readTemplateFile(file: string): string {
   } catch (error) {
     throw new DflError(`Cannot read template file ${file}: ${errorMessage(error)}`, { code: 'FILE_READ_ERROR', cause: error });
   }
+}
+
+/** `text` with its `` `dfl …` `` commands spelled the way this project runs dfl (dflLauncher, e.g. `npx --no-install dfl`). */
+export function launcherText(paths: ProjectPaths, text: string): string {
+  const cli = dflLauncher(paths);
+  return cli === 'dfl' ? text : text.replaceAll('`dfl ', `\`${cli} `);
+}
+
+/**
+ * Read-only views (flow list/view, step list, install summary) of a flow tracked in Jira: what to show
+ * instead of the local current step, which is stale for tracked flows (syncTrackedViewNote, no network).
+ * Undefined for untracked flows.
+ */
+export function trackedViewNote(paths: ProjectPaths, flow: string): TrackedViewNote | undefined {
+  const view = syncTrackedViewNote(paths, flow);
+  return view ? { ...view, note: launcherText(paths, view.note) } : undefined;
+}
+
+/** Added to commander's error when the ticket argument of `task start` is missing: an unquoted `#123` is a shell comment. */
+export const SHELL_HASH_HINT = 'In a shell, # starts a comment: use 123, ABC-123 or "#123".';
+
+/**
+ * The same for `--task` of `next`, `goto` and `reset`: they take only the full key (bare numbers
+ * are accepted only when starting a task or showing its status).
+ */
+export const TASK_OPTION_HASH_HINT = 'In a shell, # starts a comment: pass the full key, e.g. --task ABC-123.';
+
+/** The same for `--task` of `status`, which also accepts a bare number when jira.defaultProjectKey is set. */
+export const STATUS_TASK_HASH_HINT =
+  'In a shell, # starts a comment: pass the full key, e.g. --task ABC-123 (or 123 and "#123" when jira.defaultProjectKey is set).';
+
+/**
+ * Adds `hint` (default {@link SHELL_HASH_HINT}) to commander's "missing argument" errors of
+ * `command` whose text matches `pattern` (e.g. the ticket argument of `task start`, `--task` of `status`).
+ */
+export function withShellHashHint<T extends { configureOutput(config: { outputError?: (text: string, write: (text: string) => void) => void }): T }>(
+  command: T,
+  pattern: RegExp,
+  hint: string = SHELL_HASH_HINT,
+): T {
+  return command.configureOutput({
+    outputError: (text, write) => write(pattern.test(text) ? `${text}${hint}\n` : text),
+  });
+}
+
+/**
+ * Commander parser of a repeatable `--set <name=value>`: collects task params; `name=` (empty value)
+ * deletes the param (null).
+ */
+export function parseParamSetting(value: string, previous: Record<string, string | null> | undefined): Record<string, string | null> {
+  const at = value.indexOf('=');
+  const name = at < 0 ? '' : value.slice(0, at).trim();
+  if (name === '') throw new InvalidArgumentError('Expected name=value (name= deletes the param).');
+  const text = value.slice(at + 1);
+  return { ...(previous ?? {}), [name]: text === '' ? null : text };
 }
 
 /** Commander argument parser for integers. */

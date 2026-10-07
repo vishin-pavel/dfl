@@ -11,13 +11,11 @@
  * under the project lock, after saving a backup. `apply` refuses when the flow changed after the
  * preview, and a pull refuses to discard changes made in the project unless asked to.
  */
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { backupFlow, extractBundle, readBundle } from './bundle.js';
 import { DflError } from './errors.js';
 import {
@@ -40,12 +38,11 @@ import {
   stageFlowCopy,
 } from './flow.js';
 import { copyFile, exists, isDir, isFile, listDirs, readJson, relPosix, toPosix, walkFiles } from './fsx.js';
+import { runGit } from './git.js';
 import { assertValidFlowName } from './ids.js';
 import { moveCurrentInRuntime, storedCurrentStep } from './machine.js';
 import { readRenderedOutputs } from './render.js';
 import type { FlowDefinition, FlowModel, FlowSource, ProjectPaths } from './types.js';
-
-const execFileAsync = promisify(execFile);
 
 export interface ParsedFlowSource {
   kind: 'git' | 'local' | 'bundle';
@@ -479,16 +476,6 @@ function cleanSubpath(value: string, input: string): string | undefined {
 /** A full (7–64 hex digit) or abbreviated commit SHA. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
-async function git(args: string[], cwd?: string): Promise<string> {
-  const { stdout } = await execFileAsync('git', args, {
-    ...(cwd ? { cwd } : {}),
-    // No interactive credential prompts: they would hang `dfl mcp` and non-TTY runs.
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return stdout;
-}
-
 /** Clones `url` at `ref` (branch, tag or commit SHA) into a temp dir, runs `fn(checkout, commit)` and cleans up. */
 async function withCheckout<T>(url: string, ref: string | undefined, fn: (checkout: string, commit: string) => T): Promise<T> {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'dfl-import-'));
@@ -516,7 +503,7 @@ async function withBundle<T>(file: string, fn: (dir: string) => T): Promise<T> {
 /** Shallow-clones `url` at `ref` into `dest`; returns the checked-out commit. */
 async function cloneRepo(url: string, ref: string | undefined, dest: string): Promise<string> {
   try {
-    await git(['clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', url, dest]);
+    await runGit(['clone', '--depth', '1', ...(ref ? ['--branch', ref] : []), '--', url, dest]);
   } catch (error) {
     if (!ref || !SHA_RE.test(ref) || (error as NodeJS.ErrnoException).code === 'ENOENT') throw cloneError(url, ref, error);
     await fs.rm(dest, { recursive: true, force: true });
@@ -527,7 +514,7 @@ async function cloneRepo(url: string, ref: string | undefined, dest: string): Pr
     }
   }
   try {
-    return (await git(['rev-parse', 'HEAD'], dest)).trim();
+    return (await runGit(['rev-parse', 'HEAD'], { cwd: dest })).trim();
   } catch (error) {
     throw cloneError(url, ref, error);
   }
@@ -536,14 +523,14 @@ async function cloneRepo(url: string, ref: string | undefined, dest: string): Pr
 /** Checks out a commit SHA: a shallow fetch of the commit, else a full fetch (abbreviated SHAs). */
 async function checkoutCommit(url: string, sha: string, dest: string): Promise<void> {
   await fs.mkdir(dest, { recursive: true });
-  await git(['init', '-q'], dest);
-  await git(['remote', 'add', 'origin', '--', url], dest);
+  await runGit(['init', '-q'], { cwd: dest });
+  await runGit(['remote', 'add', 'origin', '--', url], { cwd: dest });
   try {
-    await git(['fetch', '-q', '--depth', '1', 'origin', sha], dest);
-    await git(['checkout', '-q', '--detach', 'FETCH_HEAD'], dest);
+    await runGit(['fetch', '-q', '--depth', '1', 'origin', sha], { cwd: dest });
+    await runGit(['checkout', '-q', '--detach', 'FETCH_HEAD'], { cwd: dest });
   } catch {
-    await git(['fetch', '-q', '--tags', 'origin'], dest);
-    await git(['checkout', '-q', '--detach', `${sha}^{commit}`], dest);
+    await runGit(['fetch', '-q', '--tags', 'origin'], { cwd: dest });
+    await runGit(['checkout', '-q', '--detach', `${sha}^{commit}`], { cwd: dest });
   }
 }
 

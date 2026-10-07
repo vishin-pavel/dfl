@@ -54,6 +54,8 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
    No default reviewer is configured, so ask the user whom to request. They can set a personal
    default with `{{dfl.cli}} vars set reviewer <github-handle> --personal`.
 {{/if}}
+   When you call `complete_step` in this step, pass `{"prUrl": "<pull request URL>"}` in
+   `params` (CLI: `--set prUrl=<url>`).
 6. **Watch CI** (`gh pr checks --watch` when available). If a check fails, read its log. Fix
    pure pipeline problems (for example a missing lockfile entry) here; for failing tests or code
    problems fire `CHANGES_REQUESTED` so the fix goes through implementation, verification and
@@ -62,8 +64,10 @@ tells reviewers everything they need, get CI green and reviews approved, merge, 
    collect them as a numbered list and fire `CHANGES_REQUESTED`.
 8. **Merge** only when checks are green, reviews are approved and the user tells you to, using
    the repository's merge method (`gh pr merge` or the web UI).
-9. **Clean up** after the merge: `git switch {{vars.mainBranch}}`, `git pull`, then
-   `git branch -d {{vars.featureBranchPrefix}}<slug>`. Mention follow-ups the user may want to file.
+9. **Clean up** after the merge. First complete this step (see "When done" below), then:
+   `git switch {{vars.mainBranch}}`, `git pull`, then `git branch -d` the feature branch
+   (`{{vars.featureBranchPrefix}}<slug>`, or `task.branch` when `get_status` returned a task).
+   Mention follow-ups the user may want to file.
 
 ## Outputs
 

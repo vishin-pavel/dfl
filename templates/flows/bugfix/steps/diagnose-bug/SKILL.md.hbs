@@ -7,9 +7,10 @@ fix approach. No production code changes yet.
 ## Inputs
 
 - The failing reproduction test and the `## Reproduction` section of
-  `{{vars.bugNotesDir}}/<slug>.md` (the slug is the current branch name without the
-  `{{vars.fixBranchPrefix}}` prefix). If the note is missing, look in the latest commits on the
-  branch or ask the user; fire `BACK` if there is no reliable reproduction.
+  `{{vars.bugNotesDir}}/<slug>.md` (the slug is `task.params.slug` when `get_status` returned a
+  task, else the current branch name without the `{{vars.fixBranchPrefix}}` prefix). If the
+  note is missing, look in the latest commits on the branch or ask the user; fire `BACK` if
+  there is no reliable reproduction.
 - Any hints in the text the user typed after the command.
 
 ## Procedure

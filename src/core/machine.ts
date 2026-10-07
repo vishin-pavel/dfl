@@ -3,7 +3,9 @@
  *
  * Uses xstate v5 pure functions (`initialTransition`, `transition`, `machine.resolveState`)
  * – never long-running actors. Only `{ current, history, updatedAt }` is persisted per flow in
- * `.df/state.json` (see `StateFile`).
+ * `.df/state.json` (see `StateFile`). The planners (`runtimeFromStored`, `planEvent`, `planGoto`,
+ * `planReset`) do no I/O, so the same checks and history rules also apply to a position stored
+ * elsewhere (a tracker record); `sendEvent`/`gotoStep`/`resetFlow` are load → plan → save.
  */
 import {
   createMachine,
@@ -62,25 +64,38 @@ export function createFlowMachine(def: FlowDefinition): AnyStateMachine {
  * sets `repaired` to a human-readable explanation (the repaired state is NOT written back).
  */
 export function loadRuntimeState(paths: ProjectPaths, model: FlowModel): FlowRuntimeState {
-  const machine = createFlowMachine(model.def);
   const { file, problem } = readStateFile(paths);
-  const entry = file.flows[model.name];
-  const history = entry?.history ?? [];
-  const updatedAt = entry?.updatedAt ?? new Date().toISOString();
+  const state = runtimeFromStored(model, file.flows[model.name]);
+  if (problem && !file.flows[model.name]) {
+    state.repaired = `${problem}; flow "${model.name}" starts at its initial step "${state.current}".`;
+  }
+  return state;
+}
 
-  if (entry) {
-    const snapshot = model.byId.has(entry.current) ? tryResolve(machine, entry.current) : undefined;
+/**
+ * Runtime state of `model` from a stored position (`.df/state.json` entry, or a tracker record),
+ * without I/O. `undefined` → the initial step with no history. A stored step that no longer exists
+ * in the flow falls back to the initial step (history kept) and sets `repaired`.
+ */
+export function runtimeFromStored(
+  model: FlowModel,
+  stored: { current: string; history: HistoryEntry[]; updatedAt: string } | undefined,
+): FlowRuntimeState {
+  const machine = createFlowMachine(model.def);
+  const history = stored?.history ?? [];
+  const updatedAt = stored?.updatedAt ?? new Date().toISOString();
+
+  if (stored) {
+    const snapshot = model.byId.has(stored.current) ? tryResolve(machine, stored.current) : undefined;
     if (snapshot) return runtimeState(model.name, snapshot, history, updatedAt);
   }
 
   const initial = initialSnapshot(machine, model);
   const state = runtimeState(model.name, initial, history, updatedAt);
-  if (entry) {
+  if (stored) {
     state.repaired =
-      `Step "${entry.current}" no longer exists in flow "${model.name}"; ` +
+      `Step "${stored.current}" no longer exists in flow "${model.name}"; ` +
       `falling back to the initial step "${state.current}".`;
-  } else if (problem) {
-    state.repaired = `${problem}; flow "${model.name}" starts at its initial step "${state.current}".`;
   }
   return state;
 }
@@ -113,7 +128,31 @@ export function sendEvent(
   event: string = NEXT_EVENT,
   options: { from?: string | undefined } = {},
 ): TransitionResult {
-  const state = loadRuntimeState(paths, model);
+  return persist(paths, planEvent(model, loadRuntimeState(paths, model), event, options));
+}
+
+/** Jumps to any existing state (records event `GOTO` in history). Throws DflError `STEP_NOT_FOUND`. */
+export function gotoStep(paths: ProjectPaths, model: FlowModel, stepId: string): TransitionResult {
+  getStep(model, stepId);
+  return persist(paths, planGoto(model, loadRuntimeState(paths, model), stepId));
+}
+
+/** Resets the flow to its initial state (records event `RESET`). */
+export function resetFlow(paths: ProjectPaths, model: FlowModel): FlowRuntimeState {
+  return persist(paths, planReset(model, loadRuntimeState(paths, model))).state;
+}
+
+/**
+ * The outcome of firing `event` (default `NEXT`) in `state`, without I/O (the checks and errors of
+ * {@link sendEvent}: `STEP_NOT_FOUND`/`NOT_CURRENT` for `options.from`, `FLOW_DONE`,
+ * `EVENT_NOT_ALLOWED`). The new state has the history entry appended (capped) and `updatedAt` = now.
+ */
+export function planEvent(
+  model: FlowModel,
+  state: FlowRuntimeState,
+  event: string = NEXT_EVENT,
+  options: { from?: string | undefined } = {},
+): TransitionResult {
   if (options.from !== undefined && options.from !== state.current) {
     getStep(model, options.from);
     throw new DflError(`Step "${options.from}" is not the current step of flow "${model.name}" (current: "${state.current}").`, {
@@ -142,22 +181,20 @@ export function sendEvent(
       code: 'EVENT_NOT_ALLOWED',
     });
   }
-  return record(paths, model, state, next, event);
+  return advance(model, state, next, event);
 }
 
-/** Jumps to any existing state (records event `GOTO` in history). Throws DflError `STEP_NOT_FOUND`. */
-export function gotoStep(paths: ProjectPaths, model: FlowModel, stepId: string): TransitionResult {
+/** The outcome of jumping from `state` to `stepId` (event `GOTO`), without I/O. Throws DflError `STEP_NOT_FOUND`. */
+export function planGoto(model: FlowModel, state: FlowRuntimeState, stepId: string): TransitionResult {
   getStep(model, stepId);
-  const state = loadRuntimeState(paths, model);
   const machine = createFlowMachine(model.def);
-  return record(paths, model, state, resolveSnapshot(machine, model, stepId), GOTO_EVENT);
+  return advance(model, state, resolveSnapshot(machine, model, stepId), GOTO_EVENT);
 }
 
-/** Resets the flow to its initial state (records event `RESET`). */
-export function resetFlow(paths: ProjectPaths, model: FlowModel): FlowRuntimeState {
-  const state = loadRuntimeState(paths, model);
+/** The outcome of resetting `state` to the initial step (event `RESET`), without I/O. */
+export function planReset(model: FlowModel, state: FlowRuntimeState): TransitionResult {
   const machine = createFlowMachine(model.def);
-  return record(paths, model, state, initialSnapshot(machine, model), RESET_EVENT).state;
+  return advance(model, state, initialSnapshot(machine, model), RESET_EVENT);
 }
 
 /** Renames a state inside `.df/state.json` (used when a step is renamed). No-op when absent. */
@@ -211,14 +248,8 @@ export function storedCurrentStep(paths: ProjectPaths, flow: string): string | u
 // Internals
 // ---------------------------------------------------------------------------
 
-/** Moves to `next`, appends a history entry, persists and returns the result. */
-function record(
-  paths: ProjectPaths,
-  model: FlowModel,
-  state: FlowRuntimeState,
-  next: AnyMachineSnapshot,
-  event: string,
-): TransitionResult {
+/** Moves to `next` and appends a history entry (capped); nothing is persisted. */
+function advance(model: FlowModel, state: FlowRuntimeState, next: AnyMachineSnapshot, event: string): TransitionResult {
   const at = new Date().toISOString();
   const to = stateKey(next.value, model);
   const entry: HistoryEntry = { from: state.current, to, event, at };
@@ -229,8 +260,13 @@ function record(
     history: [...state.history, entry].slice(-HISTORY_LIMIT),
     updatedAt: at,
   };
-  saveRuntimeState(paths, updated);
   return { from: state.current, to, event, done: updated.done, state: updated };
+}
+
+/** Saves the planned state and returns the result unchanged. */
+function persist(paths: ProjectPaths, result: TransitionResult): TransitionResult {
+  saveRuntimeState(paths, result.state);
+  return result;
 }
 
 function runtimeState(flow: string, snapshot: AnyMachineSnapshot, history: HistoryEntry[], updatedAt: string): FlowRuntimeState {

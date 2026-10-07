@@ -6,9 +6,9 @@ make the reproduction test pass and protect the neighbouring cases with tests.
 ## Inputs
 
 - The `## Diagnosis` section (root cause and agreed fix approach) of
-  `{{vars.bugNotesDir}}/<slug>.md`; the slug is the current branch name without the
-  `{{vars.fixBranchPrefix}}` prefix. If it is missing, ask the user to restate the diagnosis or
-  fire `BACK` to diagnose again.
+  `{{vars.bugNotesDir}}/<slug>.md`; the slug is `task.params.slug` when `get_status` returned a
+  task, else the current branch name without the `{{vars.fixBranchPrefix}}` prefix. If it is
+  missing, ask the user to restate the diagnosis or fire `BACK` to diagnose again.
 - The failing reproduction test on `{{vars.fixBranchPrefix}}<slug>`.
 - If the flow came back here from verification (`FAILED`) or from pull request review
   (`CHANGES_REQUESTED`): the list of failures or requested changes. Look for it in the

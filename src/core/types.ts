@@ -30,6 +30,8 @@ export interface ProjectPaths {
   stateFile: string;
   /** `<root>/.df/installed.json` – manifest of files written outside `.df` (git-ignored). */
   manifestFile: string;
+  /** `<root>/.df/tracker.json` – task tracker (Jira) config (committed; optional). */
+  trackerFile: string;
   /** `<root>/.df/.gitignore` */
   dfGitignoreFile: string;
   /** `<root>/.gitignore` */

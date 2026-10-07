@@ -1,5 +1,6 @@
 /**
- * Step CRUD: edits flow.json and step directories (OWNER: flow-engine agent).
+ * Step CRUD: edits flow.json and step directories (OWNER: flow-engine agent), and keeps the Jira
+ * status mapping of a renamed or removed step in `.df/tracker.json` (best effort).
  *
  * Every mutation validates the edited definition before writing anything. It is refused (DflError
  * `INVALID_FLOW`, listing only the new errors) when it introduces a validation error the flow did not
@@ -24,6 +25,8 @@ import {
 import { exists, readTextIfExists, removePath, writeText } from './fsx.js';
 import { assertStepIdIsPathSafe, assertValidStepId, isValidId, titleCase } from './ids.js';
 import { moveCurrentInRuntime, renameStateInRuntime } from './machine.js';
+import { readTrackerConfigRaw, writeTrackerConfigRaw } from './tracker/config.js';
+import { removeStatusMapping, renameStatusMapping } from './tracker/edit.js';
 import { checkTemplateSource, diffDefinitionErrors, invalidFlowError, templateCheckEnv } from './validate.js';
 import type {
   FlowDefinition,
@@ -326,7 +329,10 @@ export function updateStep(paths: ProjectPaths, flowName: string, stepId: string
   }
   if (patch.template !== undefined) writeText(path.join(paths.stepDir(flowName, id), SKILL_TEMPLATE_FILE), patch.template);
   writeFlowDefinition(paths, def);
-  if (rename !== undefined) renameStateInRuntime(paths, flowName, stepId, rename);
+  if (rename !== undefined) {
+    renameStateInRuntime(paths, flowName, stepId, rename);
+    syncTrackerStatusMapping(paths, flowName, stepId, rename);
+  }
   return Object.assign(loadFlow(paths, flowName), { remainingErrors });
 }
 
@@ -349,6 +355,7 @@ export function removeStep(paths: ProjectPaths, flowName: string, stepId: string
       ? { from: stepId, to: plan.moveCurrentTo }
       : undefined;
   if (isValidId(stepId)) removePath(paths.stepDir(flowName, stepId));
+  syncTrackerStatusMapping(paths, flowName, stepId, null);
   return Object.assign(loadFlow(paths, flowName), {
     rewired: plan.rewired,
     dropped: plan.dropped,
@@ -529,6 +536,23 @@ function assertNoNewErrors(
   const { added, remaining } = diffDefinitionErrors(before, after, flowName, rename);
   if (added.length > 0) throw invalidFlowError(flowName, added);
   return remaining;
+}
+
+/**
+ * Keeps the Jira status mapping of a renamed step (`to`) or removed step (`to` null) in
+ * `.df/tracker.json` (`flows.<flow>.statuses`, key order and other keys kept). Best effort: a
+ * missing, unreadable or invalid tracker.json is left as it is (validation then reports a mapping
+ * of a step the flow does not have), and the step operation never fails because of it.
+ */
+function syncTrackerStatusMapping(paths: ProjectPaths, flowName: string, from: string, to: string | null): void {
+  try {
+    const raw = readTrackerConfigRaw(paths);
+    if (raw === undefined) return;
+    const changed = to === null ? removeStatusMapping(raw, flowName, from) : renameStatusMapping(raw, flowName, from, to);
+    if (changed) writeTrackerConfigRaw(paths, raw);
+  } catch {
+    // An invalid tracker.json is reported by validation and `dfl tracker check`, not by step edits.
+  }
 }
 
 /** Throws DflError `INVALID_TEMPLATE` (nothing is written) when a step template does not compile. */

@@ -107,6 +107,7 @@ export function projectPaths(root: string): ProjectPaths {
     localFile: path.join(dfDir, 'local.json'),
     stateFile: path.join(dfDir, 'state.json'),
     manifestFile: path.join(dfDir, 'installed.json'),
+    trackerFile: path.join(dfDir, 'tracker.json'),
     dfGitignoreFile: path.join(dfDir, '.gitignore'),
     rootGitignoreFile: path.join(abs, '.gitignore'),
     flowDir: (flow) => path.join(dfDir, assertPathSegment(flow)),
@@ -155,7 +156,7 @@ export function flowTemplatesDir(): string {
   return path.join(templatesDir(), 'flows');
 }
 
-/** `<pkg>/templates/skills` – built-in skills (add/edit/delete-flow-step). */
+/** `<pkg>/templates/skills` – built-in skills (add/edit/delete-flow-step, init-task). */
 export function builtinSkillsDir(): string {
   return path.join(templatesDir(), 'skills');
 }

@@ -134,6 +134,11 @@ describe('paths', () => {
     expect(paths.flowDir('feature')).toBe(path.join(paths.dfDir, 'feature'));
     expect(paths.stepDir('feature', 'plan')).toBe(path.join(paths.dfDir, 'feature', 'steps', 'plan'));
   });
+
+  it('places the tracker config in .df', () => {
+    const paths = projectPaths(makeTempDir());
+    expect(paths.trackerFile).toBe(path.join(paths.root, '.df', 'tracker.json'));
+  });
 });
 
 describe('config', () => {
@@ -465,6 +470,34 @@ describe('fsx writes', () => {
     writeText(fresh, 'x');
     const umask = process.umask();
     expect(modeOf(fresh)).toBe(0o666 & ~umask);
+    expect(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  posixOnly('writeText applies a forced mode to an existing file and creates private files and dirs', () => {
+    const dir = makeTempDir();
+    const file = path.join(dir, 'credentials.json');
+    fs.writeFileSync(file, '{"token":"x"}\n');
+    fs.chmodSync(file, 0o644);
+    // Without forceMode an existing file keeps its bits.
+    expect(writeText(file, '{"token":"y"}\n', { mode: 0o600 })).toBe(true);
+    expect(modeOf(file)).toBe(0o644);
+    // forceMode applies the mode on a content change …
+    expect(writeText(file, '{"token":"z"}\n', { mode: 0o600, forceMode: true })).toBe(true);
+    expect(fs.readFileSync(file, 'utf8')).toBe('{"token":"z"}\n');
+    expect(modeOf(file)).toBe(0o600);
+    // … and on unchanged content (only the bits change).
+    fs.chmodSync(file, 0o644);
+    expect(writeText(file, '{"token":"z"}\n', { mode: 0o600, forceMode: true })).toBe(true);
+    expect(modeOf(file)).toBe(0o600);
+    expect(writeText(file, '{"token":"z"}\n', { mode: 0o600, forceMode: true })).toBe(false);
+
+    const fresh = path.join(dir, 'config', 'dfl', 'credentials.json');
+    expect(writeJson(fresh, { version: 1 }, { mode: 0o600, forceMode: true, dirMode: 0o700 })).toBe(true);
+    const umask = process.umask();
+    expect(modeOf(fresh)).toBe(0o600);
+    expect(modeOf(path.dirname(fresh))).toBe(0o700 & ~umask);
+    expect(modeOf(path.join(dir, 'config'))).toBe(0o700 & ~umask);
+    expect(fs.readdirSync(path.dirname(fresh)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
     expect(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 

@@ -26,7 +26,9 @@ reason. Do not try to fix anything yet.
    - when it started and whether it used to work (a regression).
    Ask the user for anything missing that matters; do not guess environment details.
 2. **Create the working branch** from an up-to-date `{{vars.mainBranch}}`, with a short kebab-case
-   slug such as `1234-empty-cart-total` (issue number first when there is one):
+   slug such as `1234-empty-cart-total` (issue number first when there is one). If `get_status`
+   returned a task with a branch, you are already on the working branch: skip this step and use
+   `task.params.slug` as the slug.
 
    ```sh
    git fetch origin {{vars.mainBranch}}
@@ -71,7 +73,8 @@ reason. Do not try to fix anything yet.
 
 ## Outputs
 
-- Branch `{{vars.fixBranchPrefix}}<slug>` with a commit containing the failing test.
+- Branch `{{vars.fixBranchPrefix}}<slug>` (or the task's branch) with a commit containing the
+  failing test.
 - The reproduction note in `{{vars.bugNotesDir}}/<slug>.md` (section `## Reproduction`).
 
 ## Exit criteria

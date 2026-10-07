@@ -8,6 +8,7 @@ import { exists, isFile, listDirs, readJson, readText, walkFiles } from './fsx.j
 import { RESERVED_FLOW_NAMES, digitsOnlyStepIdMessage, isDigitsOnlyId, isValidId } from './ids.js';
 import { createFlowMachine } from './machine.js';
 import { createHandlebars, readRenderedOutputs, type HandlebarsEnv } from './render.js';
+import { trackerValidationWarnings } from './tracker/config.js';
 import type { FlowDefinition, FlowStateNodeConfig, ProjectPaths, ValidationIssue } from './types.js';
 
 /** Skills dfl installs next to every flow's step skills; step skill names must not collide with them. */
@@ -211,6 +212,11 @@ export function validateFlow(paths: ProjectPaths, name: string): ValidationIssue
       step: stepOf,
       file: abs,
     });
+  }
+
+  // Tracker config problems are warnings only: they break tracker operations, never syncs.
+  for (const message of trackerValidationWarnings(paths, name)) {
+    issues.push({ level: 'warning', message, file: paths.trackerFile });
   }
   return issues;
 }

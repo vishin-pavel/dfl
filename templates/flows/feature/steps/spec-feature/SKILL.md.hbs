@@ -36,7 +36,8 @@ wording here turns into rework later.
    - error handling and what the user sees when something fails;
    - compatibility: existing data, public interfaces, configuration, documentation.
 4. **Choose a slug**: a short kebab-case name for the feature, for example `csv-export`. It names
-   the spec file and the branch, and later steps use it to find the spec.
+   the spec file and the branch, and later steps use it to find the spec. If `get_status`
+   returned a task with `task.params.slug`, use that slug.
 5. **Write the spec** to `{{vars.specsDir}}/<slug>.md` with this outline:
 
    ```markdown
@@ -57,8 +58,9 @@ wording here turns into rework later.
    the tests and the verification report can refer to them.
 6. **Resolve the open questions** with the user. Either answer each one in the spec or move it
    explicitly to Non-goals. A spec with unresolved open questions is not finished.
-7. **Create the working branch**, unless the user prefers to stay on the current one. Start from
-   an up-to-date `{{vars.mainBranch}}`:
+7. **Create the working branch**, unless the user prefers to stay on the current one. If
+   `get_status` returned a task with a branch, you are already on the working branch: skip this
+   step. Otherwise start from an up-to-date `{{vars.mainBranch}}`:
 
    ```sh
    git fetch origin {{vars.mainBranch}}
@@ -75,7 +77,7 @@ wording here turns into rework later.
 ## Outputs
 
 - `{{vars.specsDir}}/<slug>.md` with numbered acceptance criteria and no open questions.
-- Branch `{{vars.featureBranchPrefix}}<slug>` containing the spec commit.
+- Branch `{{vars.featureBranchPrefix}}<slug>` (or the task's branch) containing the spec commit.
 
 ## Exit criteria
 

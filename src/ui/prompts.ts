@@ -4,6 +4,7 @@
  */
 import * as p from '@clack/prompts';
 import { CancelledError } from './exit.js';
+import { plain } from './output.js';
 
 export interface PromptOption<T extends string> {
   value: T;
@@ -28,12 +29,15 @@ export async function select<T extends string>(options: {
   message: string;
   options: ReadonlyArray<PromptOption<T>>;
   initialValue?: T | undefined;
+  /** Options shown at once (the list scrolls); default: as many as fit. */
+  maxItems?: number | undefined;
 }): Promise<T> {
   return unwrap(
     await p.select<T>({
       message: options.message,
       options: options.options.map(toClackOption) as Parameters<typeof p.select<T>>[0]['options'],
       ...(options.initialValue !== undefined ? { initialValue: options.initialValue } : {}),
+      ...(options.maxItems !== undefined ? { maxItems: options.maxItems } : {}),
     }),
   );
 }
@@ -75,6 +79,17 @@ export async function text(options: {
   );
 }
 
+/** Masked input for secrets (API tokens): what is typed is never echoed. */
+export async function password(options: { message: string; validate?: ((value: string) => string | undefined) | undefined }): Promise<string> {
+  const validate = options.validate;
+  return unwrap(
+    await p.password({
+      message: options.message,
+      ...(validate ? { validate: (value: string | undefined) => validate(value ?? '') } : {}),
+    }),
+  );
+}
+
 export interface Spinner {
   start(message: string): void;
   message(message: string): void;
@@ -105,8 +120,9 @@ export function logMessage(lines: readonly string[]): void {
   if (lines.length > 0) p.log.message(lines.join('\n'));
 }
 
+/** A warning inside a prompt session (control characters replaced: it may quote Jira). */
 export function logWarning(message: string): void {
-  p.log.warn(message);
+  p.log.warn(plain(message));
 }
 
 function toClackOption<T extends string>(option: PromptOption<T>): { value: T; label?: string; hint?: string } {
