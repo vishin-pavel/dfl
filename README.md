@@ -197,7 +197,12 @@ you confirm the class and route before anything is written.
 The task brief carries the task through every step: the original request (quoted verbatim, never
 copied into requirement or tech design files), the classification, the quality attribute
 screening, change requests, work sent back, the implementation checklist, the Dev QA report and the
-hand-off to the QA team. It is committed on the task branch and kept after the merge.
+hand-off to the QA team. It is committed on the task branch while the work is in progress, and
+`/ship-task` removes it in the branch's last commit once the pull request description holds its
+record (the original request, the classification, change requests, the Dev QA verdict and the
+hand-off, with a permalink to the brief). So `taskNotesDir` holds only briefs of open work, plus
+those of tasks shipped without a pull request (no remote), which stay as their only record. When work comes back after shipping (review changes, a QA team
+rejection), the next step restores the brief from git history before it continues.
 
 **Variables** (set them with [`dfl vars set`](#variables)):
 
@@ -206,7 +211,7 @@ hand-off to the QA team. It is committed on the task branch and kept after the m
 | `requirementsDir` | project | `docs/requirements` | one folder per feature, plus the index, `GLOSSARY.md` and the baseline tech design |
 | `requirementsFile` | project | `REQUIREMENTS.md` | file name of a feature's business requirements |
 | `techDesignFile` | project | `TECH_DESIGN.md` | file name of a feature's technical requirements; at the root of `requirementsDir`, the project baseline |
-| `taskNotesDir` | project | `docs/tasks` | task briefs |
+| `taskNotesDir` | project | `docs/tasks` | task briefs of open work (removed by `/ship-task`) |
 | `mainBranch` | project | `main` | where task branches start and pull requests go |
 | `testCommand` | project | none | the full test suite; when empty, the flow finds it, asks you and saves it |
 | `checkCommand` | project | none | the other checks CI runs (lint, type check, build), chained with `&&`; found the same way |
@@ -222,7 +227,8 @@ the override is recorded in the report. It never fixes anything; it sends the ta
 **Shipping ends with an open pull request.** `/ship-task` never merges and completes on the task
 branch. `done` means Dev QA passed and the pull request is open with CI green (or the hand-off says
 what is not available): the task is ready for the QA team. Merging and the QA team's checks happen
-outside the flow; the brief's hand-off says what to test and how to clean up after the merge.
+outside the flow; the pull request description says what to test, and `/ship-task` tells you how to
+clean up after the merge.
 
 **New and existing projects.** Each step decides the context from the code first. In a
 *greenfield* project (no product code yet) the first task creates the requirements folder, index
@@ -1047,7 +1053,8 @@ The `tracker.json` example above is a setup for [`dev`](#the-dev-flow):
   `/classify-task ABC-123` directly (the agent asks, then starts the ticket). dfl does not fetch the
   ticket description: Classify asks you to paste it and quotes it in the brief, `ABC-123.md`.
 - **QA rejects the work**: `dfl goto implement-task --task ABC-123` moves the task and the ticket
-  back; note what QA found in the brief's `## Rework` section so the step addresses it.
+  back; `/implement-task` restores the brief from git history (on the task branch) and asks what QA
+  found, which it records as a Rework entry.
 - **No remote**: set `"branch": { "from": "main" }` (the local main branch); the default
   `origin/main` does not exist, and starting a ticket would fail with `TASK_BRANCH_BASE_MISSING`.
 

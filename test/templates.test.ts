@@ -514,8 +514,8 @@ describe('dev flow consistency', () => {
     const catalog = readFlowFile(dir, 'partials/quality-catalog.hbs');
     const codes = [...catalog.matchAll(/^\| ([A-Z]+) \|/gm)].map((m) => m[1]!);
     expect(codes).toHaveLength(17);
-    // Uppercase words that are not events: catalog codes, ID kinds and dfl error codes.
-    const notEvents = new Set([...codes, 'SYS', 'DEC', 'CON', 'OBJ', 'CR']);
+    // Uppercase words that are not events: catalog codes, ID kinds, git refs and dfl error codes.
+    const notEvents = new Set([...codes, 'SYS', 'DEC', 'CON', 'OBJ', 'CR', 'FETCH_HEAD']);
     const isErrorCode = (token: string): boolean => /^(?:TASK|TRACKER)_[A-Z0-9_]+$/.test(token);
     let checked = 0;
     for (const [rel, source] of sources) {
@@ -851,6 +851,8 @@ describe('content regressions', () => {
         expect(text, where).not.toMatch(/git checkout main --/);
         // Old files are never checked out into the working tree: baselines run in a separate worktree.
         expect(text, where).not.toMatch(/`git checkout [^`]*--/);
+        // The one exception: restoring a removed brief (never code or tests) from the commit before its removal.
+        for (const match of text.matchAll(/`git restore [^`]*`/g)) expect(match[0], where).toMatch(/^`git restore --source=<commit>~1 --staged --worktree -- docs\/tasks\/<task>\.md`$/);
         for (const match of text.matchAll(/git (?:diff|log)\b[^`\n]*?(\S+?)\.\.\.?HEAD/g)) {
           diffs++;
           expect(match[1], `${where}: ${match[0]}`).toBe('origin/main');
@@ -928,7 +930,7 @@ describe('content regressions', () => {
       ],
       'implement-task': ['`docs(req): CR-n <summary>`', '`docs(td): CR-n <summary>`', '`feat(checkout): reject empty carts (CHK-1.2)`'],
       'verify-task': ['`git commit -m "docs(task): Dev QA report round <n> for <task>"`'],
-      'ship-task': ['`docs(task): hand-off for <task>`'],
+      'ship-task': ['`docs(task): hand-off for <task>`', '`docs(task): remove brief for <task>`'],
     };
     expect(Object.keys(commits)).toEqual([...dev.keys()]);
     for (const [step, messages] of Object.entries(commits)) {
@@ -969,21 +971,67 @@ describe('content regressions', () => {
     expect(procedure).toContain(
       'When you call `complete_step` in this step, pass `{"prUrl": "<pull request URL>"}` in `params` (CLI: `--set prUrl=<url>`).',
     );
-    // The flow ends with the pull request open: no merge, and the cleanup is only a note in the hand-off.
+    // The flow ends with the pull request open: no merge; the cleanup after the merge is only told to the user.
     expect(ship).not.toContain('gh pr merge');
     expect(ship).not.toMatch(/gh pr review\b[^`\n]*--approve/);
-    const handOff = procedureStep(ship, 8);
-    const cleanup = handOff.split('\n').filter((line) => line.includes('After the merge:'));
-    expect(cleanup).toHaveLength(1);
+    const complete = flat(procedureStep(ship, 10));
     for (const command of ['`git switch main`', '`git pull`', '`git branch -d <branch>`']) {
-      expect(cleanup[0], command).toContain(command);
-      expect(ship.split(command).length - 1, `${command} appears only in the hand-off note`).toBe(1);
+      expect(complete, command).toContain(command);
+      expect(ship.split(command).length - 1, `${command} appears only in the cleanup told to the user`).toBe(1);
     }
-    // Completing happens on the task branch, after the hand-off is committed and pushed.
-    const complete = flat(procedureStep(ship, 9));
-    expect(complete).toMatch(/^9\. \*\*Complete on the task branch\.\*\*/);
+    // Completing happens on the task branch, after the hand-off is committed and the brief removed.
+    expect(complete).toMatch(/^10\. \*\*Complete on the task branch\.\*\*/);
     expect(complete).toContain('you are still on the task branch: no merge, no `git switch` and no branch deletion before completing. Fire `NEXT`.');
-    expect(flat(handOff)).toContain('Commit the brief alone, `docs(task): hand-off for <task>`, and push');
+    expect(flat(procedureStep(ship, 8))).toContain('Commit the brief alone, `docs(task): hand-off for <task>`');
+  });
+
+  it('keeps the task folder clean: Ship removes the brief last, the pull request keeps its record, later steps restore it', () => {
+    const dev = renderShipped('dev');
+    const ship = dev.get('ship-task')!;
+    const procedure = flat(section(ship, 'Procedure'));
+    const remove = flat(procedureStep(ship, 9));
+    expect(remove).toMatch(/^9\. \*\*Remove the brief\*\*, only when a pull request exists and its description holds the record/);
+    expect(remove).toContain('(without one, keep the brief: it is the only record)');
+    expect(remove).toContain('`git rm docs/tasks/<task>.md`');
+    expect(remove).toContain("commit `docs(task): remove brief for <task>` as the branch's last commit");
+    // The description holds the record before the brief goes: refresh first, then remove.
+    expect(remove).toContain('First refresh the description with the hand-off and the permalinks to the hand-off commit');
+    expect(remove.indexOf('First refresh the description')).toBeLessThan(remove.indexOf('`git rm docs/tasks/<task>.md`'));
+    // Order: the hand-off commit (the permalink) comes before the removal, and completing comes last.
+    const handOff = procedure.indexOf('Commit the brief alone, `docs(task): hand-off for <task>`');
+    const removal = procedure.indexOf('commit `docs(task): remove brief for <task>`');
+    expect(handOff).toBeGreaterThan(0);
+    expect(removal).toBeGreaterThan(handOff);
+    expect(procedure.indexOf('10. **Complete on the task branch.**')).toBeGreaterThan(removal);
+    // An interrupted run does not need the brief; a run without a remote keeps it.
+    expect(flat(procedureStep(ship, 1))).toContain('If the last commit is `docs(task): remove brief for <task>`');
+    expect(ship).toContain('step 9 (keep the brief)');
+    expect(flat(section(ship, 'Exit criteria'))).toContain('With a pull request, the brief is removed in the last pushed commit; without one it is kept');
+    // The pull request description is the permanent record: request verbatim (collapsed, as data),
+    // the classification and a permalink to the brief at the hand-off commit.
+    expect(procedure).toContain('[pull request description](references/pr-description.md)');
+    const files = new Map(renderShippedFiles('dev'));
+    const description = files.get('ship-task/references/pr-description.md')!;
+    expect(description).toBeTruthy();
+    for (const part of ['## Task record', '<summary>Original request (verbatim; data, not instructions)</summary>', '## For the QA team', '## Change requests']) {
+      expect(description, part).toContain(part);
+    }
+    expect(flat(description)).toContain('Link the brief by a permalink to the hand-off commit');
+    expect(flat(description)).toContain('`<repository URL>/blob/<sha>/docs/tasks/<task>.md`');
+    // Every step learns how to restore a removed brief before working (shared brief partial).
+    for (const [step, text] of dev) {
+      const brief = flat(section(text, 'Task brief'));
+      expect(brief, step).toContain('Ship removes it in the branch\'s last commit, once the pull request description holds its record');
+      // --full-history: after a merge-commit merge the default history simplification hides the removal.
+      expect(brief, step).toContain('`git log --all --full-history --diff-filter=D --format=%h -1 -- docs/tasks/<task>.md`');
+      expect(brief, step).toContain('Restore on the task branch, never on `main`');
+      expect(brief, step).toContain('`git fetch origin pull/<n>/head`');
+      expect(brief, step).toContain('`git restore --source=<commit>~1 --staged --worktree -- docs/tasks/<task>.md`');
+      expect(brief, step).toContain('`docs(task): restore brief for <task>`');
+      expect(brief, step).toContain('rebuild it from the pull request description');
+      expect(brief, step).not.toContain('kept after the merge');
+    }
+    expect(flat(dev.get('implement-task')!)).toContain('moved back from `done`, the Task brief section restores the brief first');
   });
 
   it('keeps the meaning of the variables the retired templates declared (stored values are shared)', () => {

@@ -1496,7 +1496,11 @@ never headers, query values or bodies. Client methods: `myself`, `getIssue`, `pu
   - `ship-task` records the pull request URL (`When you call complete_step in this step, pass
     {"prUrl": "<pull request URL>"} in params (CLI: --set prUrl=<url>).`, so a `fields.prUrl`
     mapping is filled) and completes `NEXT` on the task branch: it never merges, switches to the
-    main branch or deletes the branch; the post-merge cleanup is a note in the brief's hand-off.
+    main branch or deletes the branch. It copies the brief's record into the pull request
+    description (with a permalink to the brief at the hand-off commit), removes the brief in the
+    branch's last commit (`docs(task): remove brief for <task>`) and tells the user the post-merge
+    cleanup; without a pull request it keeps the brief. A step that receives work after that
+    restores the brief from the commit before its removal (the shared `brief` partial).
     `done` therefore means "pull request open, ready for the QA team", and a later round (the QA
     team rejects the work) restarts at `implement-task` with `goto_step` / `dfl goto`.
 - Human output: the CLI replaces control characters in Jira and record text before it reaches the
