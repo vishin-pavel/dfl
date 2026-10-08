@@ -1,7 +1,8 @@
 # Task brief template
 
 Copy the skeleton into `{{vars.taskNotesDir}}/<task>.md` and replace every `<...>` placeholder. Keep
-the section names verbatim and in this order. Classification fills the header,
+the section names verbatim and in this order. The brief lives until Ship copies its record into the
+pull request description and removes it; write every section so it reads well there too. Classification fills the header,
 `## Original request` and `## Classification`; every other section stays an empty heading until
 its owner writes it.
 
@@ -48,7 +49,7 @@ Accepted: classification <date> · requirements <sha | pending | n/a> · tech de
 | `## Rework` | any step sending work back | Event, sending step, numbered items; the receiving step marks each one done. |
 | `## Implementation` | implement-task | Per-ID checklist, declared change map, commands and results, `.df` config edits. |
 | `## Dev QA report` | verify-task | One subsection per round, with the diff base used. |
-| `## Hand-off to the QA team` | verify-task, then ship-task | Unverified IDs, follow-ups and known gaps (any step may add follow-ups; later steps keep them), items not available, what to test by hand; ship-task adds the PR, CI status and the post-merge cleanup note. |
+| `## Hand-off to the QA team` | verify-task, then ship-task | Unverified IDs, follow-ups and known gaps (any step may add follow-ups; later steps keep them), items not available, what to test by hand; ship-task adds the PR and CI status, copies the hand-off into the pull request description and then removes the brief. |
 
 A reclassification log entry: `- <date>: <old class / route> → <new class / route>; sent by
 <step> (<event>); <reason>; confirmed by the user.`

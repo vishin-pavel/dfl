@@ -974,7 +974,7 @@ The owner accepted the recommended defaults of §8, with these exceptions and tr
 
 | # | Decision |
 |---|---|
-| 1 | Task brief committed in `taskNotesDir` (default `docs/tasks`) and kept after merge |
+| 1 | Task brief committed in `taskNotesDir` (default `docs/tasks`). **Revised 2026-10-08:** `ship-task` removes it in the branch's last commit once the pull request description holds its record (request, classification, change requests, Dev QA, hand-off, permalink), so the folder holds only open work; steps restore it from git history when work comes back. Without a pull request the brief is kept |
 | 2 | `ship-task` ends with the pull request open and CI green; merging is outside the flow; `done` = ready for the QA team |
 | 3 | Your 3 classes + **Technical change** + an `OUT_OF_SCOPE` exit to the `not-handled` final state. The **Requirements backfill** class is deferred |
 | 4 | IDs in Rule/Scenario names, never Gherkin tags |

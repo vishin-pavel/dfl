@@ -21,7 +21,7 @@
       "scope": "project"
     },
     "taskNotesDir": {
-      "description": "Directory (relative to the project root) for task briefs: the original request, classification, change requests and the Dev QA report; must lie outside requirementsDir",
+      "description": "Directory (relative to the project root) for task briefs: the original request, classification, change requests and the Dev QA report; Ship removes each brief once the pull request holds its record; must lie outside requirementsDir",
       "default": "docs/tasks",
       "scope": "project"
     },
@@ -112,7 +112,7 @@
         }
       },
       "ship-task": {
-        "description": "Push the verified branch and open a pull request carrying the Dev QA report, ready for the QA team. Use when Dev QA passed.",
+        "description": "Push the verified branch, open a pull request that becomes the task's record, then remove the task brief. Use when Dev QA passed.",
         "meta": { "title": "Ship" },
         "on": {
           "NEXT": { "target": "done", "description": "The pull request is open and CI is green, or the hand-off says what is not available" },
