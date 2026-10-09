@@ -1,6 +1,6 @@
 # Fast-forward runs: assessment and recommended design
 
-Status: proposal of 2026-10-08, implemented (unreleased); the owner's decisions are pending (§10). §11 lists where
+Status: proposal of 2026-10-08, implemented in 0.3.0; the owner's decisions are pending (§10). §11 lists where
 the implementation differs from this proposal, including the changes made after review. The binding contract of the
 implementation is [docs/ARCHITECTURE.md §10](../ARCHITECTURE.md), with §1.6 for the run file and §2.3 for forward
 paths; this document keeps the assessment and the rationale.

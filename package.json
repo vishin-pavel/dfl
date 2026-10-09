@@ -1,6 +1,6 @@
 {
   "name": "@vishin-pavel/dfl",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Development flow manager: per-step Agent Skills rendered from templates, an xstate-driven flow, a built-in MCP server and a terminal flow viewer for Claude Code, Cursor, Antigravity, Codex, Gemini CLI, Copilot, Windsurf, OpenCode and Kiro.",
   "type": "module",
   "bin": {
