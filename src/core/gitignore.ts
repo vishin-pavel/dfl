@@ -6,6 +6,7 @@ export const DF_GITIGNORE_CONTENT = [
   '# personal config, runtime state and install manifest',
   'local.json',
   'state.json',
+  'fast-forward.json',
   'installed.json',
   '# skills rendered from *.md.hbs templates (may contain personal values)',
   '*/steps/**/*.md',

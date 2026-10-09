@@ -6,10 +6,11 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport, type McpServer } from '@modelcontextprotocol/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setMcpEnabled, setSelectedAgents } from '../src/core/config.js';
+import { readFastForwardFile } from '../src/core/fastforward/store.js';
 import { currentBranch } from '../src/core/git.js';
 import { PROJECT_LOCK_FILE } from '../src/core/lock.js';
 import { syncProject } from '../src/core/sync.js';
-import type { ProjectPaths } from '../src/core/types.js';
+import type { FlowDefinition, ProjectPaths } from '../src/core/types.js';
 import { SERVER_INSTRUCTIONS, createDflMcpServer } from '../src/mcp/server.js';
 import { describeFlow, describeStatus } from '../src/mcp/tools.js';
 import { createFakeJira, credentialEnv, type FakeJira, type FakeJiraOptions, type FakeRoute } from './helpers/fake-jira.js';
@@ -105,9 +106,9 @@ function writeTracker(paths: ProjectPaths, fake: FakeJira, overrides: Record<str
   fs.writeFileSync(paths.trackerFile, `${JSON.stringify(config, null, 2)}\n`);
 }
 
-/** A git repository on main (everything committed) with the sample flow tracked in a fake Jira. */
+/** A git repository on main (everything committed) with the sample flow (or `def`) tracked in a fake Jira. */
 async function trackedProject(
-  options: { tracker?: Record<string, unknown>; jira?: FakeJiraOptions; credentials?: boolean; tracked?: boolean } = {},
+  options: { tracker?: Record<string, unknown>; jira?: FakeJiraOptions; credentials?: boolean; tracked?: boolean; def?: FlowDefinition } = {},
 ): Promise<{ paths: ProjectPaths; jira: FakeJira }> {
   jira = await createFakeJira({
     issues: [
@@ -117,13 +118,28 @@ async function trackedProject(
     ...options.jira,
   });
   const paths = makeTempProject();
-  writeSampleFlow(paths);
+  writeSampleFlow(paths, options.def);
   if (options.tracked !== false) writeTracker(paths, jira, options.tracker);
   git(paths.root, 'init', '-q', '-b', 'main');
   git(paths.root, 'add', '-A');
   git(paths.root, 'commit', '-q', '-m', 'init');
   if (options.credentials !== false) for (const [name, value] of Object.entries(credentialEnv(jira))) vi.stubEnv(name, value);
   return { paths, jira };
+}
+
+/** `dfl install` for Claude Code without MCP registration: the skills a fast-forward run needs are current. */
+async function installSkills(paths: ProjectPaths): Promise<void> {
+  setSelectedAgents(paths, ['claude']);
+  setMcpEnabled(paths, false);
+  await syncProject(paths);
+}
+
+/** The sample flow plus `plan —DROP→ dropped`, a final state that is not the end of the flow (a side exit). */
+function sampleWithDrop(): FlowDefinition {
+  const def = sampleFlowDefinition();
+  def.machine.states['plan']!.on = { NEXT: 'build', DROP: 'dropped' };
+  def.machine.states['dropped'] = { type: 'final', description: 'Dropped' };
+  return def;
 }
 
 function routes(fake: FakeJira): Array<FakeRoute | undefined> {
@@ -177,6 +193,9 @@ describe('tracker tools: schema', () => {
       expect(props(name)['task']!.description, name).toMatch(/task\.key you got from get_status/);
       expect(byName.get(name)!.annotations, name).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
     }
+    // fast_forward reads the ticket when it starts a run of a tracked flow.
+    expect(byName.get('fast_forward')!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
+    expect(props('fast_forward')['task']!.description).toMatch(/task\.key you got from get_status/);
     // Tools that never touch Jira keep a closed world.
     expect(byName.get('get_flow')!.annotations).toMatchObject({ readOnlyHint: true, openWorldHint: false });
     expect(byName.get('add_step')!.annotations).toMatchObject({ openWorldHint: false });
@@ -549,5 +568,181 @@ describe('tracker tools: project lock', () => {
     fs.unlinkSync(lock);
     expect(await completing).toMatchObject({ from: 'plan', to: 'build' });
     expect(fs.existsSync(lock)).toBe(false);
+  });
+});
+
+describe('tracker tools: fast-forward runs', () => {
+  it('keys a run by the ticket, carries it in moves and get_status, and never touches state.json', async () => {
+    const { paths, jira: fake } = await trackedProject();
+    await installSkills(paths);
+    const { ok } = await connect(paths);
+    await ok('start_task', { task: 'ABC-1' });
+    const stateBefore = readStateText(paths);
+
+    const started = await ok('fast_forward', { to: 'review', task: 'ABC-1' });
+    expect(started).toMatchObject({ current: { id: 'plan' }, task: { key: 'ABC-1', started: true, step: 'plan' } });
+    expect(Object.keys(started).slice(-2)).toEqual(['task', 'fastForward']);
+    expect(started['fastForward']).toMatchObject({
+      target: 'review',
+      status: 'running',
+      step: { id: 'plan', command: '/plan', visit: 1, refusedEvents: [] },
+      moves: [],
+      path: ['plan', 'build', 'review'],
+      forks: [],
+      warnings: ['Every move of this run updates ABC-1 in Jira: its status follows the step the run enters.'],
+    });
+    const instructions = started['fastForward']['instructions'] as string;
+    expect(instructions).toMatch(/^A fast-forward run is driving flow "sample" for ABC-1 to "review" without the developer\. /);
+    expect(instructions).toContain('call complete_step with {"step": "plan", "event": "<EVENT>", "flow": "sample", "task": "ABC-1"}');
+    expect(instructions).toContain('(CLI: `dfl next <EVENT> --from plan --flow sample --task ABC-1 --json`)');
+    expect(instructions).toContain('If it fails with TRACKER_TIMEOUT or TRACKER_UNREACHABLE, call get_status with the same flow and task');
+    const runs = readFastForwardFile(paths).file.runs;
+    expect(Object.keys(runs)).toEqual(['sample#ABC-1']);
+    expect(runs['sample#ABC-1']).toMatchObject({ flow: 'sample', task: 'ABC-1', target: 'review', from: 'plan', anchor: { from: '', to: 'plan', event: 'START' } });
+
+    const toBuild = await ok('complete_step', { step: 'plan', task: 'ABC-1' });
+    expect(Object.keys(toBuild).at(-1)).toBe('fastForward');
+    expect(toBuild['fastForward']).toMatchObject({ status: 'running', step: { id: 'build', visit: 1 }, moves: [{ from: 'plan', to: 'build', event: 'NEXT' }] });
+    // The key in the branch name finds the same run.
+    expect((await ok('get_status'))['fastForward']).toEqual(toBuild['fastForward']);
+
+    const toReview = await ok('complete_step', { step: 'build', task: 'ABC-1' });
+    expect(toReview['fastForward']).toMatchObject({ status: 'ended', reason: 'reached', detail: 'Step "review" is current.' });
+    expect(fake.issue('ABC-1').status).toBe('In Review');
+    // get_status shows the ended run until the ticket moves on.
+    expect((await ok('get_status'))['fastForward']).toEqual(toReview['fastForward']);
+
+    // A ticket's run is stopped without reading Jira (a bare number works as for a start); on a run that ended it changes nothing.
+    const requests = fake.requests.length;
+    const stopped = await ok('fast_forward', { stop: true, task: '1' });
+    expect(stopped).toEqual({ flow: 'sample', task: 'ABC-1', fastForward: expect.objectContaining({ status: 'stopped', reason: 'stopped' }) });
+    expect(stopped['fastForward']).not.toHaveProperty('moves');
+    expect(stopped['fastForward']['instructions']).toContain('The fast-forward run of flow "sample" for ABC-1 to "review" has stopped: it was stopped.');
+    expect(fake.requests).toHaveLength(requests);
+    expect(readFastForwardFile(paths).file.runs['sample#ABC-1']).toHaveProperty('stopped');
+    expect((await ok('get_status'))['fastForward']).toEqual(toReview['fastForward']);
+    expect(readStateText(paths)).toBe(stateBefore);
+  });
+
+  it('needs a started task', async () => {
+    const { paths, jira: fake } = await trackedProject();
+    await installSkills(paths);
+    const { fail } = await connect(paths);
+    const required = await fail('fast_forward');
+    expect(required).toMatchObject({ code: 'TASK_REQUIRED', error: expect.stringMatching(/no ticket is bound to the current branch/) });
+    expect(required['hint']).toMatch(/Over MCP: call start_task with the ticket the user names\.$/);
+    expect(fake.requests).toEqual([]);
+
+    const notStarted = await fail('fast_forward', { task: 'ABC-2' });
+    expect(notStarted).toMatchObject({ code: 'TASK_NOT_STARTED', error: 'ABC-2 has no dfl task yet.' });
+    expect(notStarted['hint']).toContain('Start it with /init-task ABC-2 (CLI: `dfl task start ABC-2`).');
+    expect(notStarted['hint']).toMatch(/Over MCP: call start_task with the ticket the user names\.$/);
+    expect(fake.requestsTo('putProperty')).toEqual([]);
+    expect(fs.existsSync(paths.fastForwardFile)).toBe(false);
+  });
+
+  it('keeps the visit counts when a move whose answer was lost is replayed', async () => {
+    const { paths, jira: fake } = await trackedProject();
+    await installSkills(paths);
+    const { ok, fail } = await connect(paths);
+    await ok('start_task', { task: 'ABC-1' });
+    expect((await ok('fast_forward', { task: 'ABC-1' }))['fastForward']).toMatchObject({ target: 'done', toEnd: true });
+    expect((await ok('complete_step', { step: 'plan', task: 'ABC-1' }))['fastForward']).toMatchObject({ step: { id: 'build', visit: 1 } });
+
+    // The record write outlives the call: Jira applies it after dfl gave up.
+    vi.stubEnv('DFL_TRACKER_TIMEOUT_MS', '300');
+    fake.setFailure('putProperty', { delayMs: 700, times: 1 });
+    expect(await fail('complete_step', { step: 'build', task: 'ABC-1' })).toMatchObject({ code: 'TRACKER_TIMEOUT' });
+    await waitFor(() => recordOf(fake)['step'] === 'review');
+    vi.stubEnv('DFL_TRACKER_TIMEOUT_MS', undefined);
+
+    const replayed = await ok('complete_step', { step: 'build', task: 'ABC-1' });
+    expect(replayed).toMatchObject({ from: 'build', to: 'review', replayed: true });
+    expect(Object.keys(replayed).slice(-2)).toEqual(['replayed', 'fastForward']);
+    expect(replayed['fastForward']).toMatchObject({ status: 'running', step: { id: 'review', visit: 1 } });
+    expect(replayed['fastForward']['moves'].map((m: { to: string }) => m.to)).toEqual(['build', 'review']);
+    expect((await ok('get_status', { task: 'ABC-1' }))['fastForward']).toEqual(replayed['fastForward']);
+  });
+
+  it('refuses an event that ends the flow away from the target before writing the ticket', async () => {
+    const { paths, jira: fake } = await trackedProject({ def: sampleWithDrop() });
+    await installSkills(paths);
+    const { ok, fail } = await connect(paths);
+    await ok('start_task', { task: 'ABC-1' });
+    await ok('fast_forward');
+    const puts = fake.requestsTo('putProperty').length;
+    const requests = fake.requests.length;
+
+    const refused = await fail('complete_step', { step: 'plan', event: 'DROP', task: 'ABC-1' });
+    expect(refused).toEqual({
+      error: 'Event "DROP" of step "plan" ends flow "sample" at "dropped", but the fast-forward run to "done" may end the flow only at its target.',
+      code: 'FAST_FORWARD_EVENT_REFUSED',
+      hint:
+        'Stop the run first (`dfl fast-forward --stop --reason "<your proposal>" --flow sample --task ABC-1`), then fire the event only after the user agrees. ' +
+        'Over MCP: call fast_forward with "stop": true and your proposal as "reason".',
+    });
+    expect(fake.requestsTo('putProperty')).toHaveLength(puts);
+    expect(routes(fake).slice(requests)).toEqual(['getIssue']);
+    expect(recordOf(fake)['step']).toBe('plan');
+    expect(fake.issue('ABC-1').status).toBe('In Progress');
+  });
+
+  it('ends the run when a teammate moves the ticket elsewhere', async () => {
+    const { paths, jira: fake } = await trackedProject();
+    await installSkills(paths);
+    const { ok, fail } = await connect(paths);
+    await ok('start_task', { task: 'ABC-1' });
+    await ok('fast_forward');
+    expect((await ok('get_status'))['fastForward']).toMatchObject({ status: 'running', step: { id: 'plan' } });
+
+    // A goto made from another checkout: the record moved without this session.
+    const record = recordOf(fake);
+    record['history'].push({ from: 'plan', to: 'review', event: 'GOTO', at: new Date().toISOString(), op: 'teammate' });
+    record['step'] = 'review';
+    expect(await ok('get_status')).toMatchObject({ current: { id: 'review' }, fastForward: { status: 'ended', reason: 'moved', moves: [] } });
+    expect(await fail('complete_step', { step: 'plan' })).toMatchObject({ code: 'NOT_CURRENT' });
+  });
+
+  it('refuses a goto into another final state before writing the ticket; a goto into a step ends the run', async () => {
+    const { paths, jira: fake } = await trackedProject({ def: sampleWithDrop() });
+    await installSkills(paths);
+    const { ok, fail } = await connect(paths);
+    await ok('start_task', { task: 'ABC-1' });
+    await ok('fast_forward');
+    const puts = fake.requestsTo('putProperty').length;
+    const requests = fake.requests.length;
+
+    const refused = await fail('goto_step', { step: 'dropped', task: 'ABC-1' });
+    expect(refused).toEqual({
+      error: 'Going to "dropped" ends flow "sample" there, but the fast-forward run to "done" may end the flow only at its target.',
+      code: 'FAST_FORWARD_EVENT_REFUSED',
+      hint:
+        'Stop the run first (`dfl fast-forward --stop --reason "<your proposal>" --flow sample --task ABC-1`), then fire the event only after the user agrees. ' +
+        'Over MCP: call fast_forward with "stop": true and your proposal as "reason".',
+    });
+    expect(fake.requestsTo('putProperty')).toHaveLength(puts);
+    expect(routes(fake).slice(requests)).toEqual(['getIssue']);
+    expect(recordOf(fake)['step']).toBe('plan');
+
+    const moved = await ok('goto_step', { step: 'review', task: 'ABC-1' });
+    expect(moved).toMatchObject({ to: 'review', fastForward: { status: 'ended', reason: 'moved' } });
+    expect(fake.issue('ABC-1').status).toBe('In Review');
+  });
+
+  it('keys the run of a tracked flow without a bound ticket by the flow (requireTask: false)', async () => {
+    const { paths, jira: fake } = await trackedProject({ tracker: { flows: { sample: { requireTask: false, statuses: MAPPING } } } });
+    await installSkills(paths);
+    const { ok } = await connect(paths);
+    const started = await ok('fast_forward');
+    expect(started).not.toHaveProperty('task');
+    expect(started['fastForward']).toMatchObject({ target: 'done', status: 'running', warnings: [] });
+    expect(started['fastForward']['instructions']).not.toContain('"task"');
+    expect(Object.keys(readFastForwardFile(paths).file.runs)).toEqual(['sample']);
+
+    expect((await ok('complete_step', { step: 'plan' }))['fastForward']).toMatchObject({ step: { id: 'build' } });
+    expect((await ok('get_status'))['fastForward']).toMatchObject({ step: { id: 'build' } });
+    expect(JSON.parse(readStateText(paths)!).flows['sample'].current).toBe('build');
+    expect(await ok('fast_forward', { stop: true })).toEqual({ flow: 'sample', fastForward: expect.objectContaining({ status: 'stopped' }) });
+    expect(fake.requests).toEqual([]);
   });
 });

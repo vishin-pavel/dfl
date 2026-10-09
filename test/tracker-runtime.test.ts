@@ -4,17 +4,21 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveFlow } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
-import { loadFlow } from '../src/core/flow.js';
+import { fastForwardEventGuard } from '../src/core/fastforward/run.js';
+import { saveFastForwardRun, stopFastForwardRun } from '../src/core/fastforward/store.js';
+import { loadFlow, writeFlowDefinition } from '../src/core/flow.js';
 import { currentBranch, localBranchExists } from '../src/core/git.js';
 import { withProjectLock } from '../src/core/lock.js';
 import { saveCredential } from '../src/core/tracker/credentials.js';
 import { processOpId } from '../src/core/tracker/record.js';
 import {
+  assertTaskMovable,
   isTracked,
   renderBranchName,
   slugify,
   startTask,
   syncTrackedViewNote,
+  taskKeyForMove,
   taskMove,
   taskStatus,
   type TaskWriteOptions,
@@ -31,6 +35,12 @@ import {
 } from './helpers/fake-jira.js';
 import { cleanupTempDirs, makeTempDir, makeTempProject, sampleFlowDefinition, writeSampleFlow } from './helpers/project.js';
 
+// The real fast-forward guard, spied on: a test may hand taskMove its own guard.
+vi.mock('../src/core/fastforward/run.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fastforward/run.js')>();
+  return { ...actual, fastForwardEventGuard: vi.fn(actual.fastForwardEventGuard) };
+});
+
 let jira: FakeJira | undefined;
 
 beforeEach(() => {
@@ -46,6 +56,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.mocked(fastForwardEventGuard).mockReset();
   vi.unstubAllEnvs();
   await jira?.close();
   jira = undefined;
@@ -922,6 +933,157 @@ describe('taskMove', () => {
     expect(reset?.result).toMatchObject({ from: 'review', to: 'plan', event: 'RESET' });
     expect(reset?.task.status).toEqual({ before: 'In Review', after: 'In Progress', expected: 'In Progress' });
     expect(s.jira.issue('ABC-1').status).toBe('In Progress');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fast-forward runs
+// ---------------------------------------------------------------------------
+
+describe('fast-forward runs of tracked tasks', () => {
+  it('guard event moves after replay detection and before the record write; never goto, reset or a replay', async () => {
+    const s = await setup();
+    await started(s);
+    const guard = vi.fn();
+    vi.mocked(fastForwardEventGuard).mockReturnValue(guard);
+
+    await taskMove(s.paths, s.model, { kind: 'event', from: 'plan' }, s.opts);
+    expect(guard).toHaveBeenCalledTimes(1);
+    const [state, key, event, from] = guard.mock.calls[0]!;
+    expect(state).toMatchObject({ flow: 'sample', current: 'plan', history: [{ from: '', to: 'plan', event: 'START' }] });
+    expect([key, event, from]).toEqual(['sample#ABC-1', 'NEXT', 'plan']);
+
+    expect((await taskMove(s.paths, s.model, { kind: 'event', from: 'plan' }, s.opts))?.replayed).toBe(true);
+    await taskMove(s.paths, s.model, { kind: 'goto', step: 'review' }, s.opts);
+    await taskMove(s.paths, s.model, { kind: 'reset' }, s.opts);
+    expect(guard).toHaveBeenCalledTimes(1);
+    await taskMove(s.paths, s.model, { kind: 'event', requireFrom: false, event: 'NEXT' }, s.opts);
+    expect(guard).toHaveBeenLastCalledWith(expect.objectContaining({ current: 'plan' }), 'sample#ABC-1', 'NEXT', undefined);
+
+    // A refusal costs one GET and no PUT.
+    s.jira.requests.splice(0);
+    guard.mockImplementation(() => {
+      throw new DflError('refused', { code: 'FAST_FORWARD_EVENT_REFUSED' });
+    });
+    expect((await failure(taskMove(s.paths, s.model, { kind: 'event', from: 'build' }, s.opts))).code).toBe('FAST_FORWARD_EVENT_REFUSED');
+    expect(routes(s.jira)).toEqual(['getIssue']);
+    expect(recordOf(s.jira)['step']).toBe('build');
+  });
+
+  it('refuse an event into another final state while the run of the ticket is running', async () => {
+    const s = await setup();
+    const def = sampleFlowDefinition();
+    def.machine.states['plan']!.on = { NEXT: 'build', DROP: 'dropped' };
+    def.machine.states['dropped'] = { type: 'final', description: 'Dropped' };
+    writeFlowDefinition(s.paths, def);
+    const model = loadFlow(s.paths, 'sample');
+    await started(s);
+    const { op: _op, ...anchor } = (recordOf(s.jira)['history'] as Array<Record<string, string>>).at(-1)!;
+    saveFastForwardRun(s.paths, 'sample#ABC-1', {
+      flow: 'sample',
+      task: 'ABC-1',
+      target: 'review',
+      from: 'plan',
+      anchor: anchor as { from: string; to: string; event: string; at: string },
+      startedAt: new Date().toISOString(),
+    });
+
+    const refused = await failure(taskMove(s.paths, model, { kind: 'event', from: 'plan', event: 'DROP' }, s.opts));
+    expect(refused.code).toBe('FAST_FORWARD_EVENT_REFUSED');
+    expect(refused.hint).toContain('--flow sample --task ABC-1');
+    expect(s.jira.requestsTo('putProperty')).toHaveLength(0);
+    expect(recordOf(s.jira)['step']).toBe('plan');
+
+    stopFastForwardRun(s.paths, 'sample', 'ABC-1');
+    expect((await taskMove(s.paths, model, { kind: 'event', from: 'plan', event: 'DROP' }, s.opts))?.result).toMatchObject({ to: 'dropped', done: true });
+  });
+
+  it('decide under the lock: a run started while the move waits for it refuses events and gotos into another final state', async () => {
+    const s = await setup();
+    const def = sampleFlowDefinition();
+    def.machine.states['plan']!.on = { NEXT: 'build', DROP: 'dropped' };
+    def.machine.states['dropped'] = { type: 'final', description: 'Dropped' };
+    writeFlowDefinition(s.paths, def);
+    const model = loadFlow(s.paths, 'sample');
+    await started(s);
+    expect(fs.existsSync(s.paths.fastForwardFile)).toBe(false);
+    const { op: _op, ...anchor } = (recordOf(s.jira)['history'] as Array<Record<string, string>>).at(-1)!;
+    // Another process starts a run of the ticket while this move waits for the project lock.
+    const opts: TaskWriteOptions = {
+      withLock: async <T>(fn: () => Promise<T>): Promise<T> => {
+        if (!fs.existsSync(s.paths.fastForwardFile)) {
+          saveFastForwardRun(s.paths, 'sample#ABC-1', {
+            flow: 'sample',
+            task: 'ABC-1',
+            target: 'review',
+            from: 'plan',
+            anchor: anchor as { from: string; to: string; event: string; at: string },
+            startedAt: new Date().toISOString(),
+          });
+        }
+        return s.opts.withLock(fn);
+      },
+    };
+
+    const event = await failure(taskMove(s.paths, model, { kind: 'event', from: 'plan', event: 'DROP' }, opts));
+    expect(event.code).toBe('FAST_FORWARD_EVENT_REFUSED');
+    const goto = await failure(taskMove(s.paths, model, { kind: 'goto', step: 'dropped' }, opts));
+    expect(goto.code).toBe('FAST_FORWARD_EVENT_REFUSED');
+    expect(goto.message).toBe('Going to "dropped" ends flow "sample" there, but the fast-forward run to "review" may end the flow only at its target.');
+    expect(goto.hint).toContain('`dfl fast-forward --stop --reason "<your proposal>" --flow sample --task ABC-1`');
+    expect(routes(s.jira)).toEqual(['getIssue', 'getIssue']);
+    expect(s.jira.requestsTo('putProperty')).toHaveLength(0);
+    expect(recordOf(s.jira)['step']).toBe('plan');
+
+    // A goto into a step passes and ends the run (moved): then the exit is the developer's call again.
+    expect((await taskMove(s.paths, model, { kind: 'goto', step: 'build' }, opts))?.result).toMatchObject({ to: 'build', event: 'GOTO' });
+    expect((await taskMove(s.paths, model, { kind: 'goto', step: 'dropped' }, opts))?.result).toMatchObject({ to: 'dropped', done: true });
+  });
+
+  it('assertTaskMovable: a started task at a known step, as a move needs it', async () => {
+    const s = await setup();
+    const required = await taskStatus(s.paths, s.model);
+    expect(() => assertTaskMovable(s.paths, s.model, required!, '$')).toThrow(
+      expect.objectContaining({ code: 'TASK_REQUIRED', hint: expect.stringContaining('Start one with $init-task <ticket>') }),
+    );
+
+    git(s.paths.root, 'switch', '-q', '-c', 'ABC-1-x');
+    const notStarted = await taskStatus(s.paths, s.model);
+    expect(() => assertTaskMovable(s.paths, s.model, notStarted!)).toThrow(
+      expect.objectContaining({ code: 'TASK_NOT_STARTED', hint: 'Start it with /init-task ABC-1 (CLI: `dfl task start ABC-1`).' }),
+    );
+
+    s.jira.issue('ABC-1').properties['dfl.run'] = seededRecord({ step: 'gone' });
+    const unknown = await taskStatus(s.paths, s.model);
+    expect(() => assertTaskMovable(s.paths, s.model, unknown!)).toThrow(
+      expect.objectContaining({
+        code: 'TASK_STEP_UNKNOWN',
+        message: 'The dfl record of ABC-1 is at step "gone", which flow "sample" does not have.',
+        hint: 'Move the task to the right step with `dfl goto <step> --task ABC-1`.',
+      }),
+    );
+
+    s.jira.issue('ABC-1').properties['dfl.run'] = seededRecord();
+    expect(assertTaskMovable(s.paths, s.model, (await taskStatus(s.paths, s.model))!)).toBe('ABC-1');
+  });
+
+  it('taskKeyForMove: the ticket a move would use, without network', async () => {
+    const s = await setup();
+    expect(() => taskKeyForMove(s.paths, s.model)).toThrow(expect.objectContaining({ code: 'TASK_REQUIRED' }));
+    expect(taskKeyForMove(s.paths, s.model, 'abc-2')).toBe('ABC-2');
+    // A bare number only with allowBare (a fast-forward stop, as its start takes it).
+    expect(() => taskKeyForMove(s.paths, s.model, '2')).toThrow(expect.objectContaining({ code: expect.stringMatching(/^TASK_REF_/) }));
+    expect(taskKeyForMove(s.paths, s.model, '#2', undefined, { allowBare: true })).toBe('ABC-2');
+    git(s.paths.root, 'switch', '-q', '-c', 'ABC-1-x');
+    expect(taskKeyForMove(s.paths, s.model)).toBe('ABC-1');
+
+    git(s.paths.root, 'switch', '-q', 'main');
+    writeTracker(s.paths, trackerJson(s.jira, { flows: { sample: { requireTask: false, statuses: DEFAULT_MAPPING } } }));
+    expect(taskKeyForMove(s.paths, s.model)).toBeUndefined();
+    expect(taskKeyForMove(s.paths, s.model, 'ABC-2')).toBe('ABC-2');
+    fs.rmSync(s.paths.trackerFile);
+    expect(taskKeyForMove(s.paths, s.model, 'ABC-2')).toBeUndefined();
+    expect(s.jira.requests).toHaveLength(0);
   });
 });
 

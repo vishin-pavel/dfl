@@ -17,8 +17,9 @@
   licence, tool configuration or an untouched scaffold); *adoption* means product code exists but
   the touched behavior has no requirements yet (or `{{vars.requirementsDir}}/` is missing);
   *brownfield* means both exist. Under adoption, write requirements only for the behavior the task
-  touches and the rules it depends on, and let the user confirm each one: existing code can contain
-  bugs that must not become requirements.
+  touches and the rules it depends on, and let the user confirm each one (a fast-forward run
+  confirms only those a test or document backs; the rest become follow-ups): existing code can
+  contain bugs that must not become requirements.
 - **IDs.** Each feature has a prefix of 2 to 5 capital letters, registered in the index. Rules are
   `CHK-7`, scenarios `CHK-7.2`, tech design requirements `CHK-PERF-1` (with the catalog code of
   their quality attribute), decisions `CHK-DEC-1` and constraints `CHK-CON-1`; the project baseline

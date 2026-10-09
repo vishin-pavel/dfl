@@ -76,8 +76,8 @@ Settled requirements change only through change requests the developer decides, 
    - write `CR-n` in `## Change requests`: artifact and ID, current and proposed text, evidence, at
      least two options including "keep as written" with pros and cons, a recommendation, impact and
      route; then ask the developer. Silence is not approval;
-   - never edit a requirement or tech design file without a decision; no developer reachable: mark
-     the CR `pending`, commit the brief and stop without firing any event;
+   - never edit a requirement or tech design file without a decision; no developer reachable (outside
+     a fast-forward run): mark the CR `pending`, commit the brief and stop without firing any event;
    - accepted in place: edit the file, confirm the protocol's re-check, commit
      `docs(req): CR-n <summary>` or `docs(td): CR-n <summary>`, then adapt tests and code;
    - go back instead (Rework entry, then `REVISE_REQUIREMENTS` or `REVISE_DESIGN`) when a new Rule or

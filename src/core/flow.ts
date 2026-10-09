@@ -21,6 +21,7 @@ import {
 } from './fsx.js';
 import { assertValidFlowName, assertValidStepId, isValidFlowName, isValidId, titleCase } from './ids.js';
 import { flowTemplatesDir } from './paths.js';
+import { removeFlowRuns } from './fastforward/store.js';
 import { getActiveFlowName, loadLocalConfig, loadProjectConfig, saveLocalConfig, saveProjectConfig } from './config.js';
 import { invalidFlowError, validateDefinition } from './validate.js';
 import type {
@@ -674,9 +675,10 @@ export function createFlow(paths: ProjectPaths, name: string, options: CreateFlo
 }
 
 /**
- * Deletes `.df/<name>` and clears references to it in config.json, local.json and state.json.
- * The name is validated first (INVALID_NAME) so nothing outside `.df/<flow>` can ever be removed;
- * the bookkeeping runs before the directory is removed, and a corrupt state.json is ignored.
+ * Deletes `.df/<name>` and clears references to it in config.json, local.json, state.json and
+ * fast-forward.json (its runs). The name is validated first (INVALID_NAME) so nothing outside
+ * `.df/<flow>` can ever be removed; the bookkeeping runs before the directory is removed, and a
+ * corrupt state.json or fast-forward.json is ignored.
  */
 export function deleteFlow(paths: ProjectPaths, name: string): void {
   assertValidFlowName(name);
@@ -692,6 +694,7 @@ export function deleteFlow(paths: ProjectPaths, name: string): void {
   if (project.activeFlow === name) saveProjectConfig(paths, { ...project, activeFlow: undefined });
   if (local?.activeFlow === name) saveLocalConfig(paths, { ...local, activeFlow: undefined });
   removeFlowState(paths, name);
+  removeFlowRuns(paths, name);
   removePath(dir);
 }
 

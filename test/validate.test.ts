@@ -153,6 +153,20 @@ describe('validateDefinition', () => {
     expect(errors(validateDefinition(badPrefix))[0]).toContain('Invalid skill name "DF_plan"');
   });
 
+  it('reserves the skill name of the built-in fast-forward skill, also when a prefix produces it', () => {
+    const def = withStates((states) => {
+      states['fast-forward'] = { on: { NEXT: 'done' } };
+      states['review']!.on = { NEXT: 'fast-forward' };
+    });
+    expect(errors(validateDefinition(def))).toEqual(['Skill name "fast-forward" of step "fast-forward" collides with a built-in dfl skill.']);
+    const prefixed = withStates((states, d) => {
+      d.skillPrefix = 'fast-';
+      states['forward'] = { on: { NEXT: 'done' } };
+      states['review']!.on = { NEXT: 'forward' };
+    });
+    expect(errors(validateDefinition(prefixed))).toEqual(['Skill name "fast-forward" of step "forward" collides with a built-in dfl skill.']);
+  });
+
   it('rejects a final initial state unless the flow has only final states', () => {
     const def = withStates((_, d) => {
       d.machine.initial = 'done';

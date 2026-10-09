@@ -32,7 +32,7 @@ Every section that holds requirements uses one table with these columns, rows so
 | Measure | the number with its conditions, or the yes/no rule |
 | Verify by | `test` automated test · `bench` load or performance run · `static` lint, architecture rule, dependency or secret scan · `inspect` a reviewer reads code or configuration (say what to look for) · `ops` only production shows it (Dev QA checks that the alert, SLO or budget alarm exists) |
 | Priority | `Must`: the task is not done until it holds · `Should`: wanted; may give way only through a trade-off the user chose, and a miss is reported, never hidden |
-| Source | `user` stated or confirmed by the user · `existing` current behavior, contract or configuration the user confirmed as the requirement · `baseline` the value comes from the SYS row the Requirement names, applied to this feature · `proposed` your suggestion: it becomes `user` only after explicit confirmation, and acceptance is blocked while one remains |
+| Source | `user` stated or confirmed by the user · `existing` current behavior, contract or configuration the user confirmed as the requirement · `baseline` the value comes from the SYS row the Requirement names, applied to this feature · `proposed` your suggestion: it becomes `user` only after explicit confirmation, and acceptance is blocked while one remains · `assumed` a `proposed` value a fast-forward run kept: logged for human review in the brief's `## Fast-forward log`, it does not block acceptance and becomes `user` once a person confirms it |
 
 A feature never loosens a baseline row silently: a weaker target is an exception the user approves
 and the Trade-offs list records.

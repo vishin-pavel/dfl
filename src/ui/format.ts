@@ -60,6 +60,14 @@ export function skillCommand(skillName: string, agents: readonly AgentId[]): str
   return [...byInvocation.entries()].map(([invocation, names]) => `${invocation} ${c.dim(`(${names.join(', ')})`)}`).join(c.dim(' · '));
 }
 
+/**
+ * The skill-command prefix of the CLI's fast-forward blocks: `$` when agents are selected and every
+ * one invokes skills with `$` (OpenAI Codex), else `/`.
+ */
+export function cliCommandPrefix(agents: readonly AgentId[]): '/' | '$' {
+  return agents.length > 0 && agents.every((id) => getAgent(id).invocation('x').startsWith('$')) ? '$' : '/';
+}
+
 /** Distinct invocations of a skill (for JSON output). */
 export function skillInvocations(skillName: string, agents: readonly AgentId[]): string[] {
   const out = new Set(agents.map((id) => getAgent(id).invocation(skillName)));

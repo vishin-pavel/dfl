@@ -7,6 +7,10 @@ import path from 'node:path';
 import { dflLauncher } from '../agents/mcp-config.js';
 import { getActiveFlowName } from '../core/config.js';
 import { DflError, errorMessage, isDflError } from '../core/errors.js';
+import { fastForwardStartView, fastForwardStopView, type FastForwardStartView, type FastForwardView } from '../core/fastforward/instructions.js';
+import { fastForwardBlock, gotoStepChecked, sendEventChecked } from '../core/fastforward/run.js';
+import { assertFastForwardOptions, startFastForward, stopFastForward } from '../core/fastforward/start.js';
+import { runKey } from '../core/fastforward/store.js';
 import {
   NEXT_EVENT,
   SKILL_TEMPLATE_FILE,
@@ -19,7 +23,7 @@ import {
 } from '../core/flow.js';
 import { readTextIfExists, relPosix, walkFiles } from '../core/fsx.js';
 import { withProjectLock } from '../core/lock.js';
-import { gotoStep, loadRuntimeState, sendEvent } from '../core/machine.js';
+import { loadRuntimeState } from '../core/machine.js';
 import { addStep, readStepTemplate, removeStep, updateStep, type StepPlacement, type TransitionInput } from '../core/steps.js';
 import { NOT_INSTALLED_MESSAGE, checkFlowSyncState, isInstalledForUser, syncProject, type SyncState } from '../core/sync.js';
 import { titleCase } from '../core/ids.js';
@@ -221,6 +225,8 @@ export interface UntrackedTaskNote {
 /** `get_status`: StatusView plus, for a flow tracked in Jira, its task (absent otherwise unless a ticket was passed). */
 export interface StatusToolResult extends StatusView {
   task?: TaskView | UntrackedTaskNote;
+  /** Set while a fast-forward run of this flow (and ticket) is running, and after it stopped or ended until the flow moves on. */
+  fastForward?: FastForwardView;
 }
 
 /** `transition`, `complete_step`, `goto_step`. */
@@ -229,6 +235,24 @@ export interface TransitionToolResult extends TransitionOutcome {
   task?: TaskMoveView | UntrackedTaskNote;
   /** The same move had already been made by this server (a retried call): nothing was written again. */
   replayed?: true;
+  /** Set while a fast-forward run of this flow (and ticket) is running, or when this very move ended or stopped it. */
+  fastForward?: FastForwardView;
+}
+
+/** `fast_forward` that started or resumed a run: the status like get_status plus the run. */
+export interface FastForwardStartToolResult extends StatusToolResult {
+  fastForward: FastForwardStartView;
+}
+
+/**
+ * `fast_forward` with `stop`: the stopped run only (a stop never reads Jira; a run of the local
+ * position is shown as evaluated, with its moves).
+ */
+export interface FastForwardStopToolResult {
+  flow: string;
+  /** The ticket key of a tracked run (a string, unlike `task` in other results). */
+  task?: string;
+  fastForward: FastForwardView;
 }
 
 /** `start_task`: the status of the started (or resumed) task and its branch. */
@@ -342,7 +366,9 @@ export function describeStatus(paths: ProjectPaths, flow?: string, ctx: ToolCont
 /**
  * `get_status`: for a flow tracked in Jira, the position of its task and the ticket (`task`, with
  * `instructions` for the agent; see core/tracker/runtime.ts taskStatus); otherwise describeStatus.
- * A `task` passed for an untracked flow is not used, and the result says so.
+ * A `task` passed for an untracked flow is not used, and the result says so. While a fast-forward
+ * run of the flow (and ticket) is running, and after it stopped or ended until the flow moves on,
+ * `fastForward` comes last.
  */
 export async function statusTool(
   paths: ProjectPaths,
@@ -353,10 +379,24 @@ export async function statusTool(
   if (isTracked(paths, model.name)) {
     const tracked = await taskStatus(paths, model, { task: args.task }, { commandPrefix: ctx.commandPrefix });
     // Undefined: no ticket bound and the flow does not require one (the local position applies).
-    if (tracked) return { ...statusView(paths, model, tracked.state, ctx), task: localizeTask(tracked.task, ctx.cli ?? cliFor(paths)) };
-    return statusView(paths, model, loadRuntimeState(paths, model), ctx);
+    if (tracked) {
+      const key = tracked.task.key;
+      return {
+        ...statusView(paths, model, tracked.state, ctx),
+        task: localizeTask(tracked.task, ctx.cli ?? cliFor(paths)),
+        // No ticket bound (a required one): no run to show.
+        ...(key !== null ? fastForwardOf(paths, model, runKey(model.name, key), tracked.state, ctx) : {}),
+      };
+    }
+    const state = loadRuntimeState(paths, model);
+    return { ...statusView(paths, model, state, ctx), ...fastForwardOf(paths, model, runKey(model.name), state, ctx) };
   }
-  return { ...statusView(paths, model, loadRuntimeState(paths, model), ctx), ...untrackedTaskNote(model, args.task) };
+  const state = loadRuntimeState(paths, model);
+  return {
+    ...statusView(paths, model, state, ctx),
+    ...untrackedTaskNote(model, args.task),
+    ...fastForwardOf(paths, model, runKey(model.name), state, ctx),
+  };
 }
 
 /** StatusView of `state` (local or a task's). */
@@ -478,7 +518,7 @@ export function fireEvent(
   args: { event?: string | undefined; from?: string | undefined; flow?: string | undefined },
   ctx: ToolContext = {},
 ): TransitionOutcome {
-  return localEvent(paths, loadToolFlow(paths, args.flow), args.event, args.from, ctx);
+  return localEvent(paths, loadToolFlow(paths, args.flow), args.event, args.from, ctx).outcome;
 }
 
 /**
@@ -494,7 +534,7 @@ export function completeStep(
   const model = loadToolFlow(paths, args.flow);
   try {
     getStep(model, args.step);
-    return localEvent(paths, model, args.event, args.step, ctx);
+    return localEvent(paths, model, args.event, args.step, ctx).outcome;
   } catch (error) {
     throw withStaleSkillHint(paths, model, ctx, error);
   }
@@ -502,7 +542,7 @@ export function completeStep(
 
 /** `goto_step` of an untracked flow. */
 export function jumpToStep(paths: ProjectPaths, args: { step: string; flow?: string | undefined }, ctx: ToolContext = {}): TransitionOutcome {
-  return localGoto(paths, loadToolFlow(paths, args.flow), args.step, ctx);
+  return localGoto(paths, loadToolFlow(paths, args.flow), args.step, ctx).outcome;
 }
 
 /** Arguments the runtime tools take for flows tracked in Jira (ignored for untracked flows). */
@@ -524,7 +564,7 @@ export async function transitionTool(
 ): Promise<TransitionToolResult> {
   const model = loadToolFlow(paths, args.flow);
   const moved = await trackedMove(paths, model, { kind: 'event', event: args.event, from: args.from, task: args.task, params: args.params }, ctx);
-  return moved ?? { ...localEvent(paths, model, args.event, args.from, ctx), ...untrackedTaskNote(model, args.task) };
+  return moved ?? localResult(paths, model, localEvent(paths, model, args.event, args.from, ctx), args.task, ctx);
 }
 
 /** `complete_step`: for a flow tracked in Jira, moves its task from `step`; otherwise completeStep. */
@@ -537,7 +577,7 @@ export async function completeStepTool(
   try {
     getStep(model, args.step);
     const moved = await trackedMove(paths, model, { kind: 'event', event: args.event, from: args.step, task: args.task, params: args.params }, ctx);
-    return moved ?? { ...localEvent(paths, model, args.event, args.step, ctx), ...untrackedTaskNote(model, args.task) };
+    return moved ?? localResult(paths, model, localEvent(paths, model, args.event, args.step, ctx), args.task, ctx);
   } catch (error) {
     throw withStaleSkillHint(paths, model, ctx, error);
   }
@@ -551,7 +591,7 @@ export async function gotoStepTool(
 ): Promise<TransitionToolResult> {
   const model = loadToolFlow(paths, args.flow);
   const moved = await trackedMove(paths, model, { kind: 'goto', step: args.step, task: args.task, params: args.params }, ctx);
-  return moved ?? { ...localGoto(paths, model, args.step, ctx), ...untrackedTaskNote(model, args.task) };
+  return moved ?? localResult(paths, model, localGoto(paths, model, args.step, ctx), args.task, ctx);
 }
 
 /**
@@ -567,6 +607,49 @@ export async function startTaskTool(paths: ProjectPaths, args: StartTaskArgs, ct
     task: localizeTask(started.task, ctx.cli ?? cliFor(paths)),
     branch: started.branch,
   };
+}
+
+/**
+ * `fast_forward`: starts or resumes a fast-forward run of the flow (and the ticket) to `to`, else a
+ * stopped run's target, else the end of the flow (core/fastforward/start.ts startFastForward), and
+ * returns the status like get_status plus `fastForward`. With `stop`, stops the run instead and
+ * returns only the flow, the ticket key and `fastForward` (no network; a run of the local position
+ * that has already ended is not stopped). The run file is written under `ctx.withLock`; a tracked
+ * ticket is read outside it.
+ */
+export async function fastForwardTool(
+  paths: ProjectPaths,
+  args: {
+    to?: string | undefined;
+    stop?: boolean | undefined;
+    reason?: string | undefined;
+    flow?: string | undefined;
+    task?: string | undefined;
+  },
+  ctx: ToolContext = {},
+): Promise<FastForwardStartToolResult | FastForwardStopToolResult> {
+  assertFastForwardOptions(args);
+  const model = loadToolFlow(paths, args.flow);
+  const cli = ctx.cli ?? cliFor(paths);
+  const prefix = ctx.commandPrefix ?? '/';
+  const opts = { withLock: lockFor(paths, ctx), commandPrefix: ctx.commandPrefix };
+  if (args.stop) {
+    const stopped = await stopFastForward(paths, model, { task: args.task, reason: args.reason }, opts);
+    return {
+      flow: model.name,
+      ...(stopped.task ? { task: stopped.task } : {}),
+      fastForward: localizeFF(fastForwardStopView(model, stopped.run, { prefix, evaluation: stopped.evaluation }), cli),
+    };
+  }
+  const started = await startFastForward(paths, model, { to: args.to, task: args.task }, opts);
+  const fastForward = localizeFF(
+    fastForwardStartView(model, started.plan, started.state, started.evaluation, started.warnings, { prefix }),
+    cli,
+  );
+  const status = statusView(paths, model, started.state, ctx);
+  return started.task
+    ? { ...status, task: localizeTask(started.task, cli), fastForward }
+    : { ...status, ...untrackedTaskNote(model, args.task), fastForward };
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +835,14 @@ function mcpHintFor(error: DflError): string | undefined {
     case 'TRACKER_CREDENTIALS_INVALID':
       // Logging in needs the user's token: no tool can do it, and it must not go through the chat.
       return 'No dfl tool can do this: ask the user to do it themselves.';
+    case 'FAST_FORWARD_ACTIVE':
+      return 'Over MCP: call fast_forward with "stop": true first, if the user wants the new target.';
+    case 'FAST_FORWARD_EVENT_REFUSED':
+      return 'Over MCP: call fast_forward with "stop": true and your proposal as "reason".';
+    case 'FAST_FORWARD_TARGET_REQUIRED':
+      return 'Over MCP: pass "to".';
+    case 'FAST_FORWARD_POSITION_UNKNOWN':
+      return 'Over MCP: call goto_step with the step you are at.';
     default:
       return undefined;
   }
@@ -829,16 +920,60 @@ function transitionOutcome(model: FlowModel, result: TransitionResult, ctx: Tool
   };
 }
 
-/** Fires `event` (default NEXT) on the local state of an untracked flow. */
-function localEvent(paths: ProjectPaths, model: FlowModel, event: string | undefined, from: string | undefined, ctx: ToolContext): TransitionOutcome {
-  const repaired = repairedState(paths, model);
-  return transitionOutcome(model, sendEvent(paths, model, event ?? NEXT_EVENT, { from }), ctx, repaired);
+/** A local move: the outcome for the result and the state after it (for the fast-forward block). */
+interface LocalMove {
+  outcome: TransitionOutcome;
+  state: FlowRuntimeState;
 }
 
-/** Jumps the local state of an untracked flow to `step`. */
-function localGoto(paths: ProjectPaths, model: FlowModel, step: string, ctx: ToolContext): TransitionOutcome {
+/**
+ * Fires `event` (default NEXT) on the local state of an untracked flow, behind the guard of its
+ * fast-forward run (`FAST_FORWARD_EVENT_REFUSED`).
+ */
+function localEvent(paths: ProjectPaths, model: FlowModel, event: string | undefined, from: string | undefined, ctx: ToolContext): LocalMove {
   const repaired = repairedState(paths, model);
-  return transitionOutcome(model, gotoStep(paths, model, step), ctx, repaired);
+  const result = sendEventChecked(paths, model, event ?? NEXT_EVENT, { from });
+  return { outcome: transitionOutcome(model, result, ctx, repaired), state: result.state };
+}
+
+/**
+ * Jumps the local state of an untracked flow to `step`, behind the goto guard of its fast-forward
+ * run (`FAST_FORWARD_EVENT_REFUSED`).
+ */
+function localGoto(paths: ProjectPaths, model: FlowModel, step: string, ctx: ToolContext): LocalMove {
+  const repaired = repairedState(paths, model);
+  const result = gotoStepChecked(paths, model, step);
+  return { outcome: transitionOutcome(model, result, ctx, repaired), state: result.state };
+}
+
+/** The result of a local move: its outcome, the note about an unused ticket and the flow's fast-forward run. */
+function localResult(paths: ProjectPaths, model: FlowModel, moved: LocalMove, task: string | undefined, ctx: ToolContext): TransitionToolResult {
+  return {
+    ...moved.outcome,
+    ...untrackedTaskNote(model, task),
+    ...fastForwardOf(paths, model, runKey(model.name), moved.state, ctx),
+  };
+}
+
+/**
+ * `{ fastForward }` for a result in `state` (fastForwardBlock: while the run stored under `key` is
+ * running, and after it stopped or ended until the flow moves on), with its CLI commands localized;
+ * `{}` otherwise, so results without a run stay byte-identical.
+ */
+function fastForwardOf(
+  paths: ProjectPaths,
+  model: FlowModel,
+  key: string,
+  state: FlowRuntimeState,
+  ctx: ToolContext,
+): { fastForward?: FastForwardView } {
+  const view = fastForwardBlock(paths, model, key, state, { prefix: ctx.commandPrefix ?? '/' });
+  return view ? { fastForward: localizeFF(view, ctx.cli ?? cliFor(paths)) } : {};
+}
+
+/** A fast-forward block with the CLI commands of its instructions spelled the way this project runs dfl. */
+function localizeFF<T extends { instructions: string }>(view: T, cli: string): T {
+  return { ...view, instructions: localizeCli(view.instructions, cli) };
 }
 
 /**
@@ -857,8 +992,9 @@ function withStaleSkillHint(paths: ProjectPaths, model: FlowModel, ctx: ToolCont
 }
 
 /**
- * Moves the task of a flow tracked in Jira. Undefined when the flow is not tracked, or no ticket is
- * bound and the flow does not require one: the caller then moves the local state.
+ * Moves the task of a flow tracked in Jira (behind the guard of the ticket's fast-forward run, see
+ * taskMove). Undefined when the flow is not tracked, or no ticket is bound and the flow does not
+ * require one: the caller then moves the local state.
  */
 async function trackedMove(paths: ProjectPaths, model: FlowModel, args: TaskMoveArgs, ctx: ToolContext): Promise<TransitionToolResult | undefined> {
   if (!isTracked(paths, model.name)) return undefined;
@@ -869,6 +1005,7 @@ async function trackedMove(paths: ProjectPaths, model: FlowModel, args: TaskMove
     ...transitionOutcome(model, moved.result, ctx),
     task: { ...moved.task, warnings: moved.task.warnings.map((warning) => localizeCli(warning, cli)) },
     ...(moved.replayed ? { replayed: true as const } : {}),
+    ...fastForwardOf(paths, model, runKey(model.name, moved.task.key), moved.result.state, ctx),
   };
 }
 

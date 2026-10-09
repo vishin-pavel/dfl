@@ -111,7 +111,7 @@ function withoutBuild(): FlowDefinition {
   return { ...def, machine: { ...def.machine, states } };
 }
 
-const BUILTINS = ['add-flow-step', 'delete-flow-step', 'edit-flow-step'];
+const BUILTINS = ['add-flow-step', 'delete-flow-step', 'edit-flow-step', 'fast-forward'];
 
 describe('syncProject', () => {
   it('installs step and built-in skills, ignore markers, MCP entries and manifest for claude, cursor and codex', async () => {
@@ -168,6 +168,8 @@ describe('syncProject', () => {
     for (const dir of dirs) expect(hasMarker(paths, dir)).toBe(true);
     expect(has(paths, '.gitignore')).toBe(false);
     expect(read(paths, '.df/.gitignore')).toBe(DF_GITIGNORE_CONTENT);
+    // Personal runtime files are ignored, the fast-forward runs right after state.json.
+    expect(DF_GITIGNORE_CONTENT).toContain('\n# personal config, runtime state and install manifest\nlocal.json\nstate.json\nfast-forward.json\n');
 
     const manifest = readManifest(paths);
     expect(manifest.flow).toBe('sample');
@@ -564,7 +566,8 @@ describe('syncProject', () => {
     expect(snapshot(paths)).toEqual(before);
     expect(promptVar).not.toHaveBeenCalled();
     expect(report.warnings.join('\n')).toMatch(/Required variable "reviewer"/);
-    expect(report.skills).toHaveLength(12);
+    // Three step skills and the built-ins, in .claude/skills and .agents/skills.
+    expect(report.skills).toHaveLength(2 * (3 + BUILTINS.length));
     expect(report.mcp).toEqual([
       { file: '.mcp.json', agents: ['claude'], changed: true, status: 'added' },
       { file: '.codex/config.toml', agents: ['codex'], changed: true, status: 'added' },
@@ -617,6 +620,7 @@ describe('uninstallProject', () => {
   it('purge also deletes personal config, runtime state and rendered files', async () => {
     const paths = sampleProject();
     write(paths, '.df/state.json', '{ "version": 1, "flows": {} }\n');
+    write(paths, '.df/fast-forward.json', '{ "version": 1, "runs": {} }\n');
     write(paths, '.df/sample/steps/build/docs/guide.md.hbs', 'Guide for {{step.title}}');
     await syncProject(paths, { agents: ['claude'] });
     expect(has(paths, '.df/sample/steps/build/docs/guide.md')).toBe(true);
@@ -625,10 +629,17 @@ describe('uninstallProject', () => {
 
     const report = uninstallProject(paths, { purge: true });
     expect(report.removed).toEqual(
-      expect.arrayContaining(['.df/local.json', '.df/state.json', '.df/sample/steps/build/docs/guide.md', '.df/sample/steps/plan/SKILL.md']),
+      expect.arrayContaining([
+        '.df/local.json',
+        '.df/state.json',
+        '.df/fast-forward.json',
+        '.df/sample/steps/build/docs/guide.md',
+        '.df/sample/steps/plan/SKILL.md',
+      ]),
     );
     expect(has(paths, '.df/local.json')).toBe(false);
     expect(has(paths, '.df/state.json')).toBe(false);
+    expect(has(paths, '.df/fast-forward.json')).toBe(false);
     expect(has(paths, '.df/sample/steps/plan/SKILL.md')).toBe(false);
     expect(has(paths, '.df/sample/steps/build/docs/guide.md')).toBe(false);
     expect(has(paths, '.df/sample/steps/build/docs/guide.md.hbs')).toBe(true);

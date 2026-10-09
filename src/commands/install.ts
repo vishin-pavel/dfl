@@ -72,7 +72,7 @@ export function registerInstallCommands(program: CommandUnknownOpts, ctx: CliCon
   program
     .command('uninstall')
     .description('Remove the installed skills and the dfl MCP entries (flows in .df/ are kept)')
-    .option('--purge', 'also delete .df/local.json, .df/state.json and rendered skill files')
+    .option('--purge', 'also delete .df/local.json, .df/state.json, .df/fast-forward.json and rendered skill files')
     .option('-y, --yes', 'do not ask for confirmation')
     .action(async (opts) => {
       const paths = projectFor(ctx);

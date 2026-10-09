@@ -4,6 +4,7 @@
  */
 import { Command } from '@commander-js/extra-typings';
 import { registerAgentsCommand } from './commands/agents.js';
+import { registerFastForwardCommand } from './commands/fastforward.js';
 import { registerFlowCommands } from './commands/flow.js';
 import { registerInstallCommands } from './commands/install.js';
 import { registerMcpCommand } from './commands/mcp.js';
@@ -34,6 +35,7 @@ export function buildProgram(): Command {
 
   registerInstallCommands(program, ctx);
   registerStateCommands(program, ctx);
+  registerFastForwardCommand(program, ctx);
   registerTaskCommands(program, ctx);
   registerFlowCommands(program, ctx);
   registerStepCommands(program, ctx);

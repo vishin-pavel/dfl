@@ -21,6 +21,8 @@
  */
 import { getActiveFlowName } from '../config.js';
 import { DflError, errorMessage, isDflError } from '../errors.js';
+import { fastForwardEventGuard, fastForwardGotoGuard } from '../fastforward/run.js';
+import { runKey } from '../fastforward/store.js';
 import { NEXT_EVENT, getStep, loadActiveFlow, loadFlow } from '../flow.js';
 import {
   createBranch,
@@ -305,10 +307,13 @@ export async function taskStatus(
  * - Only `goto` repairs an invalid record (a fresh record at the target step, keeping the current
  *   branch as `params.branch` when its name contains the key) or a record whose step the flow no
  *   longer has (`reset` too); an `event` move then fails with `TASK_RECORD_INVALID` / `TASK_STEP_UNKNOWN`.
+ * - While a fast-forward run of the ticket is running, an event or a goto that would end the flow at
+ *   a final state other than the run's target is refused before the record write (never a replay).
  * - After the record is written nothing throws: projection and field failures are `task.warnings`.
  * Throws DflError `TASK_REQUIRED`, `TASK_NOT_STARTED`, `TASK_FLOW_MISMATCH`, `TASK_PARAM_INVALID`,
- * `TASK_RECORD_TOO_LARGE`, the planners' errors (`NOT_CURRENT`, `EVENT_NOT_ALLOWED`, `FLOW_DONE`,
- * `STEP_NOT_FOUND`), `TRACKER_AUTH_MISSING` and the HTTP errors (nothing written).
+ * `TASK_RECORD_TOO_LARGE`, `FAST_FORWARD_EVENT_REFUSED`, the planners' errors (`NOT_CURRENT`,
+ * `EVENT_NOT_ALLOWED`, `FLOW_DONE`, `STEP_NOT_FOUND`), `TRACKER_AUTH_MISSING` and the HTTP errors
+ * (nothing written).
  */
 export async function taskMove(paths: ProjectPaths, model: FlowModel, args: TaskMoveArgs, opts: TaskWriteOptions): Promise<TaskMoveResult | undefined> {
   const tracker = trackerOf(paths, model.name);
@@ -330,7 +335,50 @@ export async function taskMove(paths: ProjectPaths, model: FlowModel, args: Task
       code: 'TASK_FROM_REQUIRED',
     });
   }
-  return opts.withLock(() => moveTask(cfg, model, resolved, args, opts.commandPrefix));
+  // Under the lock (a run started while this move waits for it is guarded too); they read
+  // .df/fast-forward.json only when it exists: a refused move costs one GET and no PUT.
+  return opts.withLock(() => {
+    const guards = { event: fastForwardEventGuard(paths, model), goto: fastForwardGotoGuard(paths, model) };
+    return moveTask(cfg, model, resolved, args, opts.commandPrefix, guards);
+  });
+}
+
+/**
+ * The ticket key of a tracked status a fast-forward run may start from (`fast_forward`, `dfl
+ * fast-forward`): throws `TASK_REQUIRED` (no ticket bound), `TASK_NOT_STARTED` and
+ * `TASK_STEP_UNKNOWN` as a move would; returns `task.key`.
+ */
+export function assertTaskMovable(paths: ProjectPaths, model: FlowModel, status: TrackedStatus, prefix?: InstructionsCommandPrefix): string {
+  const task = status.task;
+  if (task.key === null) {
+    const cfg = trackerOf(paths, model.name)?.cfg ?? requireTrackerConfig(paths);
+    throw taskRequiredError(paths, cfg, model, prefix);
+  }
+  if (!task.started) throw notStartedError(task.key, prefix);
+  if (task.stepUnknown !== undefined) throw stepUnknownError(task.key, task.stepUnknown, model.name);
+  return task.key;
+}
+
+/**
+ * The ticket key a move of `model` would use (the `task` argument, else the key in the current
+ * branch), without network: undefined when the flow is not tracked, or no ticket is bound and the
+ * flow does not require one (the local position applies). With `allowBare` (a fast-forward stop,
+ * like its start) the argument may be a bare number when `jira.defaultProjectKey` is set.
+ * Throws `TASK_REQUIRED` and `TASK_REF_*`.
+ */
+export function taskKeyForMove(
+  paths: ProjectPaths,
+  model: FlowModel,
+  task?: string,
+  prefix?: InstructionsCommandPrefix,
+  options: { allowBare?: boolean | undefined } = {},
+): string | undefined {
+  const tracker = trackerOf(paths, model.name);
+  if (!tracker) return undefined;
+  const resolved = resolveTask(paths, tracker.cfg, { task, allowBare: options.allowBare });
+  if (resolved) return resolved.key;
+  if (!tracker.tracked.requireTask) return undefined;
+  throw taskRequiredError(paths, tracker.cfg, model, prefix);
 }
 
 /**
@@ -510,6 +558,10 @@ async function moveTask(
   resolved: ResolvedTask,
   args: TaskMoveArgs,
   prefix: InstructionsCommandPrefix | undefined,
+  guards: {
+    event: ((state: FlowRuntimeState, key: string, event: string, from?: string) => void) | undefined;
+    goto: ((state: FlowRuntimeState, key: string, step: string) => void) | undefined;
+  },
 ): Promise<TaskMoveResult> {
   const property = cfg.jira.property;
   const { client, warnings } = connect(cfg);
@@ -536,12 +588,7 @@ async function moveTask(
     if (record.flow !== model.name) throw flowMismatchError(key, record.flow, model.name);
     state = runtimeFromStored(model, storedPosition(record));
     if (!model.byId.has(record.step)) {
-      if (args.kind === 'event') {
-        throw new DflError(`The dfl record of ${key} is at step "${record.step}", which flow "${model.name}" does not have.`, {
-          hint: `Move the task to the right step with \`dfl goto <step> --task ${key}\`.`,
-          code: 'TASK_STEP_UNKNOWN',
-        });
-      }
+      if (args.kind === 'event') throw stepUnknownError(key, record.step, model.name);
       // goto / reset repair it: the history entry starts at the unknown step.
       state = { ...state, current: record.step, done: false };
     } else if (args.kind === 'event' && args.from !== undefined && isReplay(record, args.from, event)) {
@@ -563,6 +610,9 @@ async function moveTask(
     base = record.params;
   }
 
+  // A running fast-forward run refuses events and gotos that end the flow away from its target (never on a replay).
+  if (args.kind === 'event') guards.event?.(state, runKey(model.name, key), event, args.from);
+  else if (args.kind === 'goto') guards.goto?.(state, runKey(model.name, key), args.step!);
   const result =
     args.kind === 'event'
       ? planEvent(model, state, event, { from: args.from })
@@ -1191,6 +1241,13 @@ function taskRequiredError(paths: ProjectPaths, cfg: TrackerConfig, model: FlowM
       `Start one with ${prefix ?? '/'}${INIT_TASK_SKILL} <ticket> (CLI: \`dfl task start <ticket>\`), or pass the task (its key, e.g. ${example}).` +
       (suggested !== undefined ? ` The previous branch was for ${suggested}: pass it if that is the task you just finished.` : ''),
     code: 'TASK_REQUIRED',
+  });
+}
+
+function stepUnknownError(key: string, step: string, flow: string): DflError {
+  return new DflError(`The dfl record of ${key} is at step "${step}", which flow "${flow}" does not have.`, {
+    hint: `Move the task to the right step with \`dfl goto <step> --task ${key}\`.`,
+    code: 'TASK_STEP_UNKNOWN',
   });
 }
 
