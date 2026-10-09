@@ -41,8 +41,8 @@ installs each step as an Agent Skill (\`<agent skills dir>/<skillName>/SKILL.md\
 - Step ids are kebab-case (\`^[a-z0-9]+(-[a-z0-9]+)*$\`, at most 64 characters). The skill name and
   slash command is \`skillPrefix + id\`. Avoid names of built-in agent commands (\`review\`, \`plan\`,
   \`init\`, \`help\`, \`status\`, ...) and of the dfl built-in skills (\`add-flow-step\`,
-  \`edit-flow-step\`, \`delete-flow-step\`). A descriptive verb-object id such as \`verify-task\`
-  is best.
+  \`edit-flow-step\`, \`delete-flow-step\`, \`fast-forward\`). A descriptive verb-object id such as
+  \`verify-task\` is best.
 - Keep long material (checklists, document skeletons, catalogs) in reference files next to
   SKILL.md and rules several steps share in flow partials; SKILL.md keeps the procedure, links each
   reference file and says when to open it. The prebuilt \`dev\` template (\`${cli} flow templates\`)
@@ -130,7 +130,9 @@ arguments fall back to the property of the same name); \`{{this.title}}\` is the
   instructions.
 - \`.df/<flow>/partials/<name>.hbs\` defines a partial \`{{> name}}\` for all steps of that flow
   (\`partials/common/footer.hbs\` is \`{{> common/footer}}\`). A file named \`flow-context.hbs\` there
-  overrides the built-in one for the flow.
+  overrides the built-in one for the flow; a flow's own \`flow-context.hbs\` must keep the
+  \`fastForward\` sentence of the built-in one ("If the result has a \`fastForward\`, ..."), so that
+  its steps follow the instructions of a fast-forward run.
 
 ## 4. Forbidden tokens
 
@@ -211,6 +213,12 @@ Declare variables in the \`vars\` object of flow.json:
 Aim for 60 to 140 lines an agent can follow without guessing. Keep one responsibility per step.
 Keep in SKILL.md every list the agent must not skip; move longer guides into reference files
 (section 1) and rules several steps share into a flow partial.
+
+- **Fast-forward runs** (the built-in \`/fast-forward\` skill) run the steps without the developer.
+  Give every question a recommended option or default; say where decisions of a fast-forward run
+  are recorded and how an automatic acceptance is marked; make endings only the developer may
+  choose separate final states (runs never enter them); declare states in main-path order (runs
+  and \`${cli} status\` treat edges to earlier states as going back).
 
 ## 8. Example
 

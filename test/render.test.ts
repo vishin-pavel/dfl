@@ -528,6 +528,21 @@ describe('renderFlowSkills', () => {
       expect(section.split('\n').length).toBeLessThanOrEqual(25);
     }
   });
+
+  it('tells the agent to follow a fastForward block first, without adding a line', () => {
+    const paths = sampleProject();
+    // A block may also be a run that has just stopped or ended: its instructions come first, the hand-over still follows.
+    const sentence =
+      'If the result has a `fastForward`, follow `fastForward.instructions` first: they come before ' +
+      "any question this skill asks the user and before telling the user the next step's slash command.";
+    for (const skill of renderFlowSkills(paths, loadFlow(paths, 'sample'), {})) {
+      const section = flowContextSection(skillFile(skill, 'SKILL.md'));
+      // The last sentence of the one-line "Before you start" paragraph.
+      const before = section.split('\n').find((line) => line.startsWith('**Before you start:**'));
+      expect(before?.endsWith(`flow-update\`. ${sentence}`), skill.name).toBe(true);
+      expect(section.split('\n').length).toBeLessThanOrEqual(25);
+    }
+  });
 });
 
 describe('renderBuiltinSkills', () => {

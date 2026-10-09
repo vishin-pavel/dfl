@@ -22,6 +22,7 @@ Accepted: classification <date> · requirements <sha | pending | n/a> · tech de
 ## Quality attribute screening
 ## Change requests
 ## Rework
+## Fast-forward log
 ## Implementation
 ## Dev QA report
 ## Hand-off to the QA team
@@ -36,7 +37,7 @@ Accepted: classification <date> · requirements <sha | pending | n/a> · tech de
 | `Class`, `Modifiers` | Class / outcome from the decision table (mixed: one per part, joined by ` + `); modifiers comma-separated, `sensitive` with its area. |
 | `Route`, `Tech design sections` | The confirmed route; section keys from the classification guide, `none` when the route skips Tech design. |
 | `Context`, `Features` | The project context; per feature its folder name, prefix (proposed for a new feature), new or existing and the coverage of the touched behavior. |
-| `Accepted` | `classification` is the date (YYYY-MM-DD) of the user's yes. `requirements` and `tech design`: `pending` while the step is on the route and not yet accepted, then the sha that step records; `n/a` when the route skips it. Behavior appends the IDs it extracted from existing behavior (its baseline under adoption or partial coverage): `requirements <sha> (extracted: CHK-1, CHK-1.1)`. |
+| `Accepted` | `classification` is the date (YYYY-MM-DD) of the user's yes. `requirements` and `tech design`: `pending` while the step is on the route and not yet accepted, then the sha that step records; `n/a` when the route skips it. Behavior appends the IDs it extracted from existing behavior (its baseline under adoption or partial coverage): `requirements <sha> (extracted: CHK-1, CHK-1.1)`. A fast-forward run writes ` (auto)` after the date or sha it accepted, before any `extracted:` list: `requirements <sha> (auto) (extracted: CHK-1)`. |
 
 ## Sections
 
@@ -47,12 +48,13 @@ Accepted: classification <date> · requirements <sha | pending | n/a> · tech de
 | `## Quality attribute screening` | design-tech | Every catalog code → Applicable, Baseline SYS-n, or N/A with a one-line reason. |
 | `## Change requests` | implement-task | `CR-n` entries, each with the developer's decision. |
 | `## Rework` | any step sending work back | Event, sending step, numbered items; the receiving step marks each one done. |
+| `## Fast-forward log` | any step during a fast-forward run | One line per decision made in the developer's place, in the format of the Task brief section; append only. Lines marked ` · review` go to Dev QA and the pull request. |
 | `## Implementation` | implement-task | Per-ID checklist, declared change map, commands and results, `.df` config edits. |
 | `## Dev QA report` | verify-task | One subsection per round, with the diff base used. |
 | `## Hand-off to the QA team` | verify-task, then ship-task | Unverified IDs, follow-ups and known gaps (any step may add follow-ups; later steps keep them), items not available, what to test by hand; ship-task adds the PR and CI status, copies the hand-off into the pull request description and then removes the brief. |
 
 A reclassification log entry: `- <date>: <old class / route> → <new class / route>; sent by
-<step> (<event>); <reason>; confirmed by the user.`
+<step> (<event>); <reason>; confirmed by the user (or: auto-accepted (fast-forward)).`
 
 ## Example
 
@@ -86,6 +88,7 @@ Reclassification log: none.
 ## Quality attribute screening
 ## Change requests
 ## Rework
+## Fast-forward log
 ## Implementation
 ## Dev QA report
 ## Hand-off to the QA team

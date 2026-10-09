@@ -12,7 +12,7 @@ import { trackerValidationWarnings } from './tracker/config.js';
 import type { FlowDefinition, FlowStateNodeConfig, ProjectPaths, ValidationIssue } from './types.js';
 
 /** Skills dfl installs next to every flow's step skills; step skill names must not collide with them. */
-export const BUILTIN_SKILL_NAMES: readonly string[] = ['add-flow-step', 'edit-flow-step', 'delete-flow-step'];
+export const BUILTIN_SKILL_NAMES: readonly string[] = ['add-flow-step', 'edit-flow-step', 'delete-flow-step', 'fast-forward'];
 
 /** Built-in slash commands of common coding agents; a step skill with such a name is shadowed or confusing. */
 export const AGENT_COMMAND_NAMES: readonly string[] = [

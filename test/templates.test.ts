@@ -65,7 +65,7 @@ const EXPECTED_FLOWS: Record<string, { title: string; titles: Record<string, str
 /** Shared flow partials a step template includes, in the order they appear (flow-context is always last). */
 const SHARED_PARTIAL_ORDER = ['brief', 'requirements-rules', 'scope-rules', 'project-commands', 'flow-context'];
 
-const BUILTIN_SKILLS = ['add-flow-step', 'delete-flow-step', 'edit-flow-step'];
+const BUILTIN_SKILLS = ['add-flow-step', 'delete-flow-step', 'edit-flow-step', 'fast-forward'];
 /** Built-in skills rendered only for projects with .df/tracker.json. */
 const TRACKER_SKILLS = ['init-task'];
 
@@ -549,6 +549,7 @@ describe('dev flow consistency', () => {
       'Quality attribute screening',
       'Change requests',
       'Rework',
+      'Fast-forward log',
       'Implementation',
       'Dev QA report',
       'Hand-off to the QA team',
@@ -624,6 +625,45 @@ describe('dev flow consistency', () => {
     expect(guidance).toMatch(/`pending` while the step is on the route and not yet accepted, then the sha that step records; `n\/a` when the route skips it/);
   });
 
+  it('lets a fast-forward run decide in the developer\'s place: markers, the log, assumed values, independence', () => {
+    const text = flat(brief);
+    expect(text).toContain('**Fast-forward.**');
+    // A stopped or ended block stays visible to a manual session until the flow moves on: the run's rules apply only while it runs.
+    expect(text).toContain('When `get_status` returns a `fastForward` whose `status` is `running`, a fast-forward run decides in the developer\'s place');
+    expect(text).toContain('` (auto)`');
+    expect(text).toContain('`Source: assumed`');
+    expect(text).toContain(
+      'Retiring IDs the change removes, deleting their tests as the step says, and `git revert` under `revert` are logged with ` · review`.',
+    );
+    // Ship notifies nobody: no reviewer from any source; every sensitive item stays pending.
+    expect(text).toContain(
+      '**Ship** opens the pull request with `--draft` and requests no reviewer at all (no `--reviewer`, also not the configured default, ' +
+        'and no `gh pr edit --add-reviewer`, also not CODEOWNERS), notes `reviewers: none requested (fast-forward)` in the hand-off, ' +
+        'lists every sensitive item as pending under Needs human review together with every log line marked ` · review` and every ` (auto)` value, ' +
+        'and answers no review comment.',
+    );
+    // A tracked run stops before NEXT and names the follow-up that works: a resume would stop at the same place.
+    expect(text).toContain(
+      'On a flow tracked in Jira (`get_status` returned a `task` with a `key`), stop the run instead of firing `NEXT`, with the reason: ' +
+        'after review, run the Ship command yourself (it completes Ship and records `prUrl`); resuming would stop here again.',
+    );
+    // Any step may append to the log, like the header changes.
+    expect(text).toContain('Each step writes only its own sections, apart from the header changes above and `## Fast-forward log`;');
+    expect(flat(section(briefTemplate, 'Header'))).toContain('`requirements <sha> (auto) (extracted: CHK-1)`');
+    expect(flat(readFlowFile(dir, 'steps/design-tech/references/requirement-format.md.hbs'))).toContain('· `assumed` a `proposed` value a fast-forward run kept');
+    const changeRequest = readFlowFile(dir, 'steps/implement-task/references/change-request.md.hbs');
+    expect(flat(changeRequest)).toContain('proposed or assumed');
+    expect(changeRequest.trimEnd().split('\n').length).toBeLessThanOrEqual(150);
+    expect(readFlowFile(dir, 'steps/verify-task/references/qa-report.md.hbs')).toContain('fresh sub-agent (fast-forward)');
+    const qaChecks = readFlowFile(dir, 'steps/verify-task/references/qa-checks.md.hbs');
+    const box3 = flat(section(qaChecks, 'Box 3: Human review for sensitive parts'));
+    expect(box3).toContain('`## Fast-forward log`');
+    // Every brief has the (empty) log heading: the trigger is its content, or an (auto) value.
+    expect(box3).toContain('After a fast-forward run (the brief\'s `## Fast-forward log` has entries, or a value is marked ` (auto)`),');
+    expect(box3).toContain('(a non-empty log may count as one item)');
+    expect(box3).not.toContain('the brief has a `## Fast-forward log`');
+  });
+
   it('names other steps\' slash commands through the command helper, never hard-coded', () => {
     for (const [rel, source] of sources) {
       for (const step of steps) {
@@ -641,7 +681,7 @@ describe('built-in skills', () => {
   const names = listDirs(builtinSkillsDir());
   const dev = loadTemplate('dev');
 
-  it('ships the step management skills and init-task without clashing with flow steps', () => {
+  it('ships the step management skills, fast-forward and init-task without clashing with flow steps', () => {
     expect(names).toEqual([...BUILTIN_SKILLS, ...TRACKER_SKILLS].sort());
     const stepIds = flowNames.flatMap((name) => Object.keys(loadTemplate(name).def.machine.states));
     for (const name of names) expect(stepIds).not.toContain(name);
@@ -675,7 +715,7 @@ describe('built-in skills', () => {
       expect(() => precompile(source)).not.toThrow();
     });
 
-    // The step management skills; init-task has its own tests below.
+    // The step management skills and fast-forward; init-task has its own tests below.
     if (BUILTIN_SKILLS.includes(name)) {
       it.each([
         ['an active flow', dev.model],
@@ -762,6 +802,73 @@ describe('built-in skills', () => {
     expect(text).toContain('Never ask for an API token in the conversation.');
     if (model) expect(out).toContain('Active flow at the last sync: **Requirements-driven development** (`dev`).');
     else expect(out).not.toContain('Active flow');
+  });
+
+  it.each([
+    ['an active flow', dev.model],
+    ['no active flow', undefined],
+  ])('fast-forward renders for %s: parses the typed text, drives the loop through the dfl tools and prompts sub-agents', (_label, model) => {
+    const source = fs.readFileSync(path.join(builtinSkillsDir(), 'fast-forward', SKILL_TEMPLATE_FILE), 'utf8');
+    const out = render(source, templateContext(model, model ? defaultVars(model.def) : {}));
+    expect(out).not.toMatch(/\{\{|\}\}/);
+    expect(out).not.toContain(PARTIAL_MARKER);
+    expect((parseYaml(FRONTMATTER_RE.exec(out)![1]!) as { description: string }).description).toBe(
+      "Run the flow's steps one after another in the developer's place until a target state is current (default: the end of the flow), " +
+        'deciding what the steps would ask with their recommended options and logging every decision. ' +
+        'Use when the user asks to fast-forward a task, e.g. /fast-forward to <state>.',
+    );
+    const text = flat(out);
+    for (const tool of ['fast_forward', 'get_status', 'complete_step', 'start_task']) expect(text, tool).toContain(`\`${tool}\``);
+    expect(text).toContain('`dfl fast-forward ');
+    expect(text).toContain('`dfl next <EVENT> --from <step> ');
+    // The target needs "to", unless the state id is the whole text: any other first word that is not a ticket key starts the request.
+    expect(text).toContain(
+      '**Target**: the word `to` followed by a state id of the flow (a step, or the final state at the end of the flow), ' +
+        'or a state id that is the whole text, optionally followed by a ticket.',
+    );
+    expect(text).toContain(
+      'Any other first word that is not a ticket key starts the request: `build fails on Windows` is a request, not a target; ' +
+        '`ABC-123 add export` is a ticket and a request.',
+    );
+    expect(text).toContain('The whole text `stop` means: stop the active run');
+    // Blocks stay visible after a stop or the end until the flow moves on; a stop returns a short result.
+    const tools = flat(section(out, 'Tools'));
+    expect(tools).toContain('a stop returns only the flow, the ticket key (`task`, a string) and `fastForward`.');
+    expect(tools).toContain('while the run is running and, after it stopped or ended, until the flow moves on');
+    // How to decide and when to stop come from dfl (fastForward.instructions), never from this skill.
+    expect(text).toContain('follow `fastForward.instructions`');
+    // Start: the questions the skill may ask, and nothing else before the end.
+    const start = flat(procedureStep(out, 1));
+    expect(start).toContain(
+      "The run is at the flow's first step, `fastForward.moves` is empty and the user typed neither a request nor a ticket: " +
+        'ask for the request now; if the user declines or does not answer, stop the run (step 7) with the reason "no request".',
+    );
+    expect(start).toContain(
+      "A new run (not resumed) that does not start at the flow's first step while the user typed a request: stop the run (step 7) " +
+        'and ask whether the request is input for the task in progress at that step, or a new task (then the current one is finished ' +
+        'or reset first, `dfl reset`, and the user invokes this skill again).',
+    );
+    expect(start).toContain(
+      'A resumed run (`fastForward.resumed`) while the user typed text that reads as a new task rather than an answer to why it ' +
+        'stopped or input for the step it resumes at: ask whether to resume it or start a new run (stop it, then name the target).',
+    );
+    expect(start).toContain('Apart from these and `FAST_FORWARD_ACTIVE`, ask nothing before the end.');
+    expect(start).not.toContain('is not resumed');
+    expect(start).not.toContain('only question');
+    expect(flat(procedureStep(out, 2))).toContain('the branch and commit (`git branch --show-current`, `git rev-parse --short HEAD`)');
+    // After a sub-agent, get_status decides; without a block the sub-agent's Run line ends the run.
+    const check = flat(procedureStep(out, 4));
+    expect(check).toContain('`stopped` or `ended`: finish (step 6) with that block.');
+    expect(check).toContain("No `fastForward`: finish (step 6) with the sub-agent's Run line");
+    expect(flat(procedureStep(out, 6))).toContain('`git log --oneline --since="<fastForward.startedAt>"`');
+    const prompt = flat(section(out, 'Sub-agent prompt').replace(/^> /gm, ''));
+    expect(prompt).toContain('Run one step of a dfl fast-forward run, and only that step.');
+    expect(prompt).toContain('First call get_status with {"flow": "<flow>"[, "task": "<key>"]} (CLI fallback: `dfl status --flow <flow>[ --task <key>] --json`)');
+    expect(prompt).toContain(
+      'Stopped (the reason, or no), Run (the status, reason and detail of the fastForward in your last dfl result, ' +
+        'and its sentence that starts with "Next"), Decisions',
+    );
+    expect(prompt).toContain('Give a sub-agent no summary of earlier steps');
   });
 
   it.each(['add-flow-step', 'edit-flow-step'])('%s tells the agent to end templates with the literal partial', (name) => {
@@ -1119,6 +1226,21 @@ describe('content regressions', () => {
       expect(context, step).toContain(`\`dfl status --flow dev\``);
       expect(context, step).not.toContain('or continue with the current one');
       expect(context, step).not.toMatch(/\n{3,}/);
+    }
+  });
+
+  it('flow context: within 25 lines, it puts a fastForward block\'s instructions before questions and the hand-over', () => {
+    const sentence =
+      'If the result has a `fastForward`, follow `fastForward.instructions` first: they come before ' +
+      "any question this skill asks the user and before telling the user the next step's slash command.";
+    const skills = renderShipped('dev');
+    expect(skills.size).toBe(6);
+    for (const [step, text] of skills) {
+      const context = flowContext(text);
+      expect(context.split('\n').length, step).toBeLessThanOrEqual(25);
+      expect(context, step).toContain('follow `fastForward.instructions`');
+      // The sentence ends the one-line "Before you start" paragraph: it costs no line.
+      expect(context.split('\n').find((line) => line.startsWith('**Before you start:**'))?.endsWith(` ${sentence}`), step).toBe(true);
     }
   });
 

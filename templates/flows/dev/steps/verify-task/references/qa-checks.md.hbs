@@ -94,6 +94,11 @@ by a named human other than you (name recorded) or marked for Ship to request as
 review. You never confirm one yourself. Pending items give the verdict "pass, human review
 pending", which allows `NEXT`. Under the `sensitive` modifier an empty list needs a written reason.
 
+After a fast-forward run (the brief's `## Fast-forward log` has entries, or a value is marked
+` (auto)`), its lines marked ` · review`, every ` (auto)` value and every `Source: assumed` row are
+human review items too: list them as pending (a non-empty log may count as one item). Ship carries
+them into the pull request.
+
 ## Box 4: Tests coverage
 
 Passes when:

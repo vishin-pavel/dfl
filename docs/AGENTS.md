@@ -72,8 +72,8 @@ MCP settings.
 ## Flows tracked in Jira: credentials and network
 
 When `.df/tracker.json` tracks a flow, the `dfl` MCP server itself calls the Jira REST API (in
-`get_status`, `complete_step`, `transition`, `goto_step` and `start_task`); the agent needs no Jira
-MCP server. What that means for the agents:
+`get_status`, `complete_step`, `transition`, `goto_step`, `start_task`, and `fast_forward` when it
+starts a run); the agent needs no Jira MCP server. What that means for the agents:
 
 - **No token in MCP configs.** The committed `dfl` entry is the same for the whole team and never
   carries a credential (dfl also replaces fields added to it by hand). The server reads the token
@@ -96,7 +96,7 @@ MCP server. What that means for the agents:
   `NODE_USE_ENV_PROXY=1` (plus `NODE_EXTRA_CA_CERTS` for a proxy that re-signs TLS) must be in the
   environment the agent starts the server with. A tracked step cannot be completed while Jira is
   unreachable (`TRACKER_UNREACHABLE`).
-- **Annotations.** `start_task` and the move tools are non-destructive writes marked
+- **Annotations.** `start_task`, `fast_forward` and the move tools are non-destructive writes marked
   `openWorldHint: true` (they reach Jira), and `get_status` is read-only and open-world; clients that
   ask before every MCP call (Devin) ask for these too.
 - **Starting a ticket.** `/init-task ABC-123` (`$init-task ABC-123` in Codex; `get_status`'s
@@ -107,6 +107,36 @@ MCP server. What that means for the agents:
   newly committed `tracker.json`, run `dfl flow-update` (dfl reports the skills as out of date);
   the per-tool notes below say when each agent picks up a new skill (live, `/skills reload`, or a
   new session).
+
+## Fast-forward runs
+
+The built-in `/fast-forward` skill (`$fast-forward` in Codex) is installed for every agent. It runs
+the flow's steps one after another in the developer's place, through the `dfl` MCP tools
+(`fast_forward`, `get_status`, `complete_step`) or their CLI fallbacks (`dfl fast-forward`,
+`dfl status`, `dfl next`). What that means for the agents:
+
+- **Sub-agents.** When the agent can start a sub-agent with a fresh context that can use the
+  project's tools, the skill runs every step in a new one, one at a time, and waits for its reply.
+  The sub-agent gets no summary of earlier steps: it calls `get_status` and follows
+  `fastForward.instructions`, so it needs the `dfl` MCP server, or a shell for the CLI fallback. It
+  runs only that step and replies with a Run line (the run's status, reason and detail from its last
+  dfl result); the driver then calls `get_status`, which keeps showing a run that stopped or ended
+  until the flow moves on. When the agent cannot start such a sub-agent, the steps run in the
+  conversation itself. A step that must judge the work independently (the `dev` flow's Dev QA)
+  treats a fresh sub-agent as a new session and never runs in the conversation that wrote the code.
+- **Commands.** `fastForward.step.command` and the skill commands in `fastForward.instructions` use
+  `$name` when the MCP client identifies itself as Codex, like the other results. On the CLI
+  fallback (`dfl status --json`, `dfl next --json`, …) they use `$name` when every agent selected
+  for the project is Codex, else `/name`.
+- **Tool approvals.** A run makes several MCP calls per step. Clients that ask before every MCP call
+  (Devin) ask for each one unless the `dfl` tools are pre-approved (`mcp__dfl__*`, see Windsurf /
+  Devin below).
+- **Long runs.** When the conversation's context is getting full, the agent stops the run; invoke
+  the skill again in a new session to resume it with its target.
+- **Other conversations.** The run lives in `.df/fast-forward.json` (git-ignored, one checkout).
+  An agent in another conversation that sees a running `fastForward` in a result tells you the run
+  is active and asks whether to continue it or stop it; a stopped or ended one it only mentions
+  before going on as usual.
 
 ## Detection (`dfl agents`, install pre-selection)
 

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getActiveFlowName, loadLocalConfig, loadProjectConfig, saveProjectConfig, setActiveFlow } from '../src/core/config.js';
 import { DflError } from '../src/core/errors.js';
+import { readFastForwardFile, saveFastForwardRun, type FastForwardRun } from '../src/core/fastforward/store.js';
 import {
   buildFlowModel,
   createFlow,
@@ -427,6 +428,33 @@ describe('deleteFlow bookkeeping', () => {
     fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 1, flows: { one: entry, two: { ...entry, current: 'b' } } }));
     deleteFlow(paths, 'one');
     expect(JSON.parse(fs.readFileSync(paths.stateFile, 'utf8'))).toEqual({ version: 1, flows: { two: { ...entry, current: 'b' } } });
+  });
+
+  it('removes only the deleted flow\'s fast-forward runs', () => {
+    const paths = makeTempProject();
+    createFlow(paths, 'one', { steps: ['a'] });
+    createFlow(paths, 'two', { steps: ['b'] });
+    const run = (flow: string, from: string, task: string | null = null): FastForwardRun => ({
+      flow,
+      task,
+      target: 'done',
+      from,
+      anchor: null,
+      startedAt: '2026-01-01T00:00:00.000Z',
+    });
+    saveFastForwardRun(paths, 'one', run('one', 'a'));
+    saveFastForwardRun(paths, 'one#ABC-1', run('one', 'a', 'ABC-1'));
+    saveFastForwardRun(paths, 'two', run('two', 'b'));
+    deleteFlow(paths, 'one');
+    expect(Object.keys(readFastForwardFile(paths).file.runs)).toEqual(['two']);
+    deleteFlow(paths, 'two');
+    expect(fs.existsSync(paths.fastForwardFile)).toBe(false);
+
+    // A corrupt run file does not stop the deletion.
+    createFlow(paths, 'three', { steps: ['c'] });
+    fs.writeFileSync(paths.fastForwardFile, '{');
+    expect(() => deleteFlow(paths, 'three')).not.toThrow();
+    expect(fs.readFileSync(paths.fastForwardFile, 'utf8')).toBe('{');
   });
 
   it('keeps the flow when config.json cannot be read', () => {

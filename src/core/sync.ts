@@ -373,7 +373,7 @@ export async function syncProject(paths: ProjectPaths, options: SyncOptions = {}
 }
 
 export interface UninstallOptions {
-  /** Also delete `.df/local.json`, `.df/state.json` and rendered `.md` files under `.df`. */
+  /** Also delete `.df/local.json`, `.df/state.json`, `.df/fast-forward.json` and rendered `.md` files under `.df`. */
   purge?: boolean | undefined;
   /**
    * Leave the `dfl` MCP entries alone (they are committed team config), e.g. when the last active flow
@@ -489,7 +489,7 @@ export function uninstallProject(paths: ProjectPaths, options: UninstallOptions 
   }
 
   if (options.purge) {
-    for (const file of [paths.localFile, paths.stateFile]) {
+    for (const file of [paths.localFile, paths.stateFile, paths.fastForwardFile]) {
       if (!exists(file)) continue;
       removePath(file);
       removed.push(toRel(root, file));

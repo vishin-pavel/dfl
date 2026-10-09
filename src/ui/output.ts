@@ -16,6 +16,8 @@ export const sym = {
   dot: '·',
   added: '+',
   removed: '−',
+  run: '»',
+  halt: '■',
 } as const;
 
 export function print(line = ''): void {

@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFastForwardFile } from '../src/core/fastforward/store.js';
 import { currentBranch } from '../src/core/git.js';
 import { loadTrackerConfig } from '../src/core/tracker/config.js';
 import { isTracked } from '../src/core/tracker/runtime.js';
-import type { ProjectPaths } from '../src/core/types.js';
+import type { FlowDefinition, ProjectPaths } from '../src/core/types.js';
 import { runCli } from '../src/run.js';
 import { plain, truncate } from '../src/ui/output.js';
 import { DEFAULT_ACCOUNT, DEFAULT_STATUSES, createFakeJira, credentialEnv, type FakeJira, type FakeJiraOptions } from './helpers/fake-jira.js';
@@ -187,11 +188,11 @@ function feedStdin(text: string): void {
 }
 
 /**
- * A git repository on main (everything committed) with the sample flow (plan → build → review → done),
- * tracked in a fake Jira unless `tracker` is false; env credentials unless `credentials` is false.
+ * A git repository on main (everything committed) with the sample flow (plan → build → review → done,
+ * or `def`), tracked in a fake Jira unless `tracker` is false; env credentials unless `credentials` is false.
  */
 async function project(
-  options: { tracker?: Record<string, unknown> | false; jira?: FakeJiraOptions; credentials?: boolean } = {},
+  options: { tracker?: Record<string, unknown> | false; jira?: FakeJiraOptions; credentials?: boolean; def?: FlowDefinition } = {},
 ): Promise<{ paths: ProjectPaths; root: string; jira: FakeJira }> {
   jira = await createFakeJira({
     issues: [
@@ -201,7 +202,7 @@ async function project(
     ...options.jira,
   });
   const paths = makeTempProject();
-  writeSampleFlow(paths);
+  writeSampleFlow(paths, options.def);
   if (options.tracker !== false) writeTracker(paths, trackerConfig(jira, options.tracker));
   git(paths.root, 'init', '-q', '-b', 'main');
   git(paths.root, 'add', '-A');
@@ -252,7 +253,7 @@ describe('dfl tracker init', () => {
     await ok(paths.root, 'install', '--yes', '--agents', 'claude');
     expect(fs.existsSync(skill(paths))).toBe(false);
     const { stdout } = await ok(paths.root, 'tracker', 'init', '--url', 'https://acme.atlassian.net', '--project', 'ABC');
-    expect(stdout).toContain('Synced 7 skills of flow "sample" for Claude Code (+1 −0)');
+    expect(stdout).toContain('Synced 8 skills of flow "sample" for Claude Code (+1 −0)');
     expect(fs.readFileSync(skill(paths), 'utf8')).toContain('`start_task`');
 
     // Not installed for this developer: nothing is installed or reported.
@@ -890,6 +891,154 @@ describe('tracked dfl status / next / goto / reset', () => {
     expect((await dfl(paths.root, 'next', '--task', 'ABC-1', '--set', 'oops')).stderr).toContain('Expected name=value');
     expect((await fails(paths.root, 'goto', 'review', '--task', 'ABC-1', '--set', 'apiToken=x')).stderr).toContain('apiToken');
     expect(recordOf(fake)['step']).toBe('build');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dfl fast-forward of tracked flows
+// ---------------------------------------------------------------------------
+
+describe('tracked dfl fast-forward', () => {
+  const stateText = (paths: ProjectPaths): string | undefined =>
+    fs.existsSync(paths.stateFile) ? fs.readFileSync(paths.stateFile, 'utf8') : undefined;
+
+  /** project() with the skills installed for Claude Code (a run needs them current) and ABC-1 started. */
+  async function startedProject(def?: FlowDefinition): Promise<{ paths: ProjectPaths; jira: FakeJira }> {
+    const { paths, jira: fake } = await project({ def });
+    await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    await ok(paths.root, 'task', 'start', 'ABC-1');
+    return { paths, jira: fake };
+  }
+
+  it('keys the run by the ticket, carries it in next and status, and never touches state.json', async () => {
+    const { paths, jira: fake } = await startedProject();
+    const stateBefore = stateText(paths);
+
+    const started = await json(paths.root, 'fast-forward', '--task', 'ABC-1');
+    expect(Object.keys(started).slice(-2)).toEqual(['task', 'fastForward']);
+    expect(started).toMatchObject({ flow: 'sample', current: 'plan', task: { key: 'ABC-1', started: true, step: 'plan' } });
+    expect(started.fastForward).toMatchObject({
+      target: 'done',
+      toEnd: true,
+      status: 'running',
+      step: { id: 'plan', command: '/plan', visit: 1, refusedEvents: [] },
+      moves: [],
+      path: ['plan', 'build', 'review', 'done'],
+      forks: [],
+      warnings: ['Every move of this run updates ABC-1 in Jira: its status follows the step the run enters.'],
+    });
+    expect(started.fastForward.instructions).toContain('(CLI: `dfl next <EVENT> --from plan --flow sample --task ABC-1 --json`)');
+    expect(Object.keys(readFastForwardFile(paths).file.runs)).toEqual(['sample#ABC-1']);
+    const text = await ok(paths.root, 'fast-forward');
+    expect(text.stderr).toContain('▲ Every move of this run updates ABC-1 in Jira: its status follows the step the run enters.');
+    expect(text.stdout).toContain('» Fast-forward run to Done (done) resumed on flow "sample" for ABC-1 at Plan (plan).');
+
+    const moved = await json(paths.root, 'next', 'NEXT', '--from', 'plan', '--task', 'ABC-1');
+    expect(Object.keys(moved).at(-1)).toBe('fastForward');
+    expect(moved).toMatchObject({
+      from: 'plan',
+      to: 'build',
+      task: { key: 'ABC-1' },
+      fastForward: { status: 'running', step: { id: 'build', visit: 1 }, moves: [{ from: 'plan', to: 'build', event: 'NEXT' }] },
+    });
+    // The key in the branch name finds the same run.
+    expect((await json(paths.root, 'status')).fastForward).toEqual(moved.fastForward);
+    expect((await ok(paths.root, 'status')).stdout).toContain('» Fast-forward to Done (done): Build next, visit 1 of 3 · stop it with `dfl fast-forward --stop`');
+    expect((await ok(paths.root, 'status', '--task', 'ABC-1')).stdout).toContain('stop it with `dfl fast-forward --stop --task ABC-1`');
+    const toReview = await ok(paths.root, 'next', '--from', 'build');
+    expect(toReview.stdout).toContain('ABC-1 · Jira: In Progress → In Review');
+    expect(toReview.stdout).toContain('» Fast-forward to Done (done) continues with /review (visit 1 of 3).');
+
+    // A bare number works as for a start; a ticket's stop reads nothing from Jira.
+    const requests = fake.requests.length;
+    expect(await json(paths.root, 'fast-forward', '--stop', '--task', '1')).toEqual({
+      flow: 'sample',
+      task: 'ABC-1',
+      fastForward: expect.objectContaining({ status: 'stopped', reason: 'stopped' }),
+    });
+    expect((await ok(paths.root, 'fast-forward', '--stop')).stdout).toBe('■ Fast-forward run to Done (done) stopped on flow "sample" for ABC-1.\n');
+    expect(fake.requests).toHaveLength(requests);
+    expect((await ok(paths.root, 'status')).stdout).toContain('■ Fast-forward to Done (done) stopped · resume it with /fast-forward');
+    expect(stateText(paths)).toBe(stateBefore);
+    expect(fake.issue('ABC-1').status).toBe('In Review');
+  });
+
+  it('refuses an event that ends the flow away from the target before writing the ticket', async () => {
+    const def = sampleFlowDefinition();
+    def.machine.states['plan']!.on = { NEXT: 'build', DROP: 'dropped' };
+    def.machine.states['dropped'] = { type: 'final', description: 'Dropped' };
+    const { paths, jira: fake } = await startedProject(def);
+    await ok(paths.root, 'fast-forward');
+    const puts = fake.requestsTo('putProperty').length;
+
+    const refused = await fails(paths.root, 'next', 'DROP', '--from', 'plan', '--task', 'ABC-1');
+    expect(refused.stderr).toContain(
+      '✖ Event "DROP" of step "plan" ends flow "sample" at "dropped", but the fast-forward run to "done" may end the flow only at its target.',
+    );
+    expect(refused.stderr).toContain('(`dfl fast-forward --stop --reason "<your proposal>" --flow sample --task ABC-1`)');
+    expect(fake.requestsTo('putProperty')).toHaveLength(puts);
+    expect(recordOf(fake)['step']).toBe('plan');
+    expect(fake.issue('ABC-1').status).toBe('In Progress');
+  });
+
+  it('refuses a goto into another final state before writing the ticket; goto and reset end a live run', async () => {
+    const def = sampleFlowDefinition();
+    def.machine.states['plan']!.on = { NEXT: 'build', DROP: 'dropped' };
+    def.machine.states['dropped'] = { type: 'final', description: 'Dropped' };
+    const { paths, jira: fake } = await startedProject(def);
+    await ok(paths.root, 'fast-forward');
+    const puts = fake.requestsTo('putProperty').length;
+
+    const refused = await fails(paths.root, 'goto', 'dropped');
+    expect(refused.stderr).toContain(
+      '✖ Going to "dropped" ends flow "sample" there, but the fast-forward run to "done" may end the flow only at its target.',
+    );
+    expect(refused.stderr).toContain('(`dfl fast-forward --stop --reason "<your proposal>" --flow sample --task ABC-1`)');
+    expect(fake.requestsTo('putProperty')).toHaveLength(puts);
+    expect(recordOf(fake)['step']).toBe('plan');
+
+    // A goto into a step ends the run as moved: the JSON ends with the task, then the run.
+    const jumped = await json(paths.root, 'goto', 'review');
+    expect(Object.keys(jumped).slice(-2)).toEqual(['task', 'fastForward']);
+    expect(jumped).toMatchObject({ to: 'review', task: { key: 'ABC-1' }, fastForward: { status: 'ended', reason: 'moved', moves: [] } });
+    expect((await json(paths.root, 'status')).fastForward).toMatchObject({ status: 'ended', reason: 'moved' });
+
+    await ok(paths.root, 'fast-forward');
+    const reset = await json(paths.root, 'reset', '--yes');
+    expect(Object.keys(reset).slice(-2)).toEqual(['task', 'fastForward']);
+    expect(reset).toMatchObject({ current: 'plan', task: { key: 'ABC-1' }, fastForward: { status: 'ended', reason: 'moved' } });
+    await ok(paths.root, 'fast-forward');
+    expect((await ok(paths.root, 'reset', '--yes')).stdout).toContain(
+      '■ Fast-forward to Done (done) ended: The flow was moved outside the run (a goto, a reset, a step removal or another session).',
+    );
+  });
+
+  it('keys the run of a tracked flow without a bound ticket by the flow (requireTask: false)', async () => {
+    const { paths, jira: fake } = await project({ tracker: { flows: { sample: { requireTask: false, statuses: MAPPING } } } });
+    await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    const started = await json(paths.root, 'fast-forward');
+    expect(started).not.toHaveProperty('task');
+    expect(started.fastForward).toMatchObject({ target: 'done', status: 'running', warnings: [] });
+    expect(started.fastForward.instructions).toContain('(CLI: `dfl next <EVENT> --from plan --flow sample --json`)');
+    expect(Object.keys(readFastForwardFile(paths).file.runs)).toEqual(['sample']);
+
+    expect((await json(paths.root, 'next', '--from', 'plan')).fastForward).toMatchObject({ status: 'running', step: { id: 'build' } });
+    expect((await ok(paths.root, 'status')).stdout).toContain('» Fast-forward to Done (done): Build next, visit 1 of 3 · stop it with `dfl fast-forward --stop`');
+    expect(await json(paths.root, 'fast-forward', '--stop')).toEqual({
+      flow: 'sample',
+      fastForward: expect.objectContaining({ status: 'stopped', moves: [expect.objectContaining({ from: 'plan', to: 'build' })] }),
+    });
+    expect(JSON.parse(fs.readFileSync(paths.stateFile, 'utf8')).flows.sample.current).toBe('build');
+    expect(fake.requests).toEqual([]);
+  });
+
+  it('needs a started task', async () => {
+    const { paths, jira: fake } = await project();
+    await ok(paths.root, 'install', '--yes', '--agents', 'claude', '--no-mcp');
+    expect((await fails(paths.root, 'fast-forward')).stderr).toContain('no ticket is bound to the current branch');
+    expect((await fails(paths.root, 'fast-forward', '--task', 'ABC-2')).stderr).toContain('✖ ABC-2 has no dfl task yet.');
+    expect(fake.requestsTo('putProperty')).toEqual([]);
+    expect(fs.existsSync(paths.fastForwardFile)).toBe(false);
   });
 });
 

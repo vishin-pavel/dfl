@@ -105,7 +105,7 @@ confirm the file still passes them.
 - [ ] One-liner `[While <state>,] [When <trigger>,] <subject> shall <response> <measure>.` in a row
       `ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source`.
 - [ ] Verify by is test, bench, static, inspect or ops; Priority is Must or Should; Source is user,
-      existing, baseline or proposed.
+      existing, baseline, proposed or assumed (kept by a fast-forward run).
 - [ ] A reworded requirement keeps its ID and catalog code (`REF-PERF-1`); a replaced one gets a new
       ID and the old one moves to the Retired IDs section with its reason (the commit names the CR).
 - [ ] Logical level: no file, class or library version names; a technology only as a constraint. UI
@@ -113,7 +113,7 @@ confirm the file still passes them.
 - [ ] The row agrees with the baseline `SYS-` items it refines and with the brief's screening.
 - [ ] No ticket keys, requester names, request sentences or task progress.
 - [ ] The grill below passes; a number you proposed becomes `Source: user` once the developer
-      confirms it in the decision.
+      confirms it in the decision (a fast-forward run keeps it as `Source: assumed`).
 
 ## Grill a tech design item
 
@@ -126,8 +126,8 @@ grill questions into the same message as the CR options; the CR decision accepts
 
 Send the entry as a chat message: the problem in one sentence, the options with pros and cons, your
 recommendation, and "Which option? (default: <recommendation>)". Only an explicit answer decides:
-"2", "go with your recommendation", "keep it". Silence, a change of topic or an "ok" to something
-else is not a decision. Record the answer and the date in **Decision**.
+"2", "go with your recommendation", "keep it". Silence, a change of topic or an "ok" to something else
+is not a decision. Record the answer and the date in **Decision**; a fast-forward run takes the Recommendation and writes ` (auto)` after the date.
 
 ## Act on the decision
 
@@ -142,7 +142,7 @@ else is not a decision. Record the answer and the date in **Decision**.
   with the proposed change and the trigger), commit the brief
   (`docs(task): CR-n sent back for <task>`) and fire the event. When the work returns, fill in
   **resolved by** with the owning step's acceptance commit and resume the plan.
-- **No developer reachable:** leave the decision pending, commit the brief
+- **No developer reachable** (never in a fast-forward run): leave the decision pending, commit the brief
   (`docs(task): CR-n pending for <task>`), say what blocks the task and stop without firing an
   event. The next session starts with this CR.
 

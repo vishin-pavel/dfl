@@ -116,11 +116,11 @@ Screen every row in step 3; details per code are in [quality attributes](referen
 
 ## Exit criteria
 
-- Every catalog code of every feature has a verdict the user confirmed.
+- Every catalog code of every feature has a verdict the user confirmed (or a fast-forward run did).
 - Every drafted section passed the grill and the user accepted it; no `Source: proposed` remains;
   conflicts have a trade-off the user chose; deferred questions are open items, not requirements.
-- The user explicitly accepted the summary; the acceptance commit holds only tech design files,
-  its sha is in the committed brief, and the tree is clean.
+- The user (or a fast-forward run: `(auto)`) explicitly accepted the summary; the acceptance
+  commit holds only tech design files, its sha is in the committed brief, and the tree is clean.
 - `REQUIREMENTS_GAP`: the Rework entry is committed in the brief and drafts are stashed by name.
 
 ## Pitfalls

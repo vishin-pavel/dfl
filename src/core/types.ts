@@ -28,6 +28,8 @@ export interface ProjectPaths {
   localFile: string;
   /** `<root>/.df/state.json` – runtime flow state (git-ignored). */
   stateFile: string;
+  /** `<root>/.df/fast-forward.json` – fast-forward runs of this checkout (git-ignored). */
+  fastForwardFile: string;
   /** `<root>/.df/installed.json` – manifest of files written outside `.df` (git-ignored). */
   manifestFile: string;
   /** `<root>/.df/tracker.json` – task tracker (Jira) config (committed; optional). */

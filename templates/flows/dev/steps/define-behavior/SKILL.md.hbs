@@ -113,9 +113,9 @@ technology.
 
 ## Exit criteria
 
-- `NEXT` or `NO_TECH_IMPACT`: the gate checklist passes and the user explicitly accepted the
-  summary, warnings included, in this conversation; the requirements commit holds only
-  requirement files, its sha is in the committed brief, and the tree is clean.
+- `NEXT` or `NO_TECH_IMPACT`: the gate checklist passes and the user explicitly accepted the summary,
+  warnings included, in this conversation (or a fast-forward run did: `(auto)`); the requirements
+  commit holds only requirement files, its sha is in the committed brief, and the tree is clean.
 - The event matches step 7: `NEXT` with the sections listed; `NO_TECH_IMPACT` only with no hit and
   no `ui-design`.
 - `RECLASSIFY`: the user agreed and the Rework entry is committed in the brief.

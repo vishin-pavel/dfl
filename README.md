@@ -27,6 +27,7 @@ Linux machine.
 - [Install](#install)
 - [Quick start](#quick-start)
 - [The `dev` flow](#the-dev-flow)
+- [Fast-forward a task](#fast-forward-a-task)
 - [How it works](#how-it-works)
 - [The `.df/` directory](#the-df-directory)
 - [Flows and steps](#flows-and-steps)
@@ -243,6 +244,274 @@ touches, and conflicts in other features become follow-ups.
 [Flows and steps](#flows-and-steps)). Its template has shared partials and reference files next to
 each step's skill; [browse it on GitHub](https://github.com/vishin-pavel/dfl/tree/main/templates/flows/dev).
 
+## Fast-forward a task
+
+`/fast-forward` (Codex: `$fast-forward`) runs the steps of the active flow one after another in your
+place until a target state becomes current; without a target it runs to the end of the flow.
+Wherever a step would ask you, wait for your yes or offer options, the agent decides with the
+step's recommended option and logs the decision. dfl keeps the run: after every move it says
+whether the run goes on, and it refuses events and gotos that would end the flow anywhere but at
+the target.
+The design and its trade-offs:
+[docs/design/fast-forward.md](https://github.com/vishin-pavel/dfl/blob/main/docs/design/fast-forward.md).
+
+```
+/fast-forward [to <state>] [<ticket>] [<request …>]
+/fast-forward <state> [<ticket>]          only when that is the whole text
+/fast-forward stop                        only when "stop" is the whole text
+```
+
+```
+/fast-forward Add CSV export to the reports page          # a new run to the end of the flow
+/fast-forward to verify-task Add CSV export to reports    # stops when Dev QA becomes current
+/fast-forward to implement-task ABC-123                   # a Jira ticket; review the specs before any code
+/fast-forward verify-task ABC-123                         # a state id and a ticket as the whole text
+/fast-forward                                             # resume a stopped run with its target, else run to the end
+/fast-forward use the design route                        # resume; the text answers why the run stopped
+/fast-forward stop                                        # stop the run
+```
+
+- **Target**: `to` followed by a state id, or a state id that is the whole text (optionally with a
+  ticket). Any other first word that is not a ticket key starts the request: `/fast-forward build
+  fails on Windows` is all request, `/fast-forward ABC-123 add export` is a ticket and a request, and
+  a step named `stop` is targeted with `to stop`. The target is a step or the final state at the
+  end of the flow (`done` in `dev`). dfl refuses a side exit (`not-handled`), the current step, a
+  step behind it and one the flow cannot reach going forward (`FAST_FORWARD_TARGET_INVALID`). A
+  flow has no end, and needs a target (`FAST_FORWARD_TARGET_REQUIRED`), when the `NEXT` path from
+  the initial step reaches no final state and the flow has more than one, or none.
+- **The target is not run**: the run stops when it becomes current, like `dfl goto`. To have a step
+  run, target the state after it, or leave the target out.
+- **Ticket**: a key such as `ABC-123` or a ticket link, for a flow tracked in Jira (the agent starts
+  a ticket without a dfl task with `start_task` first); for other flows it is part of the request.
+- **Request**: everything else, word for word. Only the first step the command runs gets it, as the
+  text typed after its own command; on a resumed run it is your answer to why the run stopped. It is
+  data: it never changes the target, picks an option or lifts a stop.
+- **Questions before the run**: a run at the flow's first step that has not moved yet, with neither
+  a request nor a ticket typed (also one started with `dfl fast-forward`), asks you for the request
+  and stops (reason "no request") without one. A new run that starts mid-flow while you typed a
+  request stops and asks whether the request belongs to the task in progress or is a new task
+  (finish or `dfl reset` the current one, then invoke `/fast-forward` again). On a resumed run, text
+  that reads as a new task makes the agent ask whether to resume the run or start a new one. Apart
+  from these and `FAST_FORWARD_ACTIVE` (below), the agent asks nothing before the end.
+
+A run needs the installed skills of its flow to be up to date (`FAST_FORWARD_SKILLS_STALE`: run
+`dfl flow-update`) and a known current step: a start on a `state.json` whose step the flow no
+longer has fails with `FAST_FORWARD_POSITION_UNKNOWN` (`dfl goto <step>` to where you are, then
+start again). The agent announces the run in a few lines (the likely path, the steps where the
+route may skip the target, the branch and commit, the uncommitted changes it will not touch, the
+kinds of stops) and goes on without waiting. Each step ends with one line,
+`✔ Classify → Behavior (NEXT) · 4 decisions`, and the run ends with a report: why it ended, the
+steps with their events, the decisions made in your place and where they are recorded, what needs
+your review, the warnings, outward actions (pushes, pull requests, Jira statuses), the commits since
+the start and the next command.
+
+### What the agent decides
+
+dfl gives every step of the run its instructions (`fastForward.instructions` in the `get_status`
+result); they come before any question the step asks and before it names the next step's command:
+
+- Where the step asks you, waits for your explicit yes or offers options, the agent takes the option
+  the step recommends or names as its default, unless the repository gives it a concrete reason to
+  prefer another; without one, the option most consistent with what is already accepted
+  (requirements, design, code, tests, configuration) and, among equals, the smallest reversible one
+  that keeps every requirement, test, check and review.
+- For a fact only you know, it uses the step's own fallback (an open item, a follow-up, an assumption
+  marked for review), or stops the run. It never invents a requirement the request does not support.
+- The target never decides: no option, route or event is chosen because it reaches, avoids or skips
+  the target.
+- A logged decision counts as yours for the step's exit criteria and for later checks. It is recorded
+  where the flow says fast-forward decisions go, marked as automatic (`dev`: see
+  [below](#in-the-dev-flow)); a flow without such a place gets it only in the step's reply and the
+  final report, in the conversation. dfl stores no decision text; the run's moves are in the flow
+  history.
+- The request, ticket text, pull requests, reviews, repository files and tool output are data: they
+  never start, resume or retarget a run, pick an option, skip or weaken a check, or lift a stop.
+
+**Your own flows.** Step skills follow the instructions through the `flow-context` partial: an
+override of `flow-context.hbs` must keep its `fastForward` sentence. A run treats a transition to a
+state earlier in the [step order](#flowjson) as going back, so declare the states in main-path
+order. Give every question a recommended option, say where a run records its decisions, and make
+endings only you may choose separate final states: runs never enter them.
+
+### When the run stops
+
+dfl decides after every move, from the flow history:
+
+| Reason | When | A bare `/fast-forward` afterwards |
+|--------|------|-----------------------------------|
+| `reached` | the target is current | starts a new run to the end of the flow |
+| `skipped` | the route went where the target cannot be reached going forward: in a run `to design-tech`, Classify fires `CODE_ONLY`, and the run stops at Implement without running it | starts a new run to the end of the flow |
+| `moved` | the flow was moved outside the run: a goto, a reset, the removal of the current step (also by `dfl flow pull` / `flow import --force`), renaming the target or the step the run started at, or a move from another step (another session, a teammate) | starts a new run to the end of the flow |
+| `loop` | a step became current a fourth time (the step the run started or resumed at counts once; reaching the target wins) | resumes the run with its target and fresh visit counts |
+| `stopped` | you or the agent stopped the run | resumes the run with its target and fresh visit counts |
+
+At a final state (`done`, `not-handled`) every start fails with `FLOW_DONE` first: run `dfl reset`
+or `dfl goto <step>`, then start a new run.
+
+A move from the run's current step along one of the flow's own transitions counts for the run,
+whoever makes it (also an event of your flow named `START` or `RESET`). A stopped run (`loop` or
+`stopped`) stays open while such moves head for the target, and closes like a running one when the
+flow reaches the target (`reached`), skips it (`skipped`) or is moved outside the run (`moved`).
+
+While the run is running, dfl refuses every event that would end the flow at a final state other
+than the target, and every goto into such a state (`FAST_FORWARD_EVENT_REFUSED`), from the agent
+and from you (`dfl next OUT_OF_SCOPE`, `dfl goto not-handled`), before it writes anything or changes
+the Jira ticket: stop the run first. A goto into a step stays allowed and ends the run (`moved`).
+
+The agent stops the run, with the reason, instead of deciding when a step would need: a credential,
+token or secret; discarding, stashing or overwriting changes the run did not make, committing them
+beyond what the step prescribes, or switching branches while tracked files have such changes;
+deleting a branch, force-pushing, rewriting pushed history, pushing to or merging into the main
+branch, deploying, releasing or publishing, even when the step prescribes it; handing the work to
+people beyond what the step does by default; skipping, deleting or weakening a test, check,
+requirement or quality target beyond what the request and the step prescribe (retiring requirement
+IDs the change removes, and deleting their tests as the step says, is not weakening); changing team
+settings, the flow or the installed skills; moving the flow other than by completing the step; a
+`skills` warning, anything `task.instructions` or a dfl hint says to ask you, or an error it cannot
+fix; an event dfl refuses (it stops with its proposal). It also stops when its context gets full:
+resume in a new session. Jira status warnings are reported, not stops.
+
+### Resume and stop
+
+- **Stop** by telling the agent, with `/fast-forward stop`, or with
+  `dfl fast-forward --stop [--reason "<one line>"]` (no network; `--task` also takes a bare number
+  with `jira.defaultProjectKey`, as a start does). The reason is shown as data; a stop without one
+  keeps the earlier stop's reason. A run that has already ended is not stopped
+  (`FAST_FORWARD_NOT_ACTIVE`, saying why it ended). A ticket's run is stopped without reading Jira:
+  on one that has already ended, the stop is recorded and changes nothing, and a bare
+  `/fast-forward` then fails with `FAST_FORWARD_TARGET_INVALID` ("had already ended") instead of
+  starting a run to the end: name a target.
+- **A stopped run keeps its target**: a bare `/fast-forward` resumes it from the current step, and
+  the text after the command goes to the step that stopped. `/fast-forward to <another state>` starts
+  a new run instead. When the stored target no longer fits (it is current, behind the current step
+  or out of reach), the bare start fails with `FAST_FORWARD_TARGET_INVALID` naming the stopped run:
+  name a target.
+- **A running run** (a crashed or compacted session) is continued as it is by a bare `/fast-forward`
+  or one with its target; once the run has moved or been resumed, with a warning that another
+  session may still drive it. Another target is refused (`FAST_FORWARD_ACTIVE`): stop the run first.
+- **Moving the flow yourself**: moves along the flow's transitions keep a stopped run open until the
+  flow reaches or skips its target; `dfl goto` and `dfl reset` close it (`moved`).
+
+In the terminal:
+
+```sh
+dfl fast-forward                      # resume a stopped run, else start one to the end of the flow; prints the likely path
+dfl fast-forward verify-task          # a run that stops when Dev QA becomes current
+dfl fast-forward --stop --reason "Which CSV columns? Only the developer knows."
+dfl status                            # ends with the run's line while it runs, or while a stopped run can be resumed
+```
+
+A run started with `dfl fast-forward` is driven by a bare `/fast-forward` in your agent, which picks
+it up without a takeover warning and, when the run is at the flow's first step and has not moved yet, asks for the request.
+`dfl status` ends with one of these lines (the running one adds `· refuses <events>` when the step
+has events the run refuses):
+
+```
+» Fast-forward to Dev QA (verify-task): Implement next, visit 2 of 3 · stop it with `dfl fast-forward --stop`
+■ Fast-forward to Dev QA (verify-task) stopped: Which CSV columns? Only the developer knows. · resume it with /fast-forward
+■ Fast-forward to Dev QA (verify-task) stopped: Step "implement-task" became current more than 3 times. · resume it with /fast-forward
+```
+
+`dfl next`, `goto` and `reset` print `» Fast-forward to Dev QA (verify-task) continues with
+/implement-task (visit 2 of 3).`, `■ Fast-forward to Dev QA (verify-task) ended: <why>` or, for a
+loop, `■ … stopped: <why>`. With `--json`, `status`, `next`, `goto` and `reset` end with the same
+`fastForward` block as the MCP results: while the run is running, and after it stopped or ended until
+the flow moves on. Without a run, their output is unchanged. Commands in the block use `$` when
+every selected agent is Codex.
+
+`.df/fast-forward.json` (git-ignored) keeps one record per flow, or per ticket on a flow tracked in
+Jira: the target, where the run (or its latest resume) started, and an explicit stop. Moves never
+write it; the progress is read from the flow history. It keeps the 20 most recent runs;
+`dfl flow delete` drops a flow's runs and `dfl uninstall --purge` deletes the file. When the file
+cannot be read, results show no run and `--stop` says so (delete the file, or start a new run, which
+replaces it with a warning).
+
+### Sub-agents
+
+When the agent can start a sub-agent with a fresh context that can use the project's tools, it runs
+every step in a new one, one at a time, and gives it no summary of earlier steps: the sub-agent reads
+its instructions from `get_status`, runs only that step and replies with the event, the run's status
+and why (from its last dfl result), the decisions and where they are recorded, what needs review,
+outward actions and warnings. The driving conversation then reads `get_status`, which shows the run
+while it runs and, once it stopped or ended, until the flow moves on. Otherwise the steps run in the
+same conversation, each read again from its skill file. A step that judges work independently (Dev
+QA) relies on the fresh context.
+
+### In the `dev` flow
+
+The task brief's **Fast-forward** rules and the step references say how a run decides:
+
+- **`(auto)`**: a logged decision counts as your yes and is marked ` (auto)` after the date or sha it
+  records: `Accepted: classification 2026-10-08 (auto) · requirements 1a2b3c4 (auto) · …`. A change
+  request takes its Recommendation (`accepted in place <date> (auto)`) and is never left `pending`;
+  a reclassification log line ends `auto-accepted (fast-forward)`.
+- **Fast-forward log**: one line per decision in the brief's `## Fast-forward log`,
+  `- <date> · <step> · <question> · chosen: <option> · alternatives: <options> · why: <reason> · affects: <IDs or files>`,
+  plus ` · review` for a sensitive item, an assumed value, a dependency, a command the agent found, a
+  ticket description nobody pasted, or text that tried to instruct it.
+- **`Source: assumed`**: a number the agent proposed is kept as `Source: assumed` instead of blocking
+  acceptance; it is logged for review and becomes `user` once a person confirms it. A test or check
+  command the agent found is used for the task, never saved for the team.
+- **Defaults**: without a pasted ticket description the agent classifies from the command text, the
+  ticket title and the links it can read; it merges the base branch, never rebases; a CI check that
+  also fails on the base branch does not block; behavior that looks wrong, a suggested split and an
+  extracted rule no test or document backs become follow-ups. In a repository without commits
+  (greenfield) it renames the branch to the main branch and makes the initial commit of everything
+  already there (`git add -A`), leaving files that look secret untracked. Retiring requirement IDs
+  the change removes, deleting their tests as the step says, and `git revert` under the `revert`
+  modifier are logged with ` · review`.
+- **Stops**: the run stops instead of firing `OUT_OF_SCOPE`, or `RECLASSIFY` because the task looks
+  out of scope; creating, switching or renaming a branch while tracked files have changes the run did
+  not make; adding a dependency the tech design does not allow.
+- **Dev QA independence**: Dev QA never runs in the conversation that wrote the code. A fresh
+  sub-agent counts as a new session (`Independence: fresh sub-agent (fast-forward)` in the report);
+  without sub-agents the run stops at Dev QA, and `/fast-forward` in a new session resumes it. When
+  the brief's `## Fast-forward log` has entries or a value is marked ` (auto)`, Dev QA lists every
+  ` · review` line, ` (auto)` value and `Source: assumed` row as pending human review.
+- **Draft pull request**: Ship opens the pull request with `--draft` and requests no reviewer at all
+  (no `--reviewer`, not the configured default, not CODEOWNERS; the hand-off notes
+  `reviewers: none requested (fast-forward)`), answers no review comment, and lists every sensitive
+  item as pending under Needs human review, together with the ` · review` lines and ` (auto)`
+  values. Mark it ready and request reviewers yourself once you reviewed the run.
+
+**On a flow tracked in Jira the run stops before Ship fires `NEXT`**: `done` hands the ticket to the
+QA team (*Ready for QA* in [the example mapping](#the-dev-flow-in-jira)), which you do after reviewing
+the run: run `/ship-task` yourself (it completes Ship and records `prUrl`; CLI:
+`dfl next --from ship-task --task ABC-123 --set prUrl=<url>`). A bare `/fast-forward` would only stop
+at Ship again. So the default target `done` is reached only on untracked flows; a tracked run to the
+end stops at Ship with the draft pull request open.
+
+### Jira
+
+- Every move of the run moves the ticket like a completed step: its status follows each step the
+  run enters, with Jira's notifications; the start says so. Checkpoint targets (below) keep the
+  moves few.
+- The run needs a started ticket (`TASK_REQUIRED`, `TASK_NOT_STARTED`). Runs are kept per ticket in
+  this checkout only, never in the ticket's record: a teammate on the same branch does not see your
+  run, and their `dfl goto` or `reset`, or a move from another step, ends it (`moved`).
+- dfl refuses `OUT_OF_SCOPE`, and a goto to `not-handled` (*Won't Do*), during a run without
+  changing the ticket.
+- On `TRACKER_TIMEOUT` or `TRACKER_UNREACHABLE` the agent reads the status again: it repeats the move
+  once when the step is still current, continues as the new status says when the move landed, and
+  otherwise stops the run.
+- Status drift and missing transitions (`task.warnings`) appear in the progress lines and the report;
+  they do not stop the run.
+- When Jira renames the key (the ticket moved to another project), results no longer show a run
+  started before the rename, but `dfl fast-forward --stop` on its branch still finds it (a stop
+  takes the key from the branch, without network). A new run gets the new key, and its calls fail
+  with `TASK_BRANCH_MISMATCH` on the old branch: rename the branch to the new key first.
+
+### Checkpoints
+
+| Command | Stops when | So that you |
+|---------|------------|-------------|
+| `/fast-forward to implement-task` | Implement is current | review the classification, requirements and tech design before any code is written |
+| `/fast-forward to verify-task` | Dev QA is current | run Dev QA yourself, in a fresh session, ideally with another agent or model |
+| `/fast-forward to ship-task` | Ship is current | check the work before anything is pushed or a pull request is opened |
+
+A run that reached its target is finished: continue with `/fast-forward` (a new run to the end) or
+`/fast-forward to <next checkpoint>`.
+
 ## How it works
 
 ```
@@ -258,7 +527,7 @@ each step's skill; [browse it on GitHub](https://github.com/vishin-pavel/dfl/tre
 2. Every step has a template, `.df/<flow>/steps/<step>/SKILL.md.hbs`. `dfl install` and
    `dfl flow-update` render the templates of the **active flow** and copy each step directory
    into the skills folder of every selected agent, plus the [built-in skills](#built-in-skills)
-   (three, plus `/init-task` in projects tracked in Jira).
+   (four, plus `/init-task` in projects tracked in Jira).
    Every installed skill folder gets a `.gitignore` file that ignores the folder itself, because
    rendered skills can contain personal values.
 3. dfl registers its MCP server in each agent's project MCP config (unless you turned that off).
@@ -293,6 +562,7 @@ template: run `dfl flow-update`.
     config.json            committed   project config: team default flow, project variables, MCP override
     local.json             ignored     personal config: your agents, personal variables, flow override, MCP preference
     state.json             ignored     current step and history of each flow
+    fast-forward.json      ignored     fast-forward runs of this checkout (see Fast-forward a task)
     installed.json         ignored     manifest of the files dfl wrote (skills, MCP entries, rendered files)
     tracker.json           committed   optional: Jira site, projects and the step → status mapping (see Tracking tasks in Jira)
     .gitignore             committed   generated by dfl, ignores the files above and rendered skills
@@ -314,6 +584,7 @@ template: run `dfl flow-update`.
 # personal config, runtime state and install manifest
 local.json
 state.json
+fast-forward.json
 installed.json
 # skills rendered from *.md.hbs templates (may contain personal values)
 */steps/**/*.md
@@ -525,11 +796,12 @@ Installed with every flow, for every agent:
 | `/add-flow-step` | Interviews you, drafts the step template and wires the step into the active flow via the MCP tools |
 | `/edit-flow-step` | Changes a step's title, description, template, transitions, id or position |
 | `/delete-flow-step` | Removes a step and reroutes the transitions that led to it |
+| `/fast-forward` | Runs the flow's steps one after another in your place until a target state is current (default: the end of the flow), deciding what the steps would ask with their recommended options and logging every decision, e.g. `/fast-forward to verify-task` (see [Fast-forward a task](#fast-forward-a-task)) |
 | `/init-task` | Only in projects with `.df/tracker.json`: starts or continues work on a Jira ticket, e.g. `/init-task ABC-123` (see [Tracking tasks in Jira](#tracking-tasks-in-jira)) |
 
 They fall back to the `dfl` CLI when the MCP server is not available. A step cannot have the
-skill name of `/add-flow-step`, `/edit-flow-step` or `/delete-flow-step` (`dfl flow validate`
-reports it); a step named `init-task` replaces the built-in `/init-task`.
+skill name of `/add-flow-step`, `/edit-flow-step`, `/delete-flow-step` or `/fast-forward`
+(`dfl flow validate` reports it); a step named `init-task` replaces the built-in `/init-task`.
 
 ## MCP server
 
@@ -539,7 +811,7 @@ hand. Files are re-read on every call, so edits and `git pull` are picked up imm
 
 | Tool | Purpose |
 |------|---------|
-| `get_status` | current step, its command, the events it can fire, the history tail and whether your installed skills are up to date (`skills`); for a flow tracked in Jira, the ticket's position plus `task` (ticket, Jira status, params, instructions) |
+| `get_status` | current step, its command, the events it can fire, the history tail and whether your installed skills are up to date (`skills`); for a flow tracked in Jira, the ticket's position plus `task` (ticket, Jira status, params, instructions); while a [fast-forward run](#fast-forward-a-task) is running, and after it stopped or ended until the flow moves on, `fastForward` (the run's status, the step to run and the run's instructions) |
 | `get_flow` | the active (or named) flow: steps in order, transitions, variables, current step; also works on a broken flow (`current: null` plus `problem` and `issues`) |
 | `list_flows` | all flows and which one is active |
 | `get_step` | one step: metadata, transitions, template and rendered skill |
@@ -549,6 +821,7 @@ hand. Files are re-read on every call, so edits and `git pull` are picked up imm
 | `complete_step` | fire an event (default `NEXT`) from a given step; fails if it is not current |
 | `goto_step` | jump to a step |
 | `start_task` | start or continue a Jira ticket: bind it to a git branch (creating the branch when needed), record the task and move the ticket to its status |
+| `fast_forward` | start, resume (`to`, or neither) or stop (`stop`, `reason`) a fast-forward run; returns the status like `get_status` plus `fastForward`, or `{flow, task?, fastForward}` for a stop (`task`: the ticket key) |
 | `add_step` | create a step (directory, template, wiring), then re-install the skills; `placement` says where it went |
 | `update_step` | change title, description, template, transitions (with descriptions), id or initial step, then re-install |
 | `delete_step` | delete a step and reroute transitions (`rewired`, `dropped`), then re-install |
@@ -559,11 +832,14 @@ hand. Files are re-read on every call, so edits and `git pull` are picked up imm
   `notifications/resources/list_changed`; changes made outside the server (CLI, editor, `git pull`)
   are not announced.
 - Every tool except `list_flows`, `sync` and `get_authoring_guide` accepts an optional `flow`
-  argument (a flow name). For flows tracked in Jira, `get_status`, `transition`, `complete_step`
-  and `goto_step` also take `task` (the ticket key), and the three moves take `params` (values later
-  steps need); for other flows they are ignored.
-- Commands in results (`command`, `targetCommand`, `next.command`) use the client's syntax:
-  `$name` when the MCP client identifies itself as Codex, `/name` otherwise.
+  argument (a flow name). For flows tracked in Jira, `get_status`, `transition`, `complete_step`,
+  `goto_step` and `fast_forward` also take `task` (the ticket key), and the three moves take `params`
+  (values later steps need); for other flows they are ignored.
+- While a fast-forward run is running, `get_status`, `transition`, `complete_step` and `goto_step`
+  end with `fastForward`; once it stopped or ended they keep returning it (`status`, `reason`,
+  `detail`) until the flow moves on. Without a run, results are unchanged.
+- Commands in results (`command`, `targetCommand`, `next.command`, `fastForward.step.command`) use
+  the client's syntax: `$name` when the MCP client identifies itself as Codex, `/name` otherwise.
 - The editing tools re-install the skills only when you ran `dfl install` in this clone, and
   otherwise say so. Mutations take a lock file, `.df/.lock`, so several agents (and the CLI) never
   overwrite each other's changes.
@@ -965,7 +1241,7 @@ field mapped later, or a write that failed, is filled on the next move.
 |-----|---------|
 | `jira.baseUrl` | your Jira Cloud site (`https://`; only the origin is used) |
 | `jira.projectKeys` | projects whose tickets this repository works on (`ABC` for `ABC-123`) |
-| `jira.defaultProjectKey` | expands bare numbers (`123`, `#123`) when starting a task or showing its status |
+| `jira.defaultProjectKey` | expands bare numbers (`123`, `#123`) when starting a task, showing its status, or starting or stopping a fast-forward run |
 | `jira.property` | the issue property that holds the record (default `dfl.run`); change it only when two repositories work on the same tickets |
 | `branch.template` | name of new task branches: `{key}` (required, with a separator such as `-` or `/` on both sides: `{key}{slug}` is refused) and `{slug}` (from the ticket summary). Default `{key}-{slug}`; a flow's `branchTemplate` wins |
 | `branch.from` | where new task branches start (default `origin/<mainBranch>`; fetched first unless `fetch` is false; a repository without a remote sets the local main branch, e.g. `"main"`). A plain ref: no `:`, `*`, `?`, `[`, `^`, `~`, `\`, `..`, `@{`, leading `+` or `-`, or spaces |
@@ -1097,7 +1373,7 @@ params. One person works on a ticket at a time; dfl does not merge concurrent mo
 | `TASK_REQUIRED` | start a ticket (`/init-task <ticket>`, `dfl task start <ticket>`) or pass `--task <key>` |
 | `TASK_BRANCH_CHOICE` | `dfl task start <ticket> --branch create`, or rename the branch to contain the key (`git branch -m`) and start again |
 | `TASK_BRANCH_INVALID` | the branch name would not lead back to the ticket, or has characters dfl does not record: put `-` or `/` around `{key}` in the branch template, pass another `--slug`, or rename the checked-out branch |
-| `TASK_REF_INVALID` | pass the full key (`ABC-123`; a bare number only works for `task start` and `status` with `jira.defaultProjectKey`). "ABC-7 is now XYZ-9": the ticket moved to a project this repository does not list; add it to `jira.projectKeys` |
+| `TASK_REF_INVALID` | pass the full key (`ABC-123`; a bare number only works for `task start`, `status` and `fast-forward` with `jira.defaultProjectKey`). "ABC-7 is now XYZ-9": the ticket moved to a project this repository does not list; add it to `jira.projectKeys` |
 | `TASK_BRANCH_MISMATCH` | the ticket you named is not the branch's: switch branches, or leave out `--task` |
 | `TASK_FLOW_NOT_ACTIVE`, `TASK_FLOW_MISMATCH` | `dfl flow use <flow>` (the message names it) |
 | `TASK_STEP_UNKNOWN`, `TASK_RECORD_INVALID` | the flow lost the task's step, or the record is damaged or was edited outside dfl (the message names the fields): `dfl goto <step> --task <key>` repairs it |
@@ -1149,12 +1425,13 @@ Warnings go to stderr, so `--json` output can be piped. Tables fit the terminal 
 | Command | Description |
 |---------|-------------|
 | `dfl install [-a, --agents <list>] [-f, --flow <name>] [-y, --yes] [--mcp \| --no-mcp] [--project-agents]` | set up dfl: create/activate a flow, install skills and the MCP server (outside a dfl project it installs at the git root); `--mcp`/`--no-mcp` is remembered |
-| `dfl uninstall [--purge] [-y]` | remove the installed skills and the `dfl` MCP entries; `--purge` also deletes `local.json`, `state.json` and rendered files (flows are kept) |
+| `dfl uninstall [--purge] [-y]` | remove the installed skills and the `dfl` MCP entries; `--purge` also deletes `local.json`, `state.json`, `fast-forward.json` and rendered files (flows are kept) |
 | `dfl flow-update` (alias `dfl update`) `[--dry-run] [--mcp \| --no-mcp] [-y]` | re-render and re-install the active flow (always, also before `dfl install`); `--mcp`/`--no-mcp` for this run only; never changes a flow, but says when a template has an update |
 | `dfl status [--flow <f>] [--task <key>] [--json]` | active flow, current step, available events, stale-skill warning (`--json`: `skills: { installed, upToDate, reason?, hint? }`); for a flow tracked in Jira, the ticket of the branch (or `--task`) with its Jira status and params (`--json`: `task`) |
 | `dfl next [event] [--from <step>] [--flow <f>] [--task <key>] [--set <name=value>]... [--json]` | fire an event (default `NEXT`); tracked flows: also moves the ticket, `--set` records task params (`name=` deletes) |
 | `dfl goto <step> [--flow <f>] [--task <key>] [--set <name=value>]... [--json]` | jump to a step |
 | `dfl reset [--flow <f>] [--task <key>] [-y] [--json]` | back to the initial step (tracked flows: asks before moving the ticket) |
+| `dfl fast-forward [state] [--stop] [--reason <text>] [--flow <f>] [--task <key>] [--json]` | start or resume a fast-forward run to a state (default: resume a stopped run, else the end of the flow), or stop it; an agent drives it with `/fast-forward` |
 | `dfl task start <ticket> [--flow <f>] [--step <s>] [--branch auto\|create\|current] [--slug <s>] [--json]` | start or continue a Jira ticket (`ABC-123`, `123`, `"#123"` or its URL): bind it to a branch (created when needed), record the task, move the ticket to its status |
 | `dfl tracker init [--url <u>] [--project <keys>] [--default-project <key>] [--branch-template <t>] [--from <ref>] [--property <p>] [--flow <names...>] [--force] [--no-sync] [-y]` | create `.df/tracker.json` (asks for the site and projects in a terminal) and track the active flow (or `--flow`) |
 | `dfl tracker login [--email <e>] [--token-stdin]` / `logout` | save (after checking it) or remove your Jira API token for the project's site; the token is never an argument |
