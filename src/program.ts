@@ -1,5 +1,5 @@
 /**
- * Commander program (OWNER: cli agent). `buildProgram()` is imported by tests; cli.ts runs it via runCli.
+ * Commander program. `buildProgram()` is imported by tests; cli.ts runs it via runCli.
  * Every command lives in src/commands/*; this file only wires the tree and the global options.
  */
 import { Command } from '@commander-js/extra-typings';

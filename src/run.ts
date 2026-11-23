@@ -1,5 +1,5 @@
 /**
- * CLI runner (OWNER: cli agent): parses argv with buildProgram(), prints DflError messages
+ * CLI runner: parses argv with buildProgram(), prints DflError messages
  * (+ hint) to stderr without stack traces, returns the exit code.
  */
 import { CommanderError } from '@commander-js/extra-typings';

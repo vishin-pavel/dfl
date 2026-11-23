@@ -10,7 +10,8 @@
     "dist/**/*.mjs",
     "templates",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "engines": {
     "node": ">=22.12"
@@ -23,7 +24,7 @@
     }
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   },
   "repository": {
     "type": "git",
@@ -42,9 +43,19 @@
     "claude-code",
     "cursor",
     "codex",
+    "gemini-cli",
+    "copilot",
+    "windsurf",
+    "opencode",
+    "kiro",
+    "antigravity",
+    "jira",
     "cli"
   ],
-  "author": "Pavel Vishin",
+  "author": {
+    "name": "Pavel Vishin",
+    "url": "https://github.com/vishin-pavel"
+  },
   "license": "MIT",
   "scripts": {
     "build": "tsdown",

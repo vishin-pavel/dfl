@@ -1,0 +1,49 @@
+name: Coding Agent Support
+description: Request support for a new coding agent adapter in dfl
+title: "[Agent]: "
+labels: ["enhancement", "agents"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to request a new coding-agent adapter. See [docs/AGENTS.md](https://github.com/vishin-pavel/dfl/blob/main/docs/AGENTS.md) for how existing agents are integrated.
+
+  - type: input
+    id: agent_name
+    attributes:
+      label: Coding agent name
+      placeholder: "e.g., Cline, Roo Code, Amp"
+    validations:
+      required: true
+
+  - type: input
+    id: docs_url
+    attributes:
+      label: Official documentation URL
+      description: Link to the agent's Agent Skills and/or MCP configuration documentation.
+      placeholder: "https://..."
+    validations:
+      required: true
+
+  - type: input
+    id: skills_path
+    attributes:
+      label: Project-level Agent Skills path
+      description: Where does the agent discover project-level `SKILL.md` files?
+      placeholder: "e.g., .myagent/skills/<name>/SKILL.md"
+    validations:
+      required: true
+
+  - type: textarea
+    id: mcp_config
+    attributes:
+      label: Project-level MCP configuration path and format
+      description: File path (e.g., `.myagent/mcp.json`), format (JSON, JSONC, or TOML), and example stdio server entry.
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional details
+      description: Slash-command prefix (e.g., `/name` vs `$name`), sub-agent support, detection signals, or known quirks.

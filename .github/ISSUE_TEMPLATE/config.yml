@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability (Private)
+    url: https://github.com/vishin-pavel/dfl/security/advisories/new
+    about: Report a security vulnerability privately via GitHub Security Advisories.
+  - name: Documentation & Troubleshooting
+    url: https://github.com/vishin-pavel/dfl#readme
+    about: Check the README, environment variables, troubleshooting guide, and docs/ before opening an issue.
+  - name: Questions & Discussions
+    url: https://github.com/vishin-pavel/dfl/discussions
+    about: Ask usage questions or discuss ideas with the community.

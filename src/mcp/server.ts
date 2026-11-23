@@ -1,5 +1,5 @@
 /**
- * dfl MCP server (OWNER: mcp agent). See docs/ARCHITECTURE.md §7.
+ * dfl MCP server. See docs/ARCHITECTURE.md §7.
  * Uses `@modelcontextprotocol/server` v2. Never writes to stdout except via the transport.
  *
  * Every tool call re-resolves the project root and re-reads the files it needs, so edits and

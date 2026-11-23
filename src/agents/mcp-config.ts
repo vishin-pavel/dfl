@@ -1,5 +1,5 @@
 /**
- * Comment-preserving MCP config editors (OWNER: agents agent).
+ * Comment-preserving MCP config editors.
  * JSON/JSONC via `jsonc-parser` modify/applyEdits; TOML via a text-level managed table
  * (`[mcp_servers.<name>]` with a `# managed by dfl` comment line) so user content is untouched.
  */

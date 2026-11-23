@@ -1,5 +1,11 @@
 # dfl – development flow manager for coding agents
 
+[![CI](https://github.com/vishin-pavel/dfl/actions/workflows/ci.yml/badge.svg)](https://github.com/vishin-pavel/dfl/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/%40vishin-pavel%2Fdfl)](https://www.npmjs.com/package/@vishin-pavel/dfl)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node.js >=22.12](https://img.shields.io/badge/node-%3E%3D22.12-brightgreen.svg)](https://nodejs.org/)
+[![Release](https://img.shields.io/github/v/release/vishin-pavel/dfl)](https://github.com/vishin-pavel/dfl/releases)
+
 `dfl` turns your team's development process into a **flow**: an ordered state machine of
 steps (classify → requirements → tech design → implement → verify → ship, or whatever your team
 does). Each step is an [Agent Skill](https://agentskills.io/specification) rendered from a
@@ -43,30 +49,21 @@ Linux machine.
 - [Tracking tasks in Jira](#tracking-tasks-in-jira)
 - [Windows](#windows)
 - [Command reference](#command-reference)
+- [Usage recipes](#usage-recipes)
+- [Environment variables](#environment-variables)
+- [Troubleshooting and FAQ](#troubleshooting-and-faq)
 - [Development](#development)
+- [Contributing and community](#contributing-and-community)
+- [License](#license)
 
 ## Install
 
 Requires **Node.js 22.12 or newer** (older versions stop with a clear error). `dfl` is published
-to GitHub Packages as `@vishin-pavel/dfl`. GitHub Packages needs a token even for reading, so set
-up npm once:
+publicly to [npm](https://www.npmjs.com/package/@vishin-pavel/dfl) as `@vishin-pavel/dfl`:
 
-1. Create a token with the `read:packages` scope, either a
-   [classic personal access token](https://github.com/settings/tokens) or through the GitHub CLI.
-2. Add the registry and the token to `~/.npmrc` (your user config, never commit the token):
-
-   ```ini
-   @vishin-pavel:registry=https://npm.pkg.github.com
-   //npm.pkg.github.com/:_authToken=<token with read:packages>
-   ```
-
-   With the GitHub CLI:
-
-   ```sh
-   gh auth refresh -s read:packages
-   npm config set @vishin-pavel:registry https://npm.pkg.github.com
-   npm config set //npm.pkg.github.com/:_authToken "$(gh auth token)"
-   ```
+```sh
+npm install -g @vishin-pavel/dfl
+```
 
 Release candidates are published under the `next` dist-tag (`npm install -g @vishin-pavel/dfl@next`);
 a plain install always gets the latest stable release.
@@ -86,9 +83,7 @@ The form depends only on the project, never on which `dfl` binary runs: when the
 writes the same committed MCP entry, whether they run a global or a local dfl. `--no-install`
 keeps npx from downloading an unrelated public package called `dfl`.
 
-For a per-project install, commit a project `.npmrc` with only the registry line
-(`@vishin-pavel:registry=https://npm.pkg.github.com`); every developer keeps the token in
-`~/.npmrc`. You can override the MCP command in `.df/config.json`:
+You can override the MCP command in `.df/config.json`:
 
 ```json
 { "version": 1, "vars": {}, "mcp": { "command": "pnpm", "args": ["exec", "dfl", "mcp"] } }
@@ -1462,6 +1457,76 @@ Warnings go to stderr, so `--json` output can be piped. Tables fit the terminal 
 Step and vars commands take `--no-sync`; step commands take `--flow <name>` (default: the active
 flow).
 
+## Usage recipes
+
+### Create a custom flow from scratch
+
+```sh
+# 1. Create a linear flow with initial steps and switch to it
+dfl flow create release --title "Release checklist" --steps prepare,verify,publish --use
+
+# 2. Add a rollback transition (insert more steps anytime with `dfl step add <id> --after <step>`)
+dfl step transition verify FAILED prepare --description "Verification failed"
+
+# 3. Validate, inspect the graph, and render skills into your coding agents
+dfl flow validate
+dfl flow view --print
+dfl flow-update
+```
+
+Edit the generated Handlebars templates under `.df/release/steps/<id>/SKILL.md.hbs`, run
+`dfl flow-update` to re-render skills, and commit `.df/release/` so your team shares the flow.
+
+### Headless and CI usage
+
+`dfl` detects non-TTY environments (`CI=true` or piped stdin/stdout) and skips interactive prompts
+when `--yes` is passed. Combine `--json` and `DFL_*` environment variables for scripts and CI jobs:
+
+```sh
+# Non-interactive install / sync in CI
+dfl install --yes --agents claude,cursor
+
+# Override template variables without editing .df/local.json
+DFL_VAR_MAIN_BRANCH=release dfl flow-update
+
+# Inspect state or advance a Jira-tracked task in CI without interactive login
+DFL_JIRA_URL=https://acme.atlassian.net \
+DFL_JIRA_EMAIL=bot@acme.com \
+DFL_JIRA_TOKEN="$JIRA_TOKEN" \
+  dfl status --task ABC-123 --json
+```
+
+## Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `DFL_ROOT` | Override project root discovery (same as `--root <dir>`); also respected by `dfl mcp` |
+| `DFL_CONFIG_DIR` | Override the user config directory for `credentials.json` (default: `~/.config/dfl` or `%APPDATA%\dfl`) |
+| `DFL_JIRA_URL` | Jira Cloud site origin for non-interactive/CI auth (used only when it matches `jira.baseUrl` in `.df/tracker.json`) |
+| `DFL_JIRA_EMAIL` | Atlassian account email for non-interactive/CI Jira auth |
+| `DFL_JIRA_TOKEN` | Atlassian API token for non-interactive/CI Jira auth (never logged or written to disk) |
+| `DFL_TRACKER_TIMEOUT_MS` | Per-operation Jira HTTP timeout in milliseconds (default `10000`; keep below `15000` to avoid lock timeouts) |
+| `DFL_DEBUG` | Set `DFL_DEBUG=1` to print error stack traces, Jira request diagnostics (method, path, status, duration), and MCP server debug errors to stderr |
+| `DFL_VAR_<UPPER_SNAKE_NAME>` | Override a flow template variable (highest precedence over `local.json`, `config.json`, and defaults) |
+| `DFL_ENV_<NAME>` | Allow-listed environment variable exposed inside Handlebars templates as `{{env.<NAME>}}` |
+| `CI` | Disables interactive prompts (same as non-TTY) |
+| `NO_COLOR` / `FORCE_COLOR` | Disable or force ANSI color output in the CLI |
+| `COLUMNS` | Override terminal width for formatted CLI tables and wrapped output |
+
+## Troubleshooting and FAQ
+
+For Jira-specific error codes, see [Jira troubleshooting](#troubleshooting).
+
+| Symptom or error code | Cause and fix |
+|---|---|
+| `dfl needs Node.js 22.12 or newer` | Upgrade your runtime Node.js to `22.12+` (building from source requires `22.18+` or `24.11+`). |
+| `NO_PROJECT` | No `.df/` directory was found in the current directory or its parents. Run `dfl install` from your project root, or pass `--root <dir>` / `DFL_ROOT`. |
+| `LOCKED` | Another `dfl` CLI or MCP server operation holds `.df/.lock` (commands wait up to 15 seconds). Wait for the other operation to finish; if a previous process was killed abnormally, check whether the PID in `.df/.lock` is still running before removing it. |
+| `INVALID_MANIFEST` | `.df/installed.json` is unreadable or malformed. Repair the JSON syntax, or delete `.df/installed.json` and run `dfl install` again (note that `dfl` then forgets which skill directories it previously installed). |
+| Agent does not see the `dfl` MCP server | Check `dfl agents` to confirm the agent's MCP config file was written, verify `dfl` (or `npx`) is on the `PATH` seen by your editor/agent, and restart/reload the agent window. On native Windows, see [Windows](#windows). |
+| Duplicate skills appear in an agent | Some agents read shared folders (for example `.agents/skills/` or `.claude/skills/`). `dfl` deduplicates shared directories automatically during sync; if stale manual copies remain, remove the unmanaged directory and run `dfl flow-update`. |
+| Need stack traces or diagnostic logs | Re-run the command with `DFL_DEBUG=1` (stack traces and Jira HTTP diagnostics print to stderr without exposing credentials). |
+
 ## Development
 
 Building, packing and publishing need **Node.js 22.18+ or 24.11+** (tsdown 0.23 cannot load its
@@ -1489,7 +1554,7 @@ npm run check          # all of the above
 - CI runs typecheck, tests and build on Ubuntu and macOS with Node 22 and 24 (and 22.18.0, the
   oldest Node that builds dfl), and runs the built CLI on Node 22.12 (and checks that Node 20 gets
   a clear error).
-- Publishing to GitHub Packages runs on a GitHub release or a pushed `v*` tag whose version matches
+- Publishing to npm (`https://registry.npmjs.org`, with `--provenance`) runs on a GitHub release or a pushed `v*` tag whose version matches
   `package.json`:
   - release: `npm version patch && git push --follow-tags` (published under `latest`);
   - prerelease: `npm version prerelease --preid rc && git push --follow-tags` (for example
@@ -1497,6 +1562,14 @@ npm run check          # all of the above
     with `npm install -g @vishin-pavel/dfl@next`, then promote the final version with a normal
     release.
 
+## Contributing and community
+
+- **Contributing**: See [CONTRIBUTING.md](https://github.com/vishin-pavel/dfl/blob/main/CONTRIBUTING.md) for local setup, coding conventions, testing guides, extension points, and release workflows.
+- **Code of Conduct**: Participation is governed by our [Code of Conduct](https://github.com/vishin-pavel/dfl/blob/main/CODE_OF_CONDUCT.md).
+- **Security**: Report vulnerabilities privately via [GitHub Security Advisories](https://github.com/vishin-pavel/dfl/security/advisories/new) — see [SECURITY.md](https://github.com/vishin-pavel/dfl/blob/main/SECURITY.md).
+- **Changelog**: See [CHANGELOG.md](https://github.com/vishin-pavel/dfl/blob/main/CHANGELOG.md) for release history.
+- **Support**: See [SUPPORT.md](https://github.com/vishin-pavel/dfl/blob/main/.github/SUPPORT.md) for help channels and issue templates.
+
 ## License
 
-MIT
+[MIT](LICENSE) — see [NOTICE](NOTICE) for third-party runtime dependency attributions (including `elkjs`).

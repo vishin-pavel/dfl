@@ -6,7 +6,7 @@ Skill rendered from a Handlebars template and installed into the project-level
 skill directories of agentic coding tools. A built-in stdio MCP server exposes
 the flow to the LLM.
 
-- npm package: `@vishin-pavel/dfl` (GitHub Packages, private), bin: `dfl`
+- npm package: `@vishin-pavel/dfl` (npmjs.org), bin: `dfl`
 - Runtime: Node >= 22.12 (`src/cli.ts` checks the version before importing anything else and exits
   with a clear message on older Node). Building needs Node >= 22.18 (or >= 24.11): tsdown 0.23
   cannot load `tsdown.config.ts` on older versions.

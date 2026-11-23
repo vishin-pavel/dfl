@@ -1,5 +1,5 @@
 /**
- * Flow validation (OWNER: flow-engine agent). See docs/ARCHITECTURE.md §2.1.
+ * Flow validation. See docs/ARCHITECTURE.md §2.1.
  */
 import path from 'node:path';
 import { DflError, errorMessage } from './errors.js';

@@ -1,5 +1,5 @@
 /**
- * Handlebars rendering of step and built-in skills (OWNER: render agent). See docs/ARCHITECTURE.md §3.
+ * Handlebars rendering of step and built-in skills. See docs/ARCHITECTURE.md §3.
  */
 import fs from 'node:fs';
 import path from 'node:path';

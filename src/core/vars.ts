@@ -1,5 +1,5 @@
 /**
- * Template variables (OWNER: render agent).
+ * Template variables.
  * Precedence (low → high): def.default < config.json vars < local.json vars < env `DFL_VAR_<UPPER_SNAKE_NAME>`.
  * Templates see only allow-listed environment variables: `DFL_ENV_<NAME>` as `env.<NAME>`.
  */

@@ -1,5 +1,5 @@
 /**
- * xstate runtime for flows (OWNER: flow-engine agent).
+ * xstate runtime for flows.
  *
  * Uses xstate v5 pure functions (`initialTransition`, `transition`, `machine.resolveState`)
  * – never long-running actors. Only `{ current, history, updatedAt }` is persisted per flow in

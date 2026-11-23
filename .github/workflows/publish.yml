@@ -1,6 +1,6 @@
 name: Publish
 
-# Publishes @vishin-pavel/dfl to GitHub Packages for a published release or a pushed v* tag.
+# Publishes @vishin-pavel/dfl to npmjs.org for a published release or a pushed v* tag.
 # Both usually fire for one release; the second run sees the version already published and skips.
 # Prereleases (v1.2.0-rc.1, or a GitHub release marked as prerelease) go to the `next` dist-tag,
 # everything else to `latest` (see scripts/publish-tag.mjs).
@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: read
-  packages: write
+  id-token: write
 
 concurrency:
   group: publish-${{ github.event.release.tag_name || github.ref_name }}
@@ -24,16 +24,15 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || github.ref_name }}
       # The .npmrc written by setup-node reads the token from NODE_AUTH_TOKEN. setup-node v7 no longer
-      # exports a placeholder value, so it is set for the whole job (npm ci needs it too).
-      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # exports a placeholder value, so it is set for the whole job (empty when using npm Trusted Publishing / OIDC).
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
           node-version: 22.x
-          registry-url: https://npm.pkg.github.com
-          scope: '@vishin-pavel'
+          registry-url: https://registry.npmjs.org
 
       - name: Check that the tag matches package.json
         id: version
@@ -78,4 +77,4 @@ jobs:
         if: steps.published.outputs.exists != 'true'
         env:
           DIST_TAG: ${{ steps.dist.outputs.tag }}
-        run: npm publish --tag "${DIST_TAG}"
+        run: npm publish --provenance --tag "${DIST_TAG}"
