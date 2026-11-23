@@ -1,5 +1,5 @@
 /**
- * Implementations of the dfl MCP tools as plain functions over a project (OWNER: mcp agent).
+ * Implementations of the dfl MCP tools as plain functions over a project.
  * server.ts resolves the project and wraps these into MCP results. Every function re-reads the
  * files it needs; nothing is cached between calls. See docs/ARCHITECTURE.md §7.
  */

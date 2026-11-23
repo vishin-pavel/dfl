@@ -10,15 +10,18 @@ const read = (rel: string): string => fs.readFileSync(path.join(ROOT, rel), 'utf
 
 let packed: Set<string> | undefined;
 
+type PackEntry = { files: Array<{ path: string }> };
+
 /** The paths `npm pack` would publish (computed once). */
 function packedFiles(): Set<string> {
-  packed ??= new Set(
-    (
-      JSON.parse(
-        execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
-      ) as Array<{ files: Array<{ path: string }> }>
-    )[0]!.files.map((file) => file.path),
-  );
+  if (!packed) {
+    const raw = JSON.parse(
+      execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+    ) as PackEntry[] | Record<string, PackEntry>;
+    // npm <=11 returns an array of pack entries; npm 12+ returns an object keyed by package name.
+    const entry = Array.isArray(raw) ? raw[0] : Object.values(raw)[0];
+    packed = new Set(entry!.files.map((file) => file.path));
+  }
   return packed;
 }
 
@@ -49,17 +52,26 @@ describe('publish dist-tag (F82)', () => {
 
   it('the publish workflow passes the chosen dist-tag to npm publish', () => {
     const workflow = parseYaml(read('.github/workflows/publish.yml')) as {
-      jobs: { publish: { env: Record<string, string>; steps: Array<{ name?: string; uses?: string; run?: string; env?: Record<string, string> }> } };
+      permissions: Record<string, string>;
+      jobs: {
+        publish: {
+          env: Record<string, string>;
+          steps: Array<{ name?: string; uses?: string; with?: Record<string, string>; run?: string; env?: Record<string, string> }>;
+        };
+      };
     };
+    expect(workflow.permissions['id-token']).toBe('write');
     const job = workflow.jobs.publish;
     // setup-node v7 no longer exports a placeholder token: npm ci and npm publish need it from the job.
-    expect(job.env['NODE_AUTH_TOKEN']).toBe('${{ secrets.GITHUB_TOKEN }}');
+    expect(job.env['NODE_AUTH_TOKEN']).toBe('${{ secrets.NPM_TOKEN }}');
     const uses = job.steps.map((step) => step.uses).filter(Boolean);
     expect(uses).toEqual(['actions/checkout@v7', 'actions/setup-node@v7']);
+    const setupNode = job.steps.find((step) => step.uses === 'actions/setup-node@v7');
+    expect(setupNode?.with?.['registry-url']).toBe('https://registry.npmjs.org');
     const choose = job.steps.find((step) => step.name === 'Choose the dist-tag');
     expect(choose?.run).toContain('node scripts/publish-tag.mjs');
     const publish = job.steps.find((step) => step.name === 'Publish');
-    expect(publish?.run).toBe('npm publish --tag "${DIST_TAG}"');
+    expect(publish?.run).toBe('npm publish --provenance --tag "${DIST_TAG}"');
     expect(publish?.env?.['DIST_TAG']).toBe('${{ steps.dist.outputs.tag }}');
     // The script runs before npm ci, so it must not need dependencies.
     const order = job.steps.map((step) => step.name ?? step.run ?? step.uses);

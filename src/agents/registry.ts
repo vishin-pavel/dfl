@@ -1,5 +1,5 @@
 /**
- * Supported agents (OWNER: agents agent). Paths come from docs/AGENTS.md (researched 2026-09-30).
+ * Supported agents. Paths come from docs/AGENTS.md (researched 2026-09-30).
  */
 import path from 'node:path';
 import { DflError } from '../core/errors.js';

@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in dfl
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please search existing issues first.
+        **Do not report security vulnerabilities here** — use [GitHub Security Advisories](https://github.com/vishin-pavel/dfl/security/advisories/new) instead.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug and what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands or workflow steps that reproduce the issue.
+      placeholder: |
+        1. Run `dfl install --yes --agents claude`
+        2. Run `dfl status`
+        3. Observe error...
+    validations:
+      required: true
+
+  - type: input
+    id: dfl_version
+    attributes:
+      label: dfl version
+      description: Output of `dfl --version`
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`
+      placeholder: "v22.18.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Linux
+        - Windows (WSL)
+        - Windows (native)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: agents
+    attributes:
+      label: Coding agent(s) involved
+      options:
+        - label: Claude Code
+        - label: Cursor
+        - label: Antigravity
+        - label: Codex
+        - label: Gemini CLI
+        - label: GitHub Copilot
+        - label: Windsurf
+        - label: OpenCode
+        - label: Kiro
+        - label: None / CLI only
+
+  - type: dropdown
+    id: jira
+    attributes:
+      label: Are you using Jira task tracking (`.df/tracker.json`)?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / CLI output
+      description: Paste relevant output (run with `DFL_DEBUG=1` if helpful). Never include API tokens or credentials.
+      render: shell

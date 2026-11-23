@@ -1,5 +1,5 @@
 /**
- * Import flows distributed over git (OWNER: sync agent).
+ * Import flows distributed over git.
  * Sources: `https://…`/`git@…`/`ssh://…` URLs (optionally `#ref`), `github:owner/repo[/sub/path][#ref]`,
  * a local directory path, or a file written by `dfl flow export`. Git sources are shallow-cloned
  * (`git clone --depth 1 [--branch ref]`, or a fetch of the commit for `#<sha>`) into a temp dir; the

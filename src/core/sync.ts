@@ -1,5 +1,5 @@
 /**
- * Install/sync orchestrator – the only code path that writes outside `.df/` (OWNER: sync agent).
+ * Install/sync orchestrator – the only code path that writes outside `.df/`.
  * See docs/ARCHITECTURE.md §5.
  *
  * Safety rules:

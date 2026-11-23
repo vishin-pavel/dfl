@@ -1,5 +1,5 @@
 /**
- * Step CRUD: edits flow.json and step directories (OWNER: flow-engine agent), and keeps the Jira
+ * Step CRUD: edits flow.json and step directories, and keeps the Jira
  * status mapping of a renamed or removed step in `.df/tracker.json` (best effort).
  *
  * Every mutation validates the edited definition before writing anything. It is refused (DflError

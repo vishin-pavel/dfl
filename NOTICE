@@ -1,0 +1,33 @@
+@vishin-pavel/dfl
+Copyright (c) 2026 Pavel Vishin
+Licensed under the MIT License (see LICENSE).
+
+================================================================================
+Third-Party Runtime Dependencies
+================================================================================
+
+This package depends on third-party open-source packages installed as external
+runtime dependencies via npm (not bundled into dist/cli.mjs). Each dependency
+remains under its own license:
+
+1. elkjs (https://github.com/kieler/elkjs)
+   License: EPL-2.0 OR GPL-3.0-or-later
+   Usage: Imported dynamically and unmodified at runtime (`elkjs/lib/elk.bundled.js`)
+   for graph layout in the terminal flow viewer (`dfl flow view`). Kept external
+   from the `dist/cli.mjs` bundle.
+   Eclipse Public License 2.0: https://www.eclipse.org/legal/epl-2.0/
+
+2. Other Direct Runtime Dependencies:
+   - @clack/prompts (MIT)
+   - @commander-js/extra-typings (MIT)
+   - @modelcontextprotocol/server (MIT)
+   - commander (MIT)
+   - handlebars (MIT)
+   - ink (MIT)
+   - jsonc-parser (MIT)
+   - picocolors (ISC)
+   - react (MIT)
+   - string-width (MIT)
+   - xstate (MIT)
+   - yaml (ISC)
+   - zod (MIT)
