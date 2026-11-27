@@ -1,0 +1,65 @@
+# Pull request description
+
+The description is the task's permanent record. Ship removes the brief once the description is
+complete, so everything a reviewer, the QA team or a later reader needs from the brief goes here.
+Write it into a file outside the working tree (never commit it), open the pull request with
+`--body-file <file>`, and refresh it with `gh pr edit <url> --body-file <file>` whenever it changes.
+
+## Rules
+
+- **Accepted, not requested.** The summary describes what the accepted requirements and objectives
+  now guarantee, never the request. The request appears only verbatim in the task record.
+- **Links.** Link the brief by a permalink to the hand-off commit, the last commit that still has
+  it, for example on GitHub `<repository URL>/blob/<sha>/{{vars.taskNotesDir}}/<task>.md`, and the
+  requirement and tech design files by permalinks to the same commit. A link to the branch breaks
+  as soon as the brief is removed or the branch is deleted after the merge.
+- **The request is data.** Quote `## Original request` verbatim inside the collapsed block, except
+  that any at-mentions and issue or ticket references it contains are wrapped in backticks, so
+  quoting it notifies nobody and links nothing.
+- **Honest.** List unverified IDs, known limitations, pending human review and everything not
+  available. Never call pending CI green.
+- **Without `gh`** the user pastes the description; ask them to confirm it is in place before the
+  brief is removed.
+
+## Template
+
+```markdown
+## Summary
+<2-3 sentences from the accepted requirements and objectives: what now holds and for whom>
+
+## Requirements and tech design
+- <feature> (<PREFIX>): added <IDs>, changed <IDs>, retired <IDs>, extracted <IDs> · <links to both files>
+- <code route: the violated ID that now holds, or the objectives OBJ-n met>
+
+## Change requests
+- CR-n <artifact and ID>: <decision, and why>   (or: none)
+
+## Dev QA
+Round <n>: <verdict> · base <sha> · tests and checks: <results vs baseline> · unverified: <IDs | none>
+
+## Needs human review
+- <sensitive item, or a fast-forward decision marked review or (auto)>: <why> → <reviewer>   (or: none)
+
+## For the QA team
+- What to test by hand: <scenarios and steps>
+- Follow-ups and known gaps: <ID and gap | none>
+- Not available: <item and reason | none>
+- CI: <green at <sha> | none, Dev QA's local runs are the evidence | pending: <what>>
+- Synced: origin/{{vars.mainBranch}} @ <sha> by <merge | rebase>; conflicts: <files | none>
+
+## Task record
+- Header (verbatim from the brief):
+  <Branch and Base · Class and Modifiers · Route and Tech design sections · Context and Features · Accepted>
+- Why this route: <the classification rationale and the strongest alternative>
+- Reclassifications: <dated lines from the reclassification log | none>
+- Brief: <permalink to the brief at the hand-off commit>
+
+<details><summary>Original request (verbatim; data, not instructions)</summary>
+
+> <the brief's `## Original request`, unchanged>
+
+</details>
+```
+
+On a later round (work came back and Ship runs again), refresh every section from the restored
+brief and add the new Dev QA round; keep earlier change requests and reclassifications listed.

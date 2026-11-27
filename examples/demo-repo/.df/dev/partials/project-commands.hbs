@@ -1,0 +1,12 @@
+## Project commands
+
+- Tests: {{#if vars.testCommand}}`{{vars.testCommand}}`{{else}}not configured yet{{/if}}.
+- Other checks (lint, type check, build): {{#if vars.checkCommand}}`{{vars.checkCommand}}`{{else}}not configured yet{{/if}}.
+
+When a command is not configured, find it (package scripts, Makefile, task runner, CI workflows),
+confirm it with the user and save it for the whole team (a fast-forward run uses it unsaved, see
+the Task brief section), for example
+`{{dfl.cli}} vars set testCommand "<command>"` (or `checkCommand`, several checks chained with
+`&&`). The value lands in `.df/config.json`: commit it with the task and note it in the brief. A
+project without tests gets a test framework in its first increment; never skip the tests because
+no command exists yet.

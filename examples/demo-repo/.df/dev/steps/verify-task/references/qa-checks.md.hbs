@@ -1,0 +1,146 @@
+# Dev QA checks
+
+The four quality-control boxes, each with its pass rule, then the screening re-check. Every round
+runs all of them again, including those that passed before. Record the outcome of each box in the
+report.
+
+## Box 1: Artifacts to requirement mapping
+
+Passes when every item holds:
+
+- [ ] Every in-scope scenario ID is implemented by code at HEAD. Read that code; it may be changed
+  or existing (clarified tasks and extracted IDs usually change no code).
+- [ ] Every in-scope TD ID has a status, chosen by its `Verify by` column: **verified** (test, bench
+  or static check, named in the evidence), **inspected** (with the reason a test is impossible), or
+  **deferred** to operations or the QA team (with an owner; for `ops`, check that the alert or SLO
+  exists). "Unknown" fails.
+- [ ] Every `OBJ-n` is met, with evidence (a test, a measurement, a removed dependency, a log).
+- [ ] Every hunk maps to an in-bounds category of the Scope rules, including `OBJ-n` and
+  `.df/config.json` edits recorded in the brief. A hunk in bounds but missing from the declared
+  change map is a nit; a hunk out of bounds is a blocker.
+- [ ] The requirement and tech design diff matches the class (table below) and the brief's
+  `Tech design sections`.
+- [ ] Change requests match git: `git log --format='%h %s' <base>.. -- {{vars.requirementsDir}}`
+  lists only acceptance commits (`docs(req): <PREFIX> requirements for …`, `docs(td): accept …`),
+  change request commits (`docs(req): CR-n …`, `docs(td): CR-n …`) and, under `revert`, the
+  revert commits. Every CR commit has an accepted CR in `## Change requests`, every accepted CR has
+  its commit, and no CR is still pending. A code commit that also edits these files is a blocker.
+- [ ] `revert` modifier: the requirement and tech design edits of the reverted change are reverted
+  too.
+
+| Class / outcome | Requirement files may show |
+|---|---|
+| New feature / new requirements | a new feature folder (rules, scenarios, glossary), its index row, shared glossary terms |
+| Feature update / requirements changed | new IDs, reworded IDs (kept), retired IDs, glossary |
+| Feature update / requirements clarified | wording, glossary, and added scenarios for a silent case (next numbers) that pin existing behavior; existing IDs and scenario outcomes kept |
+| Bug fix / requirements not satisfied | nothing |
+| Bug fix / requirements improved | the failing case's rule or scenario, and its glossary terms |
+| Technical change (either outcome) | nothing |
+| `Context: adoption`, or coverage partial or none (in addition to the class's row) | the baseline of the touched behavior and the rules it depends on: the `{{vars.requirementsDir}}/` folder, `README.md` and `GLOSSARY.md` when missing, a feature folder and its index row, glossary terms, and the rules and scenarios `Accepted:` lists as `extracted:` |
+
+Tech design files change only when the route includes Tech design, and only in the brief's
+`Tech design sections` as the design step last recorded them (a new feature: its new file; the
+baseline when the design step changed it). Edits made by accepted change requests are allowed in
+every case.
+
+Otherwise: `FAILED` for code findings; `REQUIREMENTS_GAP` for requirement edits beyond the class
+and the baseline (define-behavior owns those files), `DESIGN_GAP` for tech design edits outside the
+recorded sections; either GAP event for the route check.
+
+## Box 2: Automated code review
+
+Passes when the test and check commands show no failure that is new compared with the base (every
+failure counts without a baseline), and the review finds no blocker and no should-fix item the
+developer keeps in this task.
+
+Read the whole diff file by file, tests and configuration included, and ask for each file:
+
+- **Correctness:** logic and boundary errors, empty or missing values, error paths, resource
+  cleanup, time zones, units and encodings, concurrency and ordering. Probe where cheap: empty,
+  very large and invalid input, missing permissions, a failing external service, repeated or
+  concurrent calls.
+- **Spec fit:** does exactly what the in-scope scenarios and TD IDs say; respects the decisions
+  (`DEC`) and constraints (`CON`); nothing the Scope rules exclude.
+- **Tests:** assert the scenario's observable outcome, not implementation details; cover failure
+  paths; would fail if the behavior broke; no sleeps or timing assumptions; names carry the
+  scenario IDs, production code does not.
+- **Security:** input validation, injection (SQL, shell, HTML), server-side authorization, secrets
+  in code or logs, unsafe deserialization, new dependencies and their licences.
+- **Performance:** unbounded loops or memory, repeated queries, blocking work on hot paths, the
+  PERF targets of the tech design.
+- **Maintainability:** naming, duplicated helpers, dead or commented-out code, comments that say
+  why, consistency with the surrounding code, MAINT requirements such as module boundaries.
+- **Compatibility:** public API, CLI, configuration and data format changes, migrations, docs,
+  changelog and configuration examples.
+
+| Severity | Meaning | Effect |
+|---|---|---|
+| blocker | bug, requirement violation, security problem, new failure, unmapped hunk, leakage | `FAILED` |
+| should-fix | real problem, cheap to fix now | `FAILED`, unless the developer moves it to follow-ups |
+| nit | optional polish | never blocks; listed for the pull request |
+
+Do not block on personal style. No CI in the project: this box rests on your own runs and the
+report says "CI: none"; a missing pipeline is a finding only when a CICD requirement demands one.
+
+## Box 3: Human review for sensitive parts
+
+List every change that touches: SEC, PRIV or SAFE IDs; authentication, sessions or permissions;
+secrets and keys; payments or money movement; personal data (collected, stored, logged,
+exported); migrations and data repairs; CI, infrastructure and deployment configuration; new
+dependencies; public APIs, CLI or data contracts{{#if vars.sensitivePaths}}; paths matching `{{vars.sensitivePaths}}`{{/if}}.
+
+Passes when every such change is listed with its location and reason, and each is either confirmed
+by a named human other than you (name recorded) or marked for Ship to request as a pull request
+review. You never confirm one yourself. Pending items give the verdict "pass, human review
+pending", which allows `NEXT`. Under the `sensitive` modifier an empty list needs a written reason.
+
+After a fast-forward run (the brief's `## Fast-forward log` has entries, or a value is marked
+` (auto)`), its lines marked ` · review`, every ` (auto)` value and every `Source: assumed` row are
+human review items too: list them as pending (a non-empty log may count as one item). Ship carries
+them into the pull request.
+
+## Box 4: Tests coverage
+
+Passes when:
+
+- [ ] every in-scope scenario ID has a test that names it, ran in this round and passed (not
+  skipped, not focused). Find it with a whole-word, fixed-string search such as
+  `git grep -nwF "CHK-1.2"`, then read what it asserts;
+- [ ] a bug's reproduction test (of the violated or corrected IDs, never of extracted ones) fails
+  on the base for the reported reason (not a setup error) and passes on HEAD. In the baseline worktree, bring in the test from HEAD
+  (`git -C ../{{project.name}}-baseline checkout <HEAD sha> -- <test files>`), run only that test,
+  then remove the worktree;
+- [ ] regression rule: every accepted scenario and TD ID of the touched features (those in the
+  brief header, plus features whose code the diff touches) has a passing test naming it, or is
+  listed as unverified in the hand-off.
+
+Otherwise: `FAILED` when an in-scope scenario ID has no passing test or any test naming an ID fails.
+Unverified regression IDs are listed, not failed.
+
+| Situation | Rule |
+|---|---|
+| Greenfield without a test framework or test command | blocker: testability always applies |
+| Adoption without a suite | run the task's own tests with the command implementation saved; list the touched features' other scenarios as unverified |
+| Command not configured | find it as Project commands says; save it only with the user's agreement and commit `.df/config.json` with the report |
+| User-visible scenario | also exercise it yourself where cheap (CLI, API, page) and record the commands and output; this never replaces a missing test for an in-scope ID; for a regression ID it goes into the hand-off as tested by hand |
+
+## Screening re-check
+
+- **Route with Tech design:** for every code in `## Quality attribute screening`: Applicable → its
+  TD IDs appear in the mapping; Baseline `SYS-n` → the change keeps that requirement (check where
+  cheap); N/A → the diff hits nothing the code's "Applicable when" column names.
+- **Route without Tech design** (`behavior`, `code`): run the no-technical-impact check on the
+  diff: persisted data, an interface or integration, UI placement, a target in the catalog (code
+  moved behind an unchanged contract or module boundary no TD row states is no hit).
+
+| Observation | Event |
+|---|---|
+| A user-visible behavior change no in-scope ID requires, on a route that skipped Behavior, that the developer intends | `REQUIREMENTS_GAP` |
+| The same change, unintended (a regression) | `FAILED` (blocker: restore the behavior) |
+| The change needs a business rule or glossary term the requirements lack | `REQUIREMENTS_GAP` |
+| A persistent entity added or changed that no data section describes | `DESIGN_GAP` |
+| An element added, moved or removed on a page or in a modal that no UI section row places | `DESIGN_GAP` |
+| The diff contradicts an N/A verdict (personal data stored while PRIV is N/A) | `DESIGN_GAP` |
+| A technical-impact hit that no existing TD ID covers | `DESIGN_GAP` |
+
+{{> quality-catalog}}

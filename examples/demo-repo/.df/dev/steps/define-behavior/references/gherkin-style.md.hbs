@@ -1,0 +1,130 @@
+# Gherkin style for business requirements
+
+Requirements are read by product owners, testers, support and developers who never saw the
+request. Write declarative Gherkin: what the business needs to be true, never how someone operates
+a UI or how the system is built. The test for every line: would it change if the screens, the
+technology or the request changed? If yes, rewrite it. The blocks are documentation, not
+executable `.feature` files; tests link to scenarios by ID.
+
+Write rule text and glossary in the language the existing requirements use (English by default).
+Keywords stay in English so that searches work.
+
+## Keywords
+
+| Keyword | Use | Limits |
+|---|---|---|
+| Feature | not written; the file's H1 and purpose paragraph play this role | one feature per file |
+| Rule | one business rule, stated as a sentence that can be true or false | `Rule: CHK-7 <statement>`; up to 3 lines of description below it, saying why the rule exists |
+| Scenario | one concrete example of the rule (`Example` is the same keyword; write `Scenario`) | `Scenario: CHK-7.2 <outcome>`; 3 to 5 steps |
+| Scenario Outline + Examples | business variations of one behavior: thresholds, categories, roles | one ID for all rows; at most about 6 rows, each a case the business cares about |
+| Background | Given steps shared by every scenario of one Rule | only inside a Rule, at most 3 Givens |
+| Given / When / Then | the situation / the one event / the observable outcome | exactly one When step and one Then step |
+| And / But | continue the step above with the same meaning | not after When |
+| Data table | a short list of business values, such as a fee schedule | no incidental columns |
+
+Not used: doc strings (state what a message means, not its wording, unless the exact wording is a
+business or legal requirement), comments, the asterisk step and tags (IDs replace tags).
+Indentation: Rule at column 0, Background and Scenario 2 spaces, steps and Examples 4, table rows 6.
+
+## Rule checklist
+
+- [ ] One business rule; the name is a statement ("An Order can be placed only for a Cart with at
+  least one Item"), not a topic ("Cart validation").
+- [ ] At least one Scenario; a rule that rejects, forbids or limits something also has a negative
+  scenario showing what happens when it is broken.
+- [ ] Limits get boundary scenarios: at the limit and just past it.
+- [ ] A rule of another feature is cited by ID (`Related rules:` line), never copied. Access
+  control, audit and notifications are features of their own that others cite.
+
+## Scenario checklist
+
+- [ ] Name: the ID, then the outcome in a phrase; unique within the file.
+- [ ] One behavior: one When, one Then (plus And/But lines), 3 to 5 steps, Background excluded.
+- [ ] Actors are glossary roles in the third person: "the Customer", never "I", "we" or "the
+  user" (unless User is a glossary term).
+- [ ] Domain terms are capitalised and defined in the glossary; one word per concept (the
+  glossary's Avoid column lists the synonyms not to use).
+- [ ] Values appear only when the rule depends on them (limits, amounts written as "50 USD",
+  dates); no incidental data such as names, emails or passwords.
+- [ ] Then states an observable business outcome (an Order exists, the Customer is told something,
+  no Refund is issued), never internal state ("is saved", "the flag is set").
+- [ ] Errors are business outcomes: "no Order is placed" and "the Customer is told that the Cart is
+  empty", not "an error 400 is returned" or "a message appears under the field".
+- [ ] Business time limits are allowed ("within 14 days", "by the end of the Business Day");
+  technical metrics (response times, availability percentages) belong to the tech design.
+- [ ] Timeless present tense: no story narrative ("As a / I want / So that"), no request or ticket
+  references, no change-relative words.
+
+## Flagged vocabulary
+
+| Group | Words | Write instead |
+|---|---|---|
+| UI | page, screen, button, click, modal, field, form | the intent: "the Customer confirms the Order", "the Customer is told" |
+| Technical | API, endpoint, database, table, JSON, HTTP, cache, queue, service, null | the business outcome: "the Order is kept", "the Supplier is notified", "has no Delivery Date" |
+| Change-relative | new, now, no longer, currently, will, still, anymore | the timeless present: "is", "can", "cannot" |
+
+A word the glossary defines as a domain term is exempt: "Customer Service", "Call Queue", "Tax
+Form", a restaurant's "Table". Every other hit is a warning the user reviews at the gate, not an
+automatic failure: forced synonyms make rules harder to read. To find hits, search every edited
+file, for example:
+
+```sh
+grep -nwiE 'page|screen|button|click|modal|field|form|API|endpoint|database|table|JSON|HTTP|cache|queue|service|null' <file>
+grep -nwiE 'new|now|no longer|currently|will|still|anymore' <file>
+```
+
+## Bad and good
+
+Imperative UI script (no ID, first person, incidental data, UI and HTTP words, two behaviors):
+
+```gherkin
+Scenario: Checkout error
+  Given I am logged in as "bob.smith"
+  And I am on the cart page
+  When I click the "Place order" button
+  Then the API returns 400
+  And a modal shows "Your cart is empty"
+  When I add an item
+  Then the button is enabled
+```
+
+The same behavior as a business rule:
+
+```gherkin
+Rule: CHK-1 An Order can be placed only for a Cart with at least one Item
+  Scenario: CHK-1.1 A Customer places an Order for a Cart with Items
+    Given a Customer has a Cart with 2 Items
+    When the Customer places an Order
+    Then an Order with the 2 Items is placed
+  Scenario: CHK-1.2 A Customer cannot place an Order for an empty Cart
+    Given a Customer has an empty Cart
+    When the Customer tries to place an Order
+    Then no Order is placed
+    And the Customer is told that the Cart is empty
+```
+
+A business variation as an outline, with a Background inside its Rule:
+
+```gherkin
+Rule: CHK-4 Shipping is free for Orders of at least 50 USD
+  Background:
+    Given a Customer has a Cart with a Delivery Address in the Home Market
+  Scenario Outline: CHK-4.1 The Shipping Fee depends on the Order Total
+    Given the Order Total of the Cart is <total>
+    When the Customer places an Order
+    Then the Shipping Fee of the Order is <fee>
+    Examples:
+      | total     | fee      |
+      | 49.99 USD | 4.90 USD |
+      | 50.00 USD | 0 USD    |
+```
+
+More fixes:
+
+| Bad | Good | Why |
+|---|---|---|
+| Then the Order is placed within 200 ms | Then the Order is placed | the metric belongs to the tech design |
+| Then the Customer can now see the Refund | Then the Customer can see the Refund | change-relative word |
+| Then the order status column is set to CANCELLED | Then the Order is Cancelled | internal state; Cancelled is a glossary state |
+| When the Customer submits the return form | When the Customer requests a Return | UI word |
+| When the Clerk clicks Export to CSV | When the Clerk exports the Orders of a Business Day | solution wording from the request; the file format belongs to the tech design |

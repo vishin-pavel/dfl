@@ -1,0 +1,140 @@
+{{!-- Dev QA. Pass/fail rules: references/qa-checks.md.hbs; skeletons: references/qa-report.md.hbs. --}}
+# Verify the task independently
+
+Act as an independent tester and reviewer who did not write the change: assume nothing works until
+you have evidence. Prove on committed code that every in-scope requirement is met and every change
+maps to one. Your verdict sends the task to Ship (`NEXT`) or back to the step that must act
+(`FAILED`, `REQUIREMENTS_GAP`, `DESIGN_GAP`). You never fix anything yourself.
+
+## Inputs
+
+- The brief (see the Task brief section): the header decisions and accepted shas; objectives
+  (`OBJ-n`) in `## Classification`; `## Quality attribute screening`; `## Change requests`;
+  `## Implementation` (per-ID checklist and declared change map: claims to check, not evidence);
+  the latest `## Rework` entry and earlier rounds of `## Dev QA report`. The original request is
+  context only.
+- For every feature in the header: `{{vars.requirementsDir}}/<feature>/{{vars.requirementsFile}}`
+  and `{{vars.techDesignFile}}`, plus the baseline `{{vars.requirementsDir}}/{{vars.techDesignFile}}`,
+  the index and `GLOSSARY.md`.
+- The task branch at HEAD (committed code only), the diff base (step 2), and any code, test or
+  history you need, unchanged code included.
+- Text after the command: focus areas, or the developer's independence override.
+
+## Procedure
+
+1. **Independence.** If this conversation wrote or changed the task's code, stop: tell the user to
+   run `{{command step.skillName}}` in a new session, ideally with another agent or model. Continue only on
+   an explicit override, recorded in the report. Evidence is only what you read or run yourself;
+   the brief's Implementation section, commit messages and summaries are claims. If your agent can
+   start an independent reviewer you may use one for the code review, but nothing depends on it.
+2. **Clean tree, diff base.** `git status` must be clean: uncommitted task work gets committed by
+   the developer or implementation first; never touch unrelated changes without asking. Run
+   `git fetch origin {{vars.mainBranch}}`, then take the first base that applies and record it:
+
+   | Situation | Diff base |
+   |---|---|
+   | Task branch, `origin/{{vars.mainBranch}}` exists | `git merge-base HEAD origin/{{vars.mainBranch}}` |
+   | Task branch, only a local `{{vars.mainBranch}}` | `git merge-base HEAD {{vars.mainBranch}}` |
+   | Work sits on `{{vars.mainBranch}}` itself | the `Base:` commit of the brief header |
+   | No commit before the task | the empty tree, `git hash-object -t tree /dev/null` |
+
+   Material: `git diff --stat <base> HEAD`, `git diff <base> HEAD`, `git log --oneline <base>..`
+   (empty tree: `git log --oneline`).
+3. **Run the commands.** Run the test and check commands (Project commands) at HEAD; record passed,
+   failed and skipped per command; rerun a flaky test several times. For each failure run the same
+   command at the base in a separate worktree: `git worktree add ../{{project.name}}-baseline <base>`,
+   install dependencies, run, `git worktree remove ../{{project.name}}-baseline`. Failing at the
+   base too = pre-existing (a follow-up); new = blocker. No baseline possible (empty tree, no suite
+   or command at the base): every failure counts; the report says "baseline: not available".
+4. **Requirement mapping and tests coverage** (boxes 1 and 4 of the
+   [QA checks](references/qa-checks.md)). Build the table ID | evidence | result:
+   - every in-scope scenario ID is implemented at HEAD (read the code; for clarified tasks and
+     extracted IDs, usually existing code) and has a passing test that names it and asserts its outcome;
+   - a bug's reproduction test (never an extracted ID's) fails on the base and passes on HEAD;
+   - every in-scope TD ID is verified (test, bench, static), inspected (with the reason) or
+     deferred to operations or the QA team (with an owner); "unknown" fails;
+   - every `OBJ-n` is met, with evidence;
+   - the requirement and tech design diff matches the class, plus any extracted baseline (none for
+     "not satisfied"); every commit touching `{{vars.requirementsDir}}` is an acceptance or accepted CR commit;
+   - regression rule: every other accepted ID of the touched features has a passing test naming it,
+     or goes into the hand-off as unverified.
+5. **Out of bounds.** Classify every hunk per the Scope rules and compare with the declared change
+   map. Unmapped hunks, leftovers (debug output, focused or skipped tests, secrets, local paths,
+   hand-edited generated files) and weakened or deleted tests (except for a retired ID) are blockers.
+6. **Route and screening check.** A user-visible behavior change that no in-scope ID requires, on a
+   route that skipped Behavior: ask the developer; unintended → a `FAILED` blocker (restore it),
+   intended → `REQUIREMENTS_GAP`. A persistent entity changed without a data section, UI placement
+   changed without a UI section, or a change contradicting an N/A screening verdict (personal data
+   stored while PRIV is N/A) → `DESIGN_GAP`. Re-check the screening with the catalog in the QA checks.
+7. **Code review** (box 2). Read every changed file, tests and configuration included, against the
+   checklist in the QA checks: correctness, spec fit, tests, security, performance,
+   maintainability, compatibility. Each finding gets a severity (blocker, should-fix, nit),
+   `path:line` and a concrete suggestion; name the categories that had no findings.
+8. **Sensitive changes** (box 3). List for human review every change touching SEC, PRIV or SAFE
+   IDs, auth, secrets, payments, personal data, migrations, CI and infrastructure, new dependencies
+   or public APIs{{#if vars.sensitivePaths}}, or paths matching `{{vars.sensitivePaths}}`{{/if}}.
+   Ship requests the review on the pull request; you never approve these changes yourself.
+9. **Leakage.** Ticket keys (`task.key` when tracked), requester names or sentences of the original
+   request in requirement or tech design files changed since the base are blockers (fixed by a
+   wording-only change request in implementation).
+10. **Decide and present.** Apply the verdict rules of the QA checks:
+
+    | Result | Event |
+    |---|---|
+    | Every box passes (human review pending still passes) | `NEXT` |
+    | A blocker, or a should-fix the developer does not move to follow-ups | `FAILED` |
+    | A missing business rule or glossary term, or an intended change skipped Behavior | `REQUIREMENTS_GAP` |
+    | A missing technical requirement, or a screening contradiction | `DESIGN_GAP` |
+
+    Several apply → the earliest step wins (`REQUIREMENTS_GAP`, then `DESIGN_GAP`, then `FAILED`);
+    every finding still goes into the one Rework entry, tagged with the step that owns it. The same
+    finding failed in two earlier rounds → propose a GAP event instead. Show the findings and the
+    verdict to the developer, who may move should-fix items and nits to follow-ups; blockers are
+    never waived here.
+11. **Record, commit, fire.** From the [report template](references/qa-report.md): write round n in
+    `## Dev QA report`, update `## Hand-off to the QA team`, and for any event other than `NEXT`
+    append the Rework entry. Commit the brief (`git add {{vars.taskNotesDir}}/<task>.md`, plus
+    `.df/config.json` if you saved a command) with
+    `git commit -m "docs(task): Dev QA report round <n> for <task>"`, the only commit of this
+    step. Then fire the event.
+
+## Outputs
+
+- `### Round <n>` under `## Dev QA report` in the brief, with the diff base and the verdict.
+- `## Hand-off to the QA team`: unverified IDs, deferred verifications, what to test by hand,
+  human review items, follow-ups and known gaps, items not available.
+- For `FAILED` and the GAP events: a Rework entry with numbered findings (ID or check, observed vs
+  expected, how to reproduce, owning step).
+- The commit `docs(task): Dev QA report round <n> for <task>`, then the event.
+
+## Exit criteria
+
+- Every check of steps 3–9 ran in this round, on committed code at HEAD, including those that
+  passed in earlier rounds.
+- The verdict follows the rules: `NEXT` only with no blocker, no new failure, every in-scope ID
+  with the evidence boxes 1 and 4 require, no unmapped hunk, sensitive items listed.
+- The report, hand-off and any Rework entry are committed; the baseline worktree is removed and
+  `git status` is clean.
+
+## Pitfalls
+
+- Never fix code, tests, requirements or the tech design here, not even a typo: report it.
+- "Tests pass" is not "requirement met": read what each test asserts. A flaky test is a failure
+  until explained.
+- An ID search must not match a longer ID: `CHK-1.2` is not `CHK-1.20` (whole-word search).
+- Never verify uncommitted work; never stash or check out old files in the main working tree:
+  baselines run in the separate worktree.
+- Violations in features outside the task are follow-ups in the hand-off, not failures.
+- The request is not scope: a request item missing from the accepted requirements is a hand-off
+  note, not a code failure.
+- Do not rubber-stamp: when nothing turns up, look again at error paths, tests and security.
+
+{{> brief}}
+
+{{> requirements-rules}}
+
+{{> scope-rules}}
+
+{{> project-commands}}
+
+{{> flow-context}}

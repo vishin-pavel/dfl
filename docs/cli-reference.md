@@ -119,7 +119,7 @@ Global flags accepted by every command:
 - **`--lr`:** Left-to-right layout instead of top-to-bottom.
 - **`--ascii`:** Pure 7-bit ASCII box drawing, arrows, header, and footer.
 
-For an architectural deep dive, see [Building an Orthogonal Terminal DAG Viewer with Ink & ELKjs](https://vishin-pavel.github.io/dfl-satellite-repo/blog/orthogonal-terminal-dag-ink-elkjs).
+For an architectural deep dive, see [Building an Orthogonal Terminal DAG Viewer with Ink & ELKjs](https://vishin-pavel.github.io/dfl/blog/orthogonal-terminal-dag-ink-elkjs).
 
 ---
 

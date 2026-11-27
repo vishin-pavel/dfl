@@ -1,0 +1,25 @@
+| Code | Characteristic: sub-characteristics | Applicable when |
+|---|---|---|
+| FUNC | Functional suitability: completeness, correctness, appropriateness | calculations, money, time zones, units, rounding |
+| PERF | Performance efficiency: time behaviour, resource utilization, capacity | user-facing paths, batch deadlines, large data, limited devices |
+| COMP | Compatibility: co-existence, interoperability | shared hosts or databases, integrations, import or export, public APIs |
+| IC | Interaction capability (formerly usability): appropriateness recognizability, learnability, operability, user error protection, user engagement, inclusivity, user assistance, self-descriptiveness | any UI or CLI; holds the UI appearance section |
+| REL | Reliability: faultlessness, availability, fault tolerance, recoverability | online services, external dependencies, persistent data, long jobs |
+| SEC | Security: confidentiality, integrity, non-repudiation, accountability, authenticity, resistance | any write path (integrity always applies), personal data, auth, public endpoints |
+| MAINT | Maintainability: modularity, reusability, analysability, modifiability, testability | any code change (testability always applies) |
+| FLEX | Flexibility (formerly portability): adaptability, scalability, installability, replaceability | several platforms, growth, schema changes, vendor changes |
+| SAFE | Safety: operational constraint, risk identification, fail safe, hazard warning, safe integration | devices, health, money movement, irreversible bulk actions |
+| OBS | Extra: observability (logs, metrics, traces, alerts) | any backend service or job |
+| DEPLOY | Extra: deployability (release, rollback, feature flags) | anything shipped to an environment |
+| CICD | Extra: pipeline gates | the baseline; a feature only when it needs a new gate |
+| COST | Extra: cost efficiency | new infrastructure, paid APIs, LLM calls |
+| PRIV | Extra: privacy and data retention | personal data |
+| DCONS | Extra: data consistency and durability | several stores, caches, asynchronous flows |
+| COMPL | Extra: compliance | regulated data or markets |
+| DX | Extra: developer experience | the baseline; a feature that adds tooling or services |
+
+The first nine rows are the product quality characteristics of ISO/IEC 25010:2023; rows marked
+"Extra" are architecture concerns the standard does not name. SEI attribute names map onto the
+codes: availability → REL, deployability → DEPLOY and CICD, energy efficiency → PERF, integrability
+→ COMP and MAINT, modifiability → MAINT and FLEX, testability → MAINT, usability → IC, security →
+SEC and PRIV, safety → SAFE, scalability → FLEX.

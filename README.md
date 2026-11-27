@@ -47,7 +47,7 @@ dfl flow view --print --zoom 1
 ```
 
 **Want to try `dfl flow view` in <30 seconds without touching your own repo?**  
-Run the self-contained 1-command sandbox from [`dfl-satellite-repo`](https://github.com/vishin-pavel/dfl-satellite-repo/blob/main/demo/run-demo.sh) (`./demo/run-demo.sh`).
+Run the self-contained 1-command sandbox from [`demo/run-demo.sh`](https://github.com/vishin-pavel/dfl/blob/main/demo/run-demo.sh) (`./demo/run-demo.sh`).
 
 Once installed, open your coding agent and run:
 - `/classify-task <describe your task>` — classifies scope and routes to `full`, `behavior`, `design`, or `code`

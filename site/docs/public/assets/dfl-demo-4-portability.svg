@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="Demo 4: 9 Coding Agents, 1 Source of Truth">
+  <rect width="960" height="540" fill="#070b14"/>
+  <rect x="12" y="12" width="936" height="516" rx="12" fill="#0b1120" stroke="#1e293b" stroke-width="1.5"/>
+  <path d="M12 24 Q12 12 24 12 L936 12 Q948 12 948 24 L948 48 L12 48 Z" fill="#111827"/>
+  <line x1="12" y1="48" x2="948" y2="48" stroke="#1e293b" stroke-width="1"/>
+  <circle cx="34" cy="30" r="5.5" fill="#f87171"/>
+  <circle cx="54" cy="30" r="5.5" fill="#fbbf24"/>
+  <circle cx="74" cy="30" r="5.5" fill="#34d399"/>
+  <text x="96" y="34" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" font-weight="700" fill="#e2e8f0">Demo 4 — Cross-Agent Portability (9 Coding Agents, 1 .df/ Flow)</text>
+  <rect x="708" y="19" width="224" height="22" rx="11" fill="#0f172a" stroke="#34d399" stroke-width="1"/>
+  <text x="820" y="34" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" font-weight="700" fill="#34d399">9 AGENTS · GIT-CLEAN</text>
+
+  <!-- Left Pane -->
+  <rect x="26" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M26 70 Q26 62 34 62 L464 62 Q472 62 472 70 L472 88 L26 88 Z" fill="#0f172a"/>
+  <line x1="26" y1="88" x2="472" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="40" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#38bdf8">$ dfl install --yes --agents claude,cursor,codex</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="40" y="112" xml:space="preserve"><tspan fill="#34d399">✔ Active flow </tspan><tspan fill="#f8fafc" font-weight="700">dev (6 steps)</tspan></text>
+    <text x="40" y="133" xml:space="preserve"><tspan fill="#34d399">✔ Team default saved in </tspan><tspan fill="#38bdf8">.df/config.json</tspan></text>
+    <text x="40" y="154" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="175" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">Claude Code  </tspan><tspan fill="#38bdf8">.claude/skills/   </tspan><tspan fill="#94a3b8">/classify-task</tspan></text>
+    <text x="40" y="196" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">Cursor       </tspan><tspan fill="#38bdf8">.cursor/skills/   </tspan><tspan fill="#94a3b8">/classify-task</tspan></text>
+    <text x="40" y="217" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">OpenAI Codex </tspan><tspan fill="#38bdf8">.agents/skills/   </tspan><tspan fill="#fbbf24" font-weight="700">$classify-task</tspan></text>
+    <text x="40" y="238" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="259" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">MCP server &quot;dfl&quot; (15 tools, 2 resources)</tspan></text>
+    <text x="40" y="280" xml:space="preserve"><tspan fill="#34d399">  ✔ .mcp.json</tspan><tspan fill="#64748b">           (JSON · Claude)</tspan></text>
+    <text x="40" y="301" xml:space="preserve"><tspan fill="#34d399">  ✔ .cursor/mcp.json</tspan><tspan fill="#64748b">    (JSON · Cursor)</tspan></text>
+    <text x="40" y="322" xml:space="preserve"><tspan fill="#34d399">  ✔ .codex/config.toml</tspan><tspan fill="#64748b">  (TOML · Codex)</tspan></text>
+    <text x="40" y="343" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="364" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#f8fafc">dfl vars set reviewer @alice --local</tspan></text>
+    <text x="40" y="385" xml:space="preserve"><tspan fill="#34d399">✔ Saved in .df/local.json (git-ignored)</tspan></text>
+  </g>
+
+  <!-- Right Pane -->
+  <rect x="488" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M488 70 Q488 62 496 62 L926 62 Q934 62 934 70 L934 88 L488 88 Z" fill="#0f172a"/>
+  <line x1="488" y1="88" x2="934" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="502" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#34d399">$ git status --short  (Self-Ignored Skills)</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="502" y="112" xml:space="preserve"><tspan fill="#34d399">?? .df/config.json</tspan><tspan fill="#64748b">        # team settings</tspan></text>
+    <text x="502" y="133" xml:space="preserve"><tspan fill="#34d399">?? .df/dev/flow.json</tspan><tspan fill="#64748b">      # xstate v5 DAG</tspan></text>
+    <text x="502" y="154" xml:space="preserve"><tspan fill="#34d399">?? .df/dev/steps/**/*.hbs</tspan><tspan fill="#64748b"> # Handlebars skills</tspan></text>
+    <text x="502" y="175" xml:space="preserve"><tspan fill="#38bdf8">?? .mcp.json</tspan><tspan fill="#64748b">              # Claude MCP</tspan></text>
+    <text x="502" y="196" xml:space="preserve"><tspan fill="#38bdf8">?? .cursor/mcp.json</tspan><tspan fill="#64748b">       # Cursor MCP</tspan></text>
+    <text x="502" y="217" xml:space="preserve"><tspan fill="#38bdf8">?? .codex/config.toml</tspan><tspan fill="#64748b">     # Codex MCP</tspan></text>
+    <text x="502" y="238" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="259" xml:space="preserve"><tspan fill="#94a3b8"># Invisible in git (self-ignoring .gitignore):</tspan></text>
+    <text x="502" y="280" xml:space="preserve"><tspan fill="#64748b">  .claude/skills/*</tspan><tspan fill="#64748b">  .cursor/skills/*</tspan></text>
+    <text x="502" y="301" xml:space="preserve"><tspan fill="#64748b">  .agents/skills/*</tspan><tspan fill="#64748b">  .df/local.json</tspan></text>
+    <text x="502" y="322" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="343" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">All 9 built-in adapters:</tspan></text>
+    <text x="502" y="364" xml:space="preserve"><tspan fill="#cbd5e1">Claude · Cursor · Antigravity · Codex</tspan></text>
+    <text x="502" y="385" xml:space="preserve"><tspan fill="#cbd5e1">Gemini CLI · Copilot · Windsurf · OpenCode · Kiro</tspan></text>
+  </g>
+
+  <!-- Footer -->
+  <text x="26" y="510" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#94a3b8">Root .gitignore is never modified · Hand-written user skills are never overwritten (.df/installed.json ownership)</text>
+</svg>

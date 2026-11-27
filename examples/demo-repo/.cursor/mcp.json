@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dfl": {
+      "type": "stdio",
+      "command": "dfl",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

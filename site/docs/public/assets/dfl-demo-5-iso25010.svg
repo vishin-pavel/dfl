@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="Demo 5: Steer AI Architecture with ISO/IEC 25010 Quality Attributes">
+  <rect width="960" height="540" fill="#070b14"/>
+  <rect x="12" y="12" width="936" height="516" rx="12" fill="#0b1120" stroke="#1e293b" stroke-width="1.5"/>
+  <path d="M12 24 Q12 12 24 12 L936 12 Q948 12 948 24 L948 48 L12 48 Z" fill="#111827"/>
+  <line x1="12" y1="48" x2="948" y2="48" stroke="#1e293b" stroke-width="1"/>
+  <circle cx="34" cy="30" r="5.5" fill="#f87171"/>
+  <circle cx="54" cy="30" r="5.5" fill="#fbbf24"/>
+  <circle cx="74" cy="30" r="5.5" fill="#34d399"/>
+  <text x="96" y="34" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" font-weight="700" fill="#e2e8f0">Demo 5 — Blue-Ocean Moat: ISO/IEC 25010 Quality Attributes in /design-tech</text>
+  <rect x="708" y="19" width="224" height="22" rx="11" fill="#0f172a" stroke="#c084fc" stroke-width="1"/>
+  <text x="820" y="34" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" font-weight="700" fill="#c084fc">ISO/IEC 25010:2023</text>
+
+  <!-- Left Pane -->
+  <rect x="26" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M26 70 Q26 62 34 62 L464 62 Q472 62 472 70 L472 88 L26 88 Z" fill="#0f172a"/>
+  <line x1="26" y1="88" x2="472" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="40" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#38bdf8">$ /design-tech  (Quality Attribute Screening)</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="40" y="112" xml:space="preserve"><tspan fill="#94a3b8">Screening 9 ISO/IEC 25010:2023 attributes:</tspan></text>
+    <text x="40" y="133" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="154" xml:space="preserve"><tspan fill="#38bdf8" font-weight="700">  PERF  </tspan><tspan fill="#f8fafc">P99 checkout calc &lt; 15ms @ 500 RPS</tspan></text>
+    <text x="40" y="175" xml:space="preserve"><tspan fill="#fb7185" font-weight="700">  SEC   </tspan><tspan fill="#f8fafc">Integer minor units (cents), no float</tspan></text>
+    <text x="40" y="196" xml:space="preserve"><tspan fill="#34d399" font-weight="700">  MAINT </tspan><tspan fill="#f8fafc">Pure domain module, zero DB imports</tspan></text>
+    <text x="40" y="217" xml:space="preserve"><tspan fill="#fbbf24" font-weight="700">  REL   </tspan><tspan fill="#e2e8f0">Deterministic clamp at subtotal &gt;= 0</tspan></text>
+    <text x="40" y="238" xml:space="preserve"><tspan fill="#64748b">  FUNC · COMP · IC · FLEX · SAFE → </tspan><tspan fill="#64748b">N/A</tspan></text>
+    <text x="40" y="259" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="280" xml:space="preserve"><tspan fill="#94a3b8">Screening 8 operational concerns:</tspan></text>
+    <text x="40" y="301" xml:space="preserve"><tspan fill="#c084fc" font-weight="700">  OBS   </tspan><tspan fill="#e2e8f0">Emit structured metric on clamp=true</tspan></text>
+    <text x="40" y="322" xml:space="preserve"><tspan fill="#64748b">  COST · PRIV · DCONS · COMPL · DX → </tspan><tspan fill="#64748b">reviewed</tspan></text>
+    <text x="40" y="343" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="364" xml:space="preserve"><tspan fill="#34d399">✔ High-impact trade-off detected → </tspan><tspan fill="#fbbf24" font-weight="700">DEC-1</tspan></text>
+    <text x="40" y="385" xml:space="preserve"><tspan fill="#94a3b8">  Awaiting human sign-off before Implement.</tspan></text>
+  </g>
+
+  <!-- Right Pane -->
+  <rect x="488" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M488 70 Q488 62 496 62 L926 62 Q934 62 934 70 L934 88 L488 88 Z" fill="#0f172a"/>
+  <line x1="488" y1="88" x2="934" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="502" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#34d399">docs/requirements/checkout/TECH_DESIGN.md</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="502" y="112" xml:space="preserve"><tspan fill="#38bdf8" font-weight="700">## Quality Requirements</tspan></text>
+    <text x="502" y="133" xml:space="preserve"><tspan fill="#e2e8f0">- [PERF-1] applyDiscount() completes in &lt; 15ms</tspan></text>
+    <text x="502" y="154" xml:space="preserve"><tspan fill="#94a3b8">  at P99 with 10,000-line carts.</tspan></text>
+    <text x="502" y="175" xml:space="preserve"><tspan fill="#e2e8f0">- [SEC-1] All monetary math uses integer cents</tspan></text>
+    <text x="502" y="196" xml:space="preserve"><tspan fill="#94a3b8">  to prevent IEEE-754 rounding exploits.</tspan></text>
+    <text x="502" y="217" xml:space="preserve"><tspan fill="#e2e8f0">- [MAINT-1] Zero framework imports in domain.</tspan></text>
+    <text x="502" y="238" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="259" xml:space="preserve"><tspan fill="#fbbf24" font-weight="700">## Expensive-to-Reverse Decisions</tspan></text>
+    <text x="502" y="280" xml:space="preserve"><tspan fill="#f8fafc" font-weight="700">### DEC-1: Minor-Unit Integer Money Representation</tspan></text>
+    <text x="502" y="301" xml:space="preserve"><tspan fill="#94a3b8">- Choice: </tspan><tspan fill="#34d399">Store &amp; compute cents (int64)</tspan></text>
+    <text x="502" y="322" xml:space="preserve"><tspan fill="#94a3b8">- Rejected: </tspan><tspan fill="#fb7185">Decimal.js wrapper (dep weight)</tspan></text>
+    <text x="502" y="343" xml:space="preserve"><tspan fill="#94a3b8">- Reversibility: </tspan><tspan fill="#fbbf24">High cost (schema + API)</tspan></text>
+    <text x="502" y="364" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="385" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#f8fafc" font-weight="700">dfl next NEXT</tspan><tspan fill="#38bdf8">  → ● Implement (step 4/6)</tspan></text>
+  </g>
+
+  <!-- Footer -->
+  <text x="26" y="510" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#94a3b8">Steer AI architecture with measurable constraints (PERF/SEC/MAINT/DEC-n) — not line-by-line micromanagement</text>
+</svg>

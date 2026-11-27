@@ -1,0 +1,140 @@
+# Implement the task
+
+Implement the task test-first against its accepted requirements and tech design: a failing test
+per in-scope ID, the smallest change that makes it pass, a green suite and a commit per increment.
+Settled requirements change only through change requests the developer decides, all listed at the end.
+
+## Inputs
+
+- The brief (Task brief section): `## Original request` (the intent behind the task: context for
+  every decision, never scope); the header; violated IDs and objectives `OBJ-n` in
+  `## Classification`; `## Quality attribute screening`; `## Change requests`; `## Implementation`
+  (progress of earlier sessions); the latest open `## Rework` entry: Dev QA findings (`FAILED`),
+  review or CI changes (`CHANGES_REQUESTED`), or the revision you sent back, now accepted.
+- Per feature in the header: `{{vars.requirementsDir}}/<feature>/{{vars.requirementsFile}}` and
+  `{{vars.techDesignFile}}`, the baseline `{{vars.requirementsDir}}/{{vars.techDesignFile}}`, and what this
+  task changed in them: `git diff origin/{{vars.mainBranch}}...HEAD -- {{vars.requirementsDir}}` (other bases: step 8).
+- The project's conventions: the code around the change, its tests and helpers, lint and formatter
+  configuration, contributor notes. Text after the command: constraints, never extra scope.
+
+## Procedure
+
+1. **Prepare.** The header's `Accepted:` line must show every earlier step of the route as accepted;
+   if not, say so and stop. Be on the task branch (`task.branch` when tracked, else the brief's
+   `Branch:`; switch to it, never create or rename one). `git status` must be clean: ask about
+   unrelated changes. `git fetch origin {{vars.mainBranch}}` when a remote exists. Run the test and
+   check commands (Project commands) and record the baseline. If anything fails before you change
+   code, report it and agree with the developer: fix it first, or record the known failures.
+2. **Plan in `## Implementation`.** List the in-scope IDs (Scope rules): per scenario or TD ID the
+   test(s), where the code goes and a status (open, done <sha>, blocked by CR-n); a technical change
+   also gets a row per `OBJ-n`. Declare the change map before coding: every area you will touch and
+   the ID it serves, including enabling changes (a minimal refactor, configuration, a dependency).
+   Re-entered: first address every open item of the latest Rework entry and mark it done (raise a
+   disputed one with the developer; moved back from `done`, the Task brief section restores the brief first; with none open, ask for the QA team's
+   findings and add them as an entry first); resume at the first open row; never redo finished rows.
+
+   ```markdown
+   Baseline <sha>: tests `<command>` → <n> passed, <n> failed (<known failures>); checks → <ok | failures>
+
+   | ID | Test(s) | Code | Status |
+   |---|---|---|---|
+   | CHK-1.2 | checkout test "CHK-1.2 rejects an empty Cart" | order placement | done <sha> |
+
+   Change map: <area> → <ID> | enabling: <reason> (late additions marked "added")
+   Latest run: <command> → <result> · Config: <.df/config.json edits | none> · Follow-ups: <list | none> (each also in the hand-off)
+   ```
+
+3. **Write the tests first.** Name each test after the scenario or TD ID it proves. Run it and
+   confirm it fails for the expected reason: an assertion about the missing behavior, not a typo,
+   import or setup error. By class:
+
+   | Class / outcome | Tests first |
+   |---|---|
+   | New feature / new requirements | a failing test per new scenario ID |
+   | Feature update / requirements changed | update the tests of changed IDs; delete a test only for a retired ID and cite that ID in the commit |
+   | Feature update / requirements clarified | tests that pin the clarified behavior; one that fails is a bug: fix it with the bug discipline |
+   | Bug fix (not satisfied or improved) | a reproduction test of the violated or corrected scenario that fails on the base, then the bug discipline |
+   | Technical change | a test or measurement per TD ID or `OBJ-n`; every scenario test stays green with unchanged assertions |
+   | Greenfield context | the first increment sets up the test framework and the CI the tech design requires |
+   | Extracted IDs (`extracted:` in `Accepted:`) | a test naming each that passes on the base and at HEAD: it pins today's behavior, no failing-first (Scope rules); no suite yet: a framework for this task's tests only, no tests for untouched behavior |
+
+   **Bug discipline.** Reproduce first, at the lowest test level that shows the failure. Find the
+   root cause before fixing: trace the bad value back to where it first goes wrong ("it throws" is
+   a symptom). Fix it there with the smallest safe change. Search the touched features for the same
+   defect: fix it when in scope, else note a follow-up. A "requirements not satisfied" bug never
+   edits a requirement: if the cited scenario looks wrong, that is a change request.
+4. **Implement the smallest change** that makes the tests pass, where the plan said, following the
+   code base's patterns (helpers, error types, logging, naming). How to build it is yours to decide
+   within the tech design's requirements, decisions (`DEC-n`) and constraints (`CON-n`); strict UI
+   rows (modifier `ui-design`) are built exactly as written; modifier `revert` undoes the original
+   code and test commits with `git revert --no-edit`, not by hand. Iterate with focused tests; run
+   the full test and check commands before every commit.
+5. **Raise a change request** when a settled requirement or tech design item looks wrong, impossible
+   or too costly, the work needs a rule or technical requirement the accepted files lack (the request
+   asking for it is not enough), or Dev QA found leakage in them. Stop work on it and follow the
+   [change request protocol](references/change-request.md):
+   - write `CR-n` in `## Change requests`: artifact and ID, current and proposed text, evidence, at
+     least two options including "keep as written" with pros and cons, a recommendation, impact and
+     route; then ask the developer. Silence is not approval;
+   - never edit a requirement or tech design file without a decision; no developer reachable (outside
+     a fast-forward run): mark the CR `pending`, commit the brief and stop without firing any event;
+   - accepted in place: edit the file, confirm the protocol's re-check, commit
+     `docs(req): CR-n <summary>` or `docs(td): CR-n <summary>`, then adapt tests and code;
+   - go back instead (Rework entry, then `REVISE_REQUIREMENTS` or `REVISE_DESIGN`) when a new Rule or
+     feature is needed, a shared glossary term or another feature changes, a `DEC-n` falls, the
+     class or route changes, or more than about 3 scenarios are affected, or the developer prefers.
+6. **Commit per increment** with a behavior message naming its IDs, such as
+   `feat(checkout): reject empty carts (CHK-1.2)`; a bug fix explains the root cause in the body.
+   Each commit leaves the suite green and carries the brief with its rows ticked and latest results.
+7. **Update the surroundings** the changed behavior affects: user docs, changelog, configuration
+   examples, migration notes.
+8. **Self-check the branch.** `git fetch origin {{vars.mainBranch}}`, then
+   `git diff origin/{{vars.mainBranch}}...HEAD --stat` and the full diff (no remote: the local
+   `{{vars.mainBranch}}`; working on the main branch itself: the brief's `Base:` commit). Map every
+   hunk per the Scope rules to an ID or a change map entry: add a late enabling change to the map
+   with its reason, remove what maps to nothing. No debug output, commented-out code, stray TODOs,
+   focused or skipped tests, loosened assertions. Requirement and tech design edits come only from
+   their own steps or accepted CRs. Full test and check commands pass; `git status` is clean.
+9. **Report and hand over.** Tell the developer, per in-scope ID, what was implemented and the test
+   that proves it; every CR with its decision (requirement changes must be visible); open
+   follow-ups. Fire `NEXT`, then tell the user to run
+   `{{#each step.next}}{{#if (eq event "NEXT")}}{{command skillName}}{{/if}}{{/each}}` in a fresh session (ideally another agent or model): Dev QA must be independent.
+
+## Outputs
+
+- Commits per increment naming their IDs; each accepted CR in its own `docs(req)` or `docs(td)` commit.
+- Tests naming every in-scope scenario and TD ID they prove.
+- In the brief: `## Implementation` (plan, change map, latest command results, `.df/config.json`
+  edits, follow-ups), `## Change requests` with every decision, the latest Rework items marked done.
+- The final message to the developer (step 9).
+
+## Exit criteria
+
+- Every in-scope scenario ID is implemented and has a passing test naming it; every TD ID and `OBJ-n`
+  row names its evidence: a test, a measurement, or why only inspection or operation can verify it.
+- The full test and check commands pass (baseline failures only as agreed in step 1).
+- Every hunk maps to an ID or a declared change map entry.
+- Every CR is decided and logged, none `pending`; every item of the latest Rework entry is done.
+- The working tree is clean and the brief is committed.
+
+## Pitfalls
+
+- Never weaken, skip or delete a test to make the suite pass; the only deletion is a retired ID's
+  test. A test that contradicts an accepted scenario is fixed in its own commit naming the ID; a
+  test that matches it while you doubt the scenario is a change request.
+- Never edit a reproduction test to match the buggy behavior; never swallow an error or add a guard
+  where the bad value surfaces instead of where it is made.
+- No drive-by refactors, formatting churn or unrelated fixes: note them as follow-ups.
+- No dependency the tech design did not allow without asking the developer; record it in the map.
+- Do not mark anything verified or write the Dev QA report: Dev QA does that with its own evidence.
+- The request is context, not scope: what it asks beyond the accepted files needs a change request.
+
+{{> brief}}
+
+{{> requirements-rules}}
+
+{{> scope-rules}}
+
+{{> project-commands}}
+
+{{> flow-context}}

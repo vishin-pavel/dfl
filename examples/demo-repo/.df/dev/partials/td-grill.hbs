@@ -1,0 +1,21 @@
+Grill one section at a time, right after drafting it. Ask at most 3 questions per round, each with
+options and a recommended default, and challenge every requirement of the section:
+
+- **Measurable?** It has a number, a yes/no rule anyone can check, or is marked as verifiable only
+  in operation. Bare adjectives (fast, scalable, secure, robust, intuitive, seamless,
+  user-friendly) fail unless a measure follows.
+- **Decision-relevant?** Removing it would change an implementation choice or a check. If not,
+  drop it.
+- **Long-lived?** It stays true after a refactor, a rename or a library swap. Names of files,
+  classes or library versions fail this test; name a technology only when it is a constraint.
+- **Sourced?** A number you proposed (`Source: proposed`) needs the user's explicit confirmation.
+  Never keep a guessed number; a fast-forward run keeps it as `Source: assumed` and logs it for
+  review.
+- **Conflicting?** Two applicable requirements that pull against each other (latency against cost,
+  privacy against observability) get an explicit trade-off the user chooses (a fast-forward run:
+  Must before Should, then `SEC`, `PRIV` and `SAFE` before the others; logged).
+- **Affordable?** Name what a strict target costs (infrastructure, complexity, time) so the user can
+  relax it on purpose.
+
+Stop when the user accepts the section. A question the user defers goes into the brief as an open
+item, never into the document as a requirement.

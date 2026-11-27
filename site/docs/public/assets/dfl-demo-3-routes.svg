@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="Demo 3: Spec-Driven Rigor Without AI Waterfall — 4 Adaptive Routes">
+  <rect width="960" height="540" fill="#070b14"/>
+  <rect x="12" y="12" width="936" height="516" rx="12" fill="#0b1120" stroke="#1e293b" stroke-width="1.5"/>
+  <path d="M12 24 Q12 12 24 12 L936 12 Q948 12 948 24 L948 48 L12 48 Z" fill="#111827"/>
+  <line x1="12" y1="48" x2="948" y2="48" stroke="#1e293b" stroke-width="1"/>
+  <circle cx="34" cy="30" r="5.5" fill="#f87171"/>
+  <circle cx="54" cy="30" r="5.5" fill="#fbbf24"/>
+  <circle cx="74" cy="30" r="5.5" fill="#34d399"/>
+  <text x="96" y="34" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" font-weight="700" fill="#e2e8f0">Demo 3 — Anti-Waterfall: 4 Adaptive Routes in /classify-task</text>
+  <rect x="708" y="19" width="224" height="22" rx="11" fill="#0f172a" stroke="#38bdf8" stroke-width="1"/>
+  <text x="820" y="34" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" font-weight="700" fill="#38bdf8">4 ROUTES · XSTATE V5</text>
+
+  <!-- Left Pane -->
+  <rect x="26" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M26 70 Q26 62 34 62 L464 62 Q472 62 472 70 L472 88 L26 88 Z" fill="#0f172a"/>
+  <line x1="26" y1="88" x2="472" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="40" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#38bdf8">Case A: 5-Line Bugfix → CODE_ONLY Route</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="40" y="112" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#38bdf8" font-weight="700">/classify-task</tspan></text>
+    <text x="40" y="133" xml:space="preserve"><tspan fill="#f8fafc">  &quot;Fix negative discount clamp in CHK-1.2&quot;</tspan></text>
+    <text x="40" y="154" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="175" xml:space="preserve"><tspan fill="#34d399">✔ Cited requirement: </tspan><tspan fill="#e2e8f0">CHK-1.2 (unchanged)</tspan></text>
+    <text x="40" y="196" xml:space="preserve"><tspan fill="#34d399">✔ Proposed route: </tspan><tspan fill="#38bdf8" font-weight="700">code (CODE_ONLY)</tspan></text>
+    <text x="40" y="217" xml:space="preserve"><tspan fill="#94a3b8">  Skips Behavior &amp; Tech design — zero ceremony.</tspan></text>
+    <text x="40" y="238" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="259" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#f8fafc" font-weight="700">dfl next CODE_ONLY</tspan></text>
+    <text x="40" y="280" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="40" y="301" xml:space="preserve"><tspan fill="#34d399">● Classify</tspan><tspan fill="#38bdf8" font-weight="700"> ──[CODE_ONLY]──▶ </tspan><tspan fill="#38bdf8" font-weight="700">● Implement</tspan></text>
+    <text x="40" y="322" xml:space="preserve"><tspan fill="#475569">                                   │</tspan></text>
+    <text x="40" y="343" xml:space="preserve"><tspan fill="#475569">                                   ▼</tspan></text>
+    <text x="40" y="364" xml:space="preserve"><tspan fill="#94a3b8">                              ○ Dev QA</tspan></text>
+    <text x="40" y="385" xml:space="preserve"><tspan fill="#475569">                                   │</tspan></text>
+    <text x="40" y="406" xml:space="preserve"><tspan fill="#475569">                                   ▼</tspan></text>
+    <text x="40" y="427" xml:space="preserve"><tspan fill="#34d399">                               ○ Ship → Done</tspan></text>
+  </g>
+
+  <!-- Right Pane -->
+  <rect x="488" y="62" width="446" height="422" rx="8" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <path d="M488 70 Q488 62 496 62 L926 62 Q934 62 934 70 L934 88 L488 88 Z" fill="#0f172a"/>
+  <line x1="488" y1="88" x2="934" y2="88" stroke="#1e293b" stroke-width="1"/>
+  <text x="502" y="79" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="700" fill="#34d399">Case B: Streaming CSV Export → full Route</text>
+  <g font-family="'DejaVu Sans Mono', monospace" font-size="11.5">
+    <text x="502" y="112" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#38bdf8" font-weight="700">/classify-task</tspan></text>
+    <text x="502" y="133" xml:space="preserve"><tspan fill="#f8fafc">  &quot;Add streaming CSV order export with PII&quot;</tspan></text>
+    <text x="502" y="154" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="175" xml:space="preserve"><tspan fill="#fbbf24">✔ New business rules + SEC/PERF impact</tspan></text>
+    <text x="502" y="196" xml:space="preserve"><tspan fill="#34d399">✔ Proposed route: </tspan><tspan fill="#34d399" font-weight="700">full (NEXT)</tspan></text>
+    <text x="502" y="217" xml:space="preserve"><tspan fill="#94a3b8">  Engages Gherkin spec + ISO 25010 design.</tspan></text>
+    <text x="502" y="238" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="259" xml:space="preserve"><tspan fill="#34d399">$ </tspan><tspan fill="#f8fafc" font-weight="700">dfl next NEXT</tspan></text>
+    <text x="502" y="280" xml:space="preserve"><tspan fill="undefined"></tspan></text>
+    <text x="502" y="301" xml:space="preserve"><tspan fill="#34d399">✔ Classify</tspan><tspan fill="#64748b"> → </tspan><tspan fill="#38bdf8" font-weight="700">● Behavior</tspan><tspan fill="#94a3b8"> (Given/When/Then)</tspan></text>
+    <text x="502" y="322" xml:space="preserve"><tspan fill="#475569">               │</tspan></text>
+    <text x="502" y="343" xml:space="preserve"><tspan fill="#475569">               ▼</tspan></text>
+    <text x="502" y="364" xml:space="preserve"><tspan fill="#94a3b8">          ○ Tech design (ISO 25010 + DEC-1)</tspan></text>
+    <text x="502" y="385" xml:space="preserve"><tspan fill="#475569">               │</tspan></text>
+    <text x="502" y="406" xml:space="preserve"><tspan fill="#475569">               ▼</tspan></text>
+    <text x="502" y="427" xml:space="preserve"><tspan fill="#94a3b8">          ○ Implement → ○ Dev QA → ○ Ship</tspan></text>
+  </g>
+
+  <!-- Footer -->
+  <text x="26" y="510" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#94a3b8">4 built-in routes: code (bugfix/chore) · behavior (business rules) · design (tech-only) · full (new capability)</text>
+</svg>

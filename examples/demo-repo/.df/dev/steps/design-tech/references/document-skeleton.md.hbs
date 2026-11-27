@@ -1,0 +1,123 @@
+# Tech design document skeleton
+
+Use it to create a feature's `{{vars.techDesignFile}}` or the project baseline, and to decide which
+section a requirement belongs to. Sections 3 to 7 follow their section guides.
+
+## Rules
+
+- Keep the section numbers; leave out a section without applicable content entirely (no empty
+  heading, no "N/A" text: verdicts live in the brief). Section 8 appears once an ID is retired.
+- Every requirement, constraint, decision and entity is defined in exactly one file and one
+  section; elsewhere cite its ID. Rows that hold for every feature belong to the baseline.
+- Feature sections 6 and 7 hold only what differs from the baseline; a refinement cites the
+  `SYS-` ID it refines.
+- Long-lived content only: no ticket keys, request text, people, dates, task progress, open
+  questions, follow-ups or screening verdicts (those live in the brief).
+- Write in the language of the requirement files; IDs, codes and units stay as they are.
+
+## Where requirements go
+
+| Section | Holds | Codes (sub-characteristics) | Also called |
+|---|---|---|---|
+| 1 Context and constraints | the technical context, `CON-n`, `DEC-n` | none | constraints, decisions |
+| 2 Quality requirements and trade-offs | end-to-end targets of the feature, Trade-offs | FUNC, PERF, REL (faultlessness, fault tolerance), SEC, SAFE, COMPL | software architecture quality attributes |
+| 3 Data | logical entities, data requirements | DCONS, PRIV, one-entity rows of other codes | data structure, storage |
+| 4 Interfaces and communication | interface inventory, per-interface requirements | COMP (interoperability), FLEX (replaceability), per-interface PERF, REL, SEC, DCONS | communication patterns, integrations |
+| 5 UI appearance | placement rows, strict rows under `ui-design` | IC, SAFE (hazard warning), FLEX (adaptability) | UI, UX, usability |
+| 6 Deployment and operations | baseline deltas | REL (availability, recoverability), FLEX (scalability, installability), COMP (co-existence), OBS, DEPLOY, COST | infrastructure and operations |
+| 7 Engineering | baseline deltas | MAINT, DX, CICD | code quality and organization, CI/CD |
+| 8 Retired IDs | IDs no longer in force | any | |
+
+When two sections fit, the narrower one wins: a requirement of one interface goes to 4, of one
+entity to 3, of the whole feature to 2.
+
+## Feature document
+
+`{{vars.requirementsDir}}/<feature>/{{vars.techDesignFile}}`:
+
+```markdown
+# <Feature name>: technical requirements
+
+Prefix: CHK · Business rules: [{{vars.requirementsFile}}]({{vars.requirementsFile}}) · Baseline: [{{vars.techDesignFile}}](../{{vars.techDesignFile}})
+
+## 1. Context and constraints
+
+<2 to 4 sentences: what the feature does technically and which systems or features it touches.>
+
+| ID | Constraint | Why it binds |
+|---|---|---|
+| CHK-CON-1 | Orders live in the shop database, whose schema the platform team owns | existing system of record |
+
+### Decisions
+
+**CHK-DEC-1 Exports are produced in the background.**
+- Context: exports of up to 100 000 Orders take longer than a request may last (CHK-PERF-1).
+- Decision: an export runs as a background job; the Customer is notified when it is ready (CHK-4.2).
+- Alternatives: streaming in the request (rejected: proxy limits); nightly files (rejected: stale).
+- Consequences: export status becomes stored state (section 3); failures need an alert (section 6).
+
+## 2. Quality requirements and trade-offs
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+
+Trade-offs:
+- CHK-PERF-1 over CHK-COST-1: <what gives way, and why the user chose it>.
+
+## 3. Data
+
+### <Term>
+### Data requirements
+
+## 4. Interfaces and communication
+
+### Interface inventory
+### Interface requirements
+
+## 5. UI appearance
+
+### Strict UI behaviour
+
+## 6. Deployment and operations
+
+## 7. Engineering
+
+## 8. Retired IDs
+
+| ID | Was | Replaced by | Reason |
+|---|---|---|---|
+| CHK-REL-1 | the Customer restarts a failed export | CHK-REL-4 | background exports retry by themselves (CHK-DEC-1) |
+```
+
+Sections 2, 5, 6 and 7 hold one requirement table each, in the requirement format; `### Strict UI
+behaviour` appears only under `ui-design`.
+
+## Project baseline
+
+`{{vars.requirementsDir}}/{{vars.techDesignFile}}`, created with the user's consent the first time a
+task needs a project-wide item. Same sections and rules, prefix `SYS`:
+
+```markdown
+# Project technical requirements
+
+Prefix: SYS · Features: [README.md](README.md)
+
+## 1. Context and constraints
+Runtime and hosting, data store, users and scale, sensitive data, CI host: SYS-CON-n, SYS-DEC-n.
+## 2. Quality requirements and trade-offs
+Targets every feature inherits: SYS-SEC-1 every write is authorized on the server side.
+## 3. Data
+Conventions every entity follows: identity, time zones, money, default retention.
+## 4. Interfaces and communication
+API style, versioning and deprecation, error outcomes, idempotency of writes.
+## 5. UI appearance
+Accessibility level, supported platforms and browsers, smallest viewport.
+## 6. Deployment and operations
+Environments, deployment units, rollout and rollback, availability, backups, observability, cost.
+## 7. Engineering
+Module boundaries, test levels, CI gates, local setup.
+## 8. Retired IDs
+```
+
+The baseline holds no feature's own rows. A code that a `SYS-` row fully covers for a feature is
+screened as Baseline and gets no feature row.

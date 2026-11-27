@@ -1,0 +1,29 @@
+## Requirements rules
+
+- **Files.** `{{vars.requirementsDir}}/` holds one folder per feature (a business capability named
+  with a kebab-case noun, such as `checkout`). Each folder has a `{{vars.requirementsFile}}`
+  (business rules in Gherkin plus a local glossary) and, when the feature has technical
+  requirements, a `{{vars.techDesignFile}}`. At the root: `README.md` (the index: feature, ID
+  prefix, purpose, coverage), `GLOSSARY.md` (terms shared by several features) and
+  `{{vars.techDesignFile}}` (the project baseline). Never derive a feature from a branch or task
+  name: find it in the index.
+- **Source of truth.** Accepted requirements override the code of the features a task touches:
+  when code and an accepted rule disagree, the code is fixed. Behavior no rule describes is
+  unspecified, not forbidden. A rule changes only in the behavior or tech design step, or through
+  a change request the developer accepted during implementation; never edit code or tests to fit
+  one reading of a rule. Clarify an ambiguous rule with the user before changing code. Conflicts
+  in features outside the task become follow-ups in the brief's hand-off, not fixes.
+- **Context.** Decide from the code first: *greenfield* means no product code yet (only a README,
+  licence, tool configuration or an untouched scaffold); *adoption* means product code exists but
+  the touched behavior has no requirements yet (or `{{vars.requirementsDir}}/` is missing);
+  *brownfield* means both exist. Under adoption, write requirements only for the behavior the task
+  touches and the rules it depends on, and let the user confirm each one (a fast-forward run
+  confirms only those a test or document backs; the rest become follow-ups): existing code can
+  contain bugs that must not become requirements.
+- **IDs.** Each feature has a prefix of 2 to 5 capital letters, registered in the index. Rules are
+  `CHK-7`, scenarios `CHK-7.2`, tech design requirements `CHK-PERF-1` (with the catalog code of
+  their quality attribute), decisions `CHK-DEC-1` and constraints `CHK-CON-1`; the project baseline
+  uses `SYS-`. An ID is the first word of a rule or scenario name. IDs are never reused: a reworded
+  rule keeps its ID, a replaced or removed one is retired (listed with its reason in the
+  Retired IDs section of its file). Tests name the scenario IDs they prove; production code does not.
+  Change requests (`CR-1`) and objectives (`OBJ-1`) live only in the brief, never in test names.

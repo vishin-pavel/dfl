@@ -1,0 +1,10 @@
+{
+  "name": "dfl-sandbox-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pre-initialized frictionless sandbox repository for dfl (devFlow)",
+  "scripts": {
+    "test": "node --test"
+  }
+}

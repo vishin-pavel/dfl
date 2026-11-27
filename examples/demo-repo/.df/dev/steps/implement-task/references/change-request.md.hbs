@@ -1,0 +1,149 @@
+# Change request protocol
+
+Accepted requirements and tech design are settled. During implementation they change only through a
+change request (CR) the developer decides, and every CR stays visible: in the brief, your final
+message, the Dev QA report and the pull request.
+
+1. Stop work on the affected IDs; mark their rows in `## Implementation` as `blocked by CR-n`.
+2. Write the entry in the brief's `## Change requests` (template below).
+3. Decide whether the change can be made in place or must go back (table below); note it in **Impact**.
+4. For an in-place option, draft the exact new text and make it pass the re-check before you ask.
+5. Ask the developer and record the decision.
+6. Act on it: commit the edit, keep the item, go back, or stay pending.
+
+## When to raise one
+
+| Situation | What to do |
+|---|---|
+| A rule or scenario is wrong, contradicts another one, or is impossible or too costly to satisfy | CR |
+| A tech design requirement cannot be met, or its cost is out of proportion | CR |
+| The work needs a business rule or technical requirement the accepted files lack, even one the request asks for | CR |
+| A test that matches an accepted scenario would have to change | CR on the scenario |
+| A rule reads two ways | ask which reading holds; a CR only when the answer changes the wording |
+| Dev QA reported leakage (a ticket key, requester name or request sentence) in a requirement or tech design file | CR, wording only: IDs and meaning kept, the re-check below passes; in place |
+| How to build something the tech design leaves open | no CR: your decision |
+| A violation in a feature outside the task | no CR: a follow-up under **Follow-ups and known gaps** in `## Hand-off to the QA team` |
+
+## Entry template
+
+Number CRs in order; never reuse a number.
+
+```markdown
+### CR-n: <one-line summary>
+
+- **Artifact:** <path> · **ID:** <ID> · **Raised:** implement-task, <date>
+- **Current:** "<exact current text>"
+- **Proposed:** "<exact new text>" | retire <ID>
+- **Evidence:** <test output, code path, constraint, measurement or cost that shows the problem>
+- **Options:**
+  1. Keep as written. Pros: … Cons: …
+  2. <edit in place>. Pros: … Cons: …
+  3. <revise in Behavior or Tech design>. Pros: … Cons: …
+- **Recommendation:** <option>, because …
+- **Impact:** <IDs, tests, other features, tech design sections>; in place | go back (<trigger>)
+- **Decision:** pending | accepted in place <date> | kept as written <date> | sent back with <event> <date>, resolved by <commit>
+```
+
+Filled example:
+
+```markdown
+### CR-2: A refund cannot promise the money within 1 day
+
+- **Artifact:** {{vars.requirementsDir}}/refunds/{{vars.requirementsFile}} · **ID:** REF-3.1 · **Raised:** implement-task, 2026-10-07
+- **Current:** "Then the Customer receives the Refund on the original Payment Method within 1 day"
+- **Proposed:** "Then the Refund is issued to the original Payment Method within 1 day"
+- **Evidence:** the Payment Provider settles refunds in 3 to 5 business days (constraint REF-CON-1);
+  the shop controls only when the Refund is issued, so no implementation can pass the scenario.
+- **Options:**
+  1. Keep as written. Pros: no requirement change. Cons: untestable promise; Dev QA fails it every round.
+  2. Reword REF-3.1 as proposed. Pros: true and testable. Cons: the Customer is not told when the
+     money arrives.
+  3. Revise in Behavior with a new Rule that tells the Customer the settlement time. Pros: sets the
+     right expectation. Cons: a new Rule, another acceptance round.
+- **Recommendation:** 2, with option 3 as a follow-up.
+- **Impact:** REF-3.1 and its test; no other feature, no tech design section; in place (one scenario).
+- **Decision:** accepted in place 2026-10-07
+```
+
+## In place or go back
+
+Edit in place by default. Go back instead when any trigger holds, or whenever the developer prefers:
+
+| Trigger | Event |
+|---|---|
+| A new Rule or a new feature folder is needed | `REVISE_REQUIREMENTS` |
+| A term of the shared GLOSSARY.md, or another feature's requirements, would change | `REVISE_REQUIREMENTS` |
+| More than about 3 scenarios are affected | `REVISE_REQUIREMENTS` |
+| The class or route changes: the task is another class after all, or the edit touches a file whose step the route skipped (requirements on a `code` or `design` route, tech design on a `code` or `behavior` route) | `REVISE_REQUIREMENTS` for requirements, `REVISE_DESIGN` for tech design |
+| A decision `DEC-n` falls, or another feature's tech design or the project baseline would change | `REVISE_DESIGN` |
+| The change needs persisted data, an interface, a UI placement or a quality target no tech design ID covers, or contradicts an N/A verdict of the screening | `REVISE_DESIGN` |
+
+## Re-check the proposed text
+
+Before you ask, the proposed text passes the checks of the step that owns the file; after the edit,
+confirm the file still passes them.
+
+**Requirements file (the Behavior gate checklist):**
+
+- [ ] A reworded rule or scenario keeps its ID; a replaced one gets a new ID and the old one is
+      retired, never reused.
+- [ ] IDs are well formed (`REF-3`, `REF-3.1`, the first word of the name) and unique.
+- [ ] Every Rule still has at least one Scenario, plus a negative one when it rejects something.
+- [ ] Each scenario: one behavior, one When/Then pair, 3 to 5 steps, glossary roles as actors in the
+      third person, errors as business outcomes, no UI or technical words (page, button, click, API,
+      database, …) unless the glossary defines them as domain terms.
+- [ ] Every domain term resolves to the local glossary; a shared term's copy matches GLOSSARY.md.
+- [ ] No rule of the feature contradicts the edited one.
+- [ ] No ticket keys, requester names or request sentences; change-relative words (new, now, no
+      longer, currently, will) shown to the developer in the question.
+- [ ] The index row and the `Coverage:` line stay true.
+- [ ] No-technical-impact check: the edit changes no persisted data, interface, UI placement or
+      quality target. A hit needs a tech design change too: a second CR, or go back per the table.
+
+**Tech design file (the tech design format):**
+
+- [ ] One-liner `[While <state>,] [When <trigger>,] <subject> shall <response> <measure>.` in a row
+      `ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source`.
+- [ ] Verify by is test, bench, static, inspect or ops; Priority is Must or Should; Source is user,
+      existing, baseline, proposed or assumed (kept by a fast-forward run).
+- [ ] A reworded requirement keeps its ID and catalog code (`REF-PERF-1`); a replaced one gets a new
+      ID and the old one moves to the Retired IDs section with its reason (the commit names the CR).
+- [ ] Logical level: no file, class or library version names; a technology only as a constraint. UI
+      rows state placement, not looks, unless the task has the `ui-design` modifier.
+- [ ] The row agrees with the baseline `SYS-` items it refines and with the brief's screening.
+- [ ] No ticket keys, requester names, request sentences or task progress.
+- [ ] The grill below passes; a number you proposed becomes `Source: user` once the developer
+      confirms it in the decision (a fast-forward run keeps it as `Source: assumed`).
+
+## Grill a tech design item
+
+Grill the proposed requirement and every requirement of its section it could conflict with. Put the
+grill questions into the same message as the CR options; the CR decision accepts the section.
+
+{{> td-grill}}
+
+## Ask the developer
+
+Send the entry as a chat message: the problem in one sentence, the options with pros and cons, your
+recommendation, and "Which option? (default: <recommendation>)". Only an explicit answer decides:
+"2", "go with your recommendation", "keep it". Silence, a change of topic or an "ok" to something else
+is not a decision. Record the answer and the date in **Decision**; a fast-forward run takes the Recommendation and writes ` (auto)` after the date.
+
+## Act on the decision
+
+- **Accepted in place:** edit the file, confirm the re-check, and commit the file and the brief (the
+  CR entry with its decision) together and nothing else: `docs(req): CR-n <summary>` or
+  `docs(td): CR-n <summary>`. Dev QA matches every requirement or tech design commit after
+  acceptance to an accepted CR by that `CR-n`, so never fold a CR edit into another commit. Adapt
+  tests and code in the following behavior commits naming the edited ID; a retired ID's test is
+  deleted there, citing the CR.
+- **Kept as written:** implement the item as written. If that stays impossible, say so; never fake a pass.
+- **Sent back:** append a Rework entry (the event, implement-task, numbered items citing `CR-n`
+  with the proposed change and the trigger), commit the brief
+  (`docs(task): CR-n sent back for <task>`) and fire the event. When the work returns, fill in
+  **resolved by** with the owning step's acceptance commit and resume the plan.
+- **No developer reachable** (never in a fast-forward run): leave the decision pending, commit the brief
+  (`docs(task): CR-n pending for <task>`), say what blocks the task and stop without firing an
+  event. The next session starts with this CR.
+
+Your final message lists every CR: number, artifact and ID, one-line change, decision.

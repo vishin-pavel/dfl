@@ -1,0 +1,91 @@
+# Deployment and operations section guide
+
+Use this guide for section 6, Deployment and operations, of a feature's `{{vars.techDesignFile}}`:
+how the feature ships and is rolled back, the availability and recovery it needs, the signals
+operators get and what it may cost. Write only what differs from the project baseline,
+`{{vars.requirementsDir}}/{{vars.techDesignFile}}`: a code screened as Baseline gets no row here,
+and a refinement cites the baseline ID it refines.
+
+## When and which codes
+
+Write it when the feature adds a deployable or a job, needs a rollout or rollback rule, an
+availability or recovery target, alerts or a cost limit beyond the baseline, or shares a host, a
+database or a quota with others.
+
+| Code | Covers here |
+|---|---|
+| REL | availability, recoverability (backups, RPO, RTO), degraded operation |
+| FLEX | scalability (peak and growth), installability (environments, setup on a new host) |
+| COMP | co-existence: shared hosts, databases, connection limits, quotas |
+| OBS | logs, metrics, traces and alerts as questions operators must answer |
+| DEPLOY | deployment unit, environments, rollout, feature flags, rollback, order of data and code changes |
+| COST | spend limits for infrastructure, paid APIs, LLM calls |
+
+Fault tolerance of one interface (timeouts, retries) belongs to section 4. Write each requirement
+once; elsewhere cite its ID.
+
+## What to write
+
+Rows in the [requirement format](../requirement-format.md). Refinements end the Requirement cell
+with `(refines SYS-<CODE>-n)`.
+
+- **Deployment unit:** the feature ships with an existing deployable (named by its role) or in a new
+  one; a new unit is a `DEC-n` in section 1.
+- **Environments:** only what the baseline environments lack (a sandbox of a counterpart in
+  staging).
+- **Rollout and rollback:** behind a flag or not, gradual exposure, how fast a rollback must work,
+  and that data written by the new version survives a rollback (schema changes compatible with
+  the previous release).
+- **Availability and recovery:** a target per month, RPO and RTO for the feature's data, what still
+  works while a dependency is down.
+- **Observability:** what operators must be able to answer, and alerts with a threshold and a
+  window. No personal data in logs unless a PRIV row allows it.
+- **Capacity:** the peak load and the growth the feature must absorb, and how much headroom.
+- **Co-existence:** the share of a host, database or quota the feature may use.
+- **Cost:** a monthly ceiling at the expected load, or a cost per business event.
+
+`Verify by: ops` is for targets only production shows (availability, cost); Dev QA then checks that
+the alert, the SLO or the budget alarm is defined.
+
+## Never write
+
+- Instance types, replica counts, memory or CPU sizes, cluster, account or region names (unless
+  a compliance constraint), environment variable names, CI job names, file names.
+- Dashboard or runbook links, log formats, metric names.
+- Cloud products, monitoring or flag tools, unless a constraint (`CON-n`) or a decision (`DEC-n`).
+- Deployment steps or commands, and the rollout plan of this task (dates, percentages per day):
+  they are not long-lived; the implementation and the hand-off carry them.
+- A copy of a baseline row: cite its ID.
+
+## Greenfield, adoption, brownfield
+
+- **Greenfield:** without a baseline, the answers to the greenfield questions (runtime and hosting,
+  data store, users and scale, sensitive data, CI host) become baseline rows with the user's
+  consent; this section then holds only what the feature needs beyond them. Proposed defaults
+  need the user's confirmation.
+- **Adoption and brownfield:** for the deployable the task touches, read Dockerfiles, compose files,
+  infrastructure code, deployment workflows, environment and flag configuration, health checks,
+  logging, metrics and tracing setup, alert definitions and backup configuration. Record hosting,
+  the deployment unit and tools as `CON-n`; under adoption without a baseline, seed the baseline
+  from them with the user's consent. Today's uptime or alert thresholds are evidence, not targets:
+  ask what the target is.
+- **Editing an existing section:** change rows in place, keep IDs, move removed or replaced rows to
+  section 8, Retired IDs.
+
+## Example
+
+| ID | Sub-characteristic | Requirement | Measure | Verify by | Priority | Source |
+|---|---|---|---|---|---|---|
+| CHK-DEPLOY-1 | Rollback | Fraud scoring shall be switchable off without a deployment; Orders are then placed unscored | off within 5 min | test | Must | user |
+| CHK-REL-3 | Availability | Placing an Order shall be available (refines SYS-REL-1) | 99.95 % per month | ops | Must | user |
+| CHK-OBS-1 | Alerts | When more than 2 % of order placements fail for 5 minutes, the on-call developer shall be alerted | alert defined with this threshold and window | ops | Must | user |
+| CHK-COMP-2 | Co-existence | Checkout shall use at most 10 connections of the shared shop database | ≤ 10 at peak load | bench | Must | existing |
+| CHK-COST-1 | Spend | Fraud scoring calls shall stay within budget | ≤ 200 USD per month at 2 000 Orders per day | ops | Should | user |
+
+## Staleness pitfalls
+
+- Sizing (replicas, memory): state the target the sizing must meet.
+- Today's measured value as a target: ask; a measurement is evidence.
+- A vendor or tool that may change: state the signal and the threshold.
+- Rows that hold for every feature: they belong to the baseline; propose moving them.
+- One-off migration or rollout instructions for this task: not this document.
