@@ -713,7 +713,8 @@ Global options: `--root <dir>`, `--no-color`, `-v/--version`. Step mutations acc
 `--flow <f>` and `--no-sync`; list/status commands accept `--json`.
 
 - Rich output: `@clack/prompts` for wizards/spinners/notes, `picocolors` for colour, Ink (React)
-  for the full-screen flow viewer. Warnings go to stderr. Tables fit `process.stdout.columns`, or
+  for the full-screen flow viewer. Warnings go to stderr. The `agents --json` rows expose accepted aliases as
+  `aliases: string[]`; the existing optional project-level MCP path remains `mcpFile`. Tables fit `process.stdout.columns`, or
   `$COLUMNS` when stdout is not a terminal.
 - All commands work non-interactively (`--yes`, stdin/stdout not a TTY, or `CI` set) and exit
   non-zero on error. Destructive commands (`uninstall`, `flow delete`, `flow pull`, `flow import

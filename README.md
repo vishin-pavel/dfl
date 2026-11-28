@@ -237,6 +237,8 @@ dfl task start PROJ-123                    # Bind a branch & Jira Cloud issue to
 
 All commands support `--json` and `--yes` for non-interactive CI/scripting, plus `DFL_*` environment overrides.
 
+`dfl agents --json` includes each adapter's accepted `aliases` (an empty array if there are none), invocation, skills directory, and `mcpFile` when project-level MCP configuration is supported.
+
 ---
 
 ## Documentation Hub

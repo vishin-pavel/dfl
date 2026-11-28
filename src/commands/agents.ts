@@ -2,7 +2,7 @@
  * `dfl agents`: supported agents, where their skills and MCP config go, detection and selection.
  */
 import type { CommandUnknownOpts } from '@commander-js/extra-typings';
-import { AGENTS, mcpConfigFile } from '../agents/registry.js';
+import { AGENTS, AGENT_ALIASES, mcpConfigFile } from '../agents/registry.js';
 import { getSelectedAgents, isInitialized } from '../core/config.js';
 import { c } from '../ui/colors.js';
 import { print, printJson, printLines, sym, terminalWidth, width as textWidth, wrapItems } from '../ui/output.js';
@@ -18,9 +18,11 @@ export function registerAgentsCommand(program: CommandUnknownOpts, ctx: CliConte
       // Works outside a dfl project too (detection only): the install root rules apply.
       const paths = projectFor(ctx, { forInstall: true });
       const selected = isInitialized(paths) ? getSelectedAgents(paths) : [];
+      const aliases = Object.entries(AGENT_ALIASES);
       const rows = AGENTS.map((agent) => ({
         id: agent.id,
         name: agent.name,
+        aliases: aliases.filter(([, id]) => id === agent.id).map(([alias]) => alias),
         skillsDir: agent.skillsDir,
         invocation: agent.invocation('<skill>'),
         mcpFile: mcpConfigFile(agent, paths.root),
