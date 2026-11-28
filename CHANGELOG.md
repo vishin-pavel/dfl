@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Include supported aliases in `dfl agents --json` without changing agent IDs or MCP config paths.
 - Open-source community and governance documentation: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`, `NOTICE`, and `.github/SUPPORT.md`.
 - GitHub Issue Forms (`bug_report.yml`, `feature_request.yml`, `agent_support.yml`, `config.yml`), Pull Request template, `CODEOWNERS`, `dependabot.yml`, `release.yml`, and PR dependency review workflow (`.github/workflows/dependency-review.yml`).
 - Repository hygiene files: `.editorconfig`, `.gitattributes`, and `.nvmrc`.

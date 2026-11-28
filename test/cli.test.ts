@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { AGENTS, AGENT_ALIASES, mcpConfigFile } from '../src/agents/registry.js';
 import { lockedSwitchActiveFlow, switchActiveFlow } from '../src/commands/shared.js';
 import type { FastForwardStartView } from '../src/core/fastforward/instructions.js';
 import { readFastForwardFile } from '../src/core/fastforward/store.js';
@@ -809,6 +810,25 @@ describe('dfl agents, flow-update, uninstall', () => {
     expect(table.stdout).toContain('Notes');
   });
 
+  it('exposes aliases, invocation and config paths for every agent in JSON', async () => {
+    const root = makeTempDir();
+    const { agents } = await json<{ agents: unknown[] }>(root, 'agents');
+    expect(agents.map((row) => (row as { id: string }).id)).toEqual(AGENTS.map(({ id }) => id));
+    for (const [index, agent] of AGENTS.entries()) {
+      const expected = {
+        id: agent.id,
+        name: agent.name,
+        aliases: Object.entries(AGENT_ALIASES).filter(([, id]) => id === agent.id).map(([alias]) => alias),
+        skillsDir: agent.skillsDir,
+        invocation: agent.id === 'codex' ? '$<skill>' : '/<skill>',
+      };
+      const configPath = mcpConfigFile(agent, root);
+      expect(agents[index]).toMatchObject(expected);
+      if (configPath === undefined) expect(agents[index]).not.toHaveProperty('mcpFile');
+      else expect(agents[index]).toHaveProperty('mcpFile', configPath);
+    }
+  });
+
   it('works outside a dfl project', async () => {
     const root = makeTempDir();
     const { agents } = await json(root, 'agents');
@@ -1337,6 +1357,10 @@ describe('command details', () => {
     const tooWide = lines.filter((line) => [...line].length > 80);
     expect(tooWide).toEqual([]);
     expect(stdout).toMatch(/○\s+✔\s+claude\s+\.claude\/skills\/\s+\/<skill>\s+\.mcp\.json/);
+    expect(stdout).toMatch(/codex\s+\.agents\/skills\/\s+\$<skill>/);
+    for (const { id } of AGENTS) {
+      expect(lines.some((line) => new RegExp(`^\\s+○\\s+(?:✔\\s+)?${id}\\s`).test(line))).toBe(true);
+    }
     expect(stdout).toMatch(/kiro\s+\.kiro\/skills\/\s+\/<skill>\s+\.kiro\/settings\/mcp\.json/);
   });
 });
